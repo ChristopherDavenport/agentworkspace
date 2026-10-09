@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.26 is the floor declared in go.mod; stable is the current release.
+        go: ["1.26.x", "stable"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Build
+        run: make build
+      - name: Module depends on the standard library only
+        run: make deps
+      - name: Vet
+        run: make vet
+      - name: Test
+        run: make test
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # Not stable: staticcheck 2026.2.1 cannot read go1.27.2's export
+          # data (dominikh/go-tools#1832). Back to stable once a release
+          # with the fix is out.
+          go-version: "1.26.x"
+          # The runner's cached 1.26 can lag a security release, which
+          # govulncheck then reports.
+          check-latest: true
+      - name: Check formatting
+        run: make fmt
+      - name: Check go.mod and go.sum are tidy
+        run: make tidy-check
+      - name: staticcheck
+        run: make lint
+      - name: govulncheck
+        run: make vuln
+      - name: Release guard tests
+        run: make guard-test
+
+  # Single required status check for branch protection; it fails if any job
+  # above failed, was cancelled or was skipped.
+  checks:
+    name: Checks
+    if: always()
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every job succeeded
+        run: |
+          echo '${{ toJSON(needs) }}'
+          test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "false"

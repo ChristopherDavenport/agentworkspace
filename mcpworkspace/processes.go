@@ -19,6 +19,7 @@ import (
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/mcpworkspace/wire"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -46,14 +47,26 @@ type Processes struct {
 // NewProcesses answers the process methods, starting processes in ws,
 // which should be an agentworkspace.Starter: on one that is not, every
 // start fails with errors.ErrUnsupported, so a server whose workspace
-// cannot start a process does better to register none.
+// cannot start a process does better to register none. When ws is also
+// an agentworkspace.ServerProvider, it answers the server methods too,
+// each server it starts a process of the session's like any other.
 func NewProcesses(ws agentworkspace.Workspace) *Processes {
 	return &Processes{ws: ws, tables: map[*mcp.ServerSession]*processTable{}}
 }
 
-// Register has srv answer the process methods.
+// Register has srv answer the process methods and, when the workspace
+// offers servers (an agentworkspace.ServerProvider), the server
+// methods.
 func (s *Processes) Register(srv *mcp.Server) error {
+	var servers error
+	if _, ok := s.ws.(agentworkspace.ServerProvider); ok {
+		servers = errors.Join(
+			mcp.AddReceivingCustomMethod(srv, wire.MethodServersList, s.servers),
+			mcp.AddReceivingCustomMethod(srv, wire.MethodServersStart, s.startServer),
+		)
+	}
 	return errors.Join(
+		servers,
 		mcp.AddReceivingCustomMethod(srv, wire.MethodStart, s.start),
 		mcp.AddReceivingCustomMethod(srv, wire.MethodWrite, s.write),
 		mcp.AddReceivingCustomMethod(srv, wire.MethodRead, s.read),
@@ -192,15 +205,54 @@ func (s *Processes) start(_ context.Context, ss *mcp.ServerSession, p *StartPara
 			return nil, fmt.Errorf("environment entry %q is not NAME=value", e)
 		}
 	}
+	cmd := agentworkspace.Command{Args: p.Args, Dir: p.Dir, Env: p.Env, Timeout: time.Duration(p.TimeoutMs) * time.Millisecond}
+	return s.launch(ss, p.Stderr, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {
+		if stderr != nil {
+			cmd.Stream = stderr
+		}
+		return agentworkspace.Start(ctx, s.ws, cmd)
+	})
+}
+
+func (s *Processes) servers(ctx context.Context, _ *mcp.ServerSession, _ *ServersParams) (*ServersResult, error) {
+	list, err := s.ws.(agentworkspace.ServerProvider).Servers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res := &ServersResult{ServerList: wire.ServerList{Servers: make([]wire.ServerInfo, 0, len(list))}}
+	for _, sv := range list {
+		res.Servers = append(res.Servers, wire.ServerInfo{Name: sv.Name, Description: sv.Description})
+	}
+	return res, nil
+}
+
+func (s *Processes) startServer(_ context.Context, ss *mcp.ServerSession, p *ServerStartParams) (*StartResult, error) {
+	if p == nil || !agentworkspace.ValidServerName(p.Name) {
+		return nil, errors.New("no server name, or one agentworkspace.ValidServerName refuses")
+	}
+	sp := s.ws.(agentworkspace.ServerProvider)
+	res, err := s.launch(ss, p.Stderr, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {
+		return sp.StartServer(ctx, p.Name, stderr)
+	})
+	if errors.Is(err, agentworkspace.ErrNoServer) {
+		return nil, &jsonrpc.Error{Code: wire.CodeNoServer, Message: err.Error()}
+	}
+	return res, err
+}
+
+// launch starts a process in ss's table with run, which is handed the
+// table's context and the writer standard error goes to (nil when the
+// session did not ask for it), and returns its id.
+func (s *Processes) launch(ss *mcp.ServerSession, stderr bool, run func(context.Context, io.Writer) (agentworkspace.Process, error)) (*StartResult, error) {
 	t, err := s.table(ss)
 	if err != nil {
 		return nil, err
 	}
-	cmd := agentworkspace.Command{Args: p.Args, Dir: p.Dir, Env: p.Env, Timeout: time.Duration(p.TimeoutMs) * time.Millisecond}
 	sp := &started{stdout: newOutputBuffer(), gone: make(chan struct{}), exited: make(chan struct{})}
-	if p.Stderr {
+	var stream io.Writer
+	if stderr {
 		sp.stderr = newOutputBuffer()
-		cmd.Stream = sp.stderr
+		stream = sp.stderr
 	}
 	// The table is held across the start, which returns at once, so
 	// the count and a session's end see every process.
@@ -212,7 +264,7 @@ func (s *Processes) start(_ context.Context, ss *mcp.ServerSession, p *StartPara
 	case len(t.procs) >= wire.MaxProcesses:
 		return nil, fmt.Errorf("%d processes are open in this session, the most there may be; close one first", wire.MaxProcesses)
 	}
-	proc, err := agentworkspace.Start(t.ctx, s.ws, cmd)
+	proc, err := run(t.ctx, stream)
 	if err != nil {
 		return nil, err
 	}

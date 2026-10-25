@@ -28,6 +28,21 @@
 // another session started is refused as one that does not exist. When
 // the session ends, every process it started ends with it.
 //
+// # Servers
+//
+// A workspace may offer MCP servers of its own (agentworkspace's
+// ServerProvider), each a stdio server it starts by name:
+//
+//	agentworkspace/servers.list  {} -> {servers: [{name, description?}]}
+//	agentworkspace/servers.start {name, stderr?} -> {id}
+//
+// A started server is a process like any other: its id takes the
+// process methods, its standard input and output carry the MCP stream,
+// and it counts toward MaxProcesses in its session. A name the
+// workspace does not offer is refused with CodeNoServer. An MCP server whose workspace
+// offers none need not answer the methods, and a client takes a method
+// not found as no servers.
+//
 // # Files
 //
 // The workspace's files are served read-only under one resource
@@ -74,6 +89,45 @@ const (
 // each call.
 func Methods() []string {
 	return []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose}
+}
+
+// ServersPrefix begins every server method.
+const ServersPrefix = "agentworkspace/servers."
+
+// The server methods.
+const (
+	MethodServersList  = ServersPrefix + "list"
+	MethodServersStart = ServersPrefix + "start"
+)
+
+// ServerMethods are the server methods, in the order above, as a new
+// slice each call.
+func ServerMethods() []string { return []string{MethodServersList, MethodServersStart} }
+
+// ServerInfo is one server servers.list names.
+type ServerInfo struct {
+	// Name is agentworkspace.ValidServerName's.
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// CodeNoServer is the JSON-RPC error code of a servers.start refused
+// because the workspace offers no server by that name, in the range
+// JSON-RPC leaves to an implementation's server errors.
+const CodeNoServer = -32010
+
+// ServerList is servers.list's result.
+type ServerList struct {
+	Servers []ServerInfo `json:"servers"`
+}
+
+// ServerStartArgs is servers.start's parameters; its result is a
+// Started.
+type ServerStartArgs struct {
+	Name string `json:"name"`
+	// Stderr asks for the server's standard error, read as fd 2;
+	// without it, it is discarded.
+	Stderr bool `json:"stderr,omitempty"`
 }
 
 // The bounds of the process methods: processes open at once in one

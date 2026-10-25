@@ -48,12 +48,27 @@ type (
 		wire.Exit
 	}
 	EmptyResult struct{ mcp.ResultBase }
+
+	ServersParams struct {
+		mcp.ParamsBase
+	}
+	ServersResult struct {
+		mcp.ResultBase
+		wire.ServerList
+	}
+	ServerStartParams struct {
+		mcp.ParamsBase
+		wire.ServerStartArgs
+	}
 )
 
-// RegisterClient registers the process methods on c, before it
-// connects; Start needs them on the session's client.
+// RegisterClient registers the process and server methods on c, before
+// it connects; Start, ListServers and StartServer need them on the
+// session's client.
 func RegisterClient(c *mcp.Client) error {
 	return errors.Join(
+		mcp.AddSendingCustomMethod[*ServersParams, *ServersResult](c, wire.MethodServersList),
+		mcp.AddSendingCustomMethod[*ServerStartParams, *StartResult](c, wire.MethodServersStart),
 		mcp.AddSendingCustomMethod[*StartParams, *StartResult](c, wire.MethodStart),
 		mcp.AddSendingCustomMethod[*WriteParams, *EmptyResult](c, wire.MethodWrite),
 		mcp.AddSendingCustomMethod[*ReadParams, *ReadResult](c, wire.MethodRead),

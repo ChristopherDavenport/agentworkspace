@@ -29,6 +29,10 @@ interface.
   without the SDK. The processes are custom methods, never tools. It
   came from dax's executor (`internal/executor`'s `process.go` and
   `files.go`); dax keeps the connection, its redial and its capability.
+  `CommandTransport` and `ServerTransport` are MCP transports to a
+  stdio server started in a workspace, and the server methods
+  (`servers.list`, `servers.start`) carry a `ServerProvider` over the
+  connection.
 - Planned, beside it: the HTTP `remote` client and handler (the
   primitive cut, a whole `Workspace` over HTTP) and a container
   starter.
@@ -57,6 +61,10 @@ them, and a new backend runs the same tables (`backends` in
   and everything it started.
 - `Start` is optional (`Starter`), so a workspace that only stores
   files is still a `Workspace`.
+- So is offering MCP servers (`ServerProvider`): a server it starts
+  keeps `Start`'s lifetime, its name is `ValidServerName`'s, and which
+  servers a session uses is the program's to decide, never the
+  workspace's.
 
 ## Siblings
 

@@ -75,18 +75,12 @@ func Start(ctx context.Context, c Conn, cmd agentworkspace.Command) (agentworksp
 		return nil, errors.New("mcpworkspace: no command")
 	case cmd.Stdin != nil:
 		return nil, errors.New("mcpworkspace: Start takes no Command.Stdin; write to Process.Stdin")
-	case c.Session == nil:
-		return nil, errors.New("mcpworkspace: a Conn with no session")
-	case !c.Bounds.Valid():
-		return nil, fmt.Errorf("mcpworkspace: a bound that is not positive: %+v", c.Bounds)
-	case c.Done == nil:
-		return nil, errors.New("mcpworkspace: a Conn with no Done; the session's close would wait on the process for as long as it runs")
+	}
+	if err := checkConn(c); err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if c.Err == nil {
-		c.Err = func(err error) error { return err }
 	}
 	sctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
@@ -96,15 +90,37 @@ func Start(ctx context.Context, c Conn, cmd agentworkspace.Command) (agentworksp
 	if err != nil {
 		return nil, fmt.Errorf("start %s: %w", cmd.Args[0], err)
 	}
+	return attach(ctx, c, res.ID, cmd.Stream), nil
+}
+
+// checkConn refuses a Conn a process cannot be started over.
+func checkConn(c Conn) error {
+	switch {
+	case c.Session == nil:
+		return errors.New("mcpworkspace: a Conn with no session")
+	case !c.Bounds.Valid():
+		return fmt.Errorf("mcpworkspace: a bound that is not positive: %+v", c.Bounds)
+	case c.Done == nil:
+		return errors.New("mcpworkspace: a Conn with no Done; the session's close would wait on the process for as long as it runs")
+	}
+	return nil
+}
+
+// attach is the process the server started as id over c, its standard
+// error, when stream is set, pumped there, and ended when ctx ends.
+func attach(ctx context.Context, c Conn, id string, stream io.Writer) *process {
+	if c.Err == nil {
+		c.Err = func(err error) error { return err }
+	}
 	p := &process{
-		c: c, id: res.ID,
+		c: c, id: id,
 		maxWrite: min(wire.MaxWriteBytes, c.Bounds.MaxWriteBytes), maxRead: min(wire.MaxReadBytes, c.Bounds.MaxReadBytes),
 		waited: make(chan struct{}), pumped: make(chan struct{}),
 	}
 	p.ctx, p.cancel = context.WithCancel(c.Done)
 	p.in.p, p.out.p = p, p
 	go p.waitFor()
-	if p.stream = cmd.Stream; p.stream != nil {
+	if p.stream = stream; p.stream != nil {
 		go p.pump()
 	} else {
 		close(p.pumped)
@@ -122,7 +138,7 @@ func Start(ctx context.Context, c Conn, cmd agentworkspace.Command) (agentworksp
 	p.mu.Lock()
 	p.stopWatch = stop
 	p.mu.Unlock()
-	return p, nil
+	return p
 }
 
 // ProcessID is the id the server gave p, a process Start started, and

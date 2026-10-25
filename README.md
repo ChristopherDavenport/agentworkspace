@@ -70,6 +70,25 @@ an interface of its own, beside `Workspace` as `fs.ReadLinkFS` is beside
 `fs.FS`, so a workspace that only stores files, or a runtime that runs
 one command at a time, is still a `Workspace`.
 
+## Servers a workspace offers
+
+A workspace may hold MCP servers of its own, such as one installed in a
+container's image or one a host runs beside a sandbox: such a workspace
+is a `ServerProvider`. `Servers` lists them (a `Server` is a name, as
+`ValidServerName` holds it, and a description), and `StartServer` starts
+one by name as a `Process` whose pipes carry the MCP stream, with
+`Start`'s lifetime. A name it does not offer is `ErrNoServer`. Which
+servers a session connects to stays the program's choice. `Offer` makes
+one from a `Starter` and a command per server, for a workspace whose
+servers are programs installed in it:
+
+```go
+ws, err := agentworkspace.Offer(local, []agentworkspace.OfferedServer{
+	{Server: agentworkspace.Server{Name: "rag", Description: "the project's index"},
+		Command: agentworkspace.Command{Args: []string{"rag-mcp", "--stdio"}}},
+})
+```
+
 ## Over MCP: mcpworkspace
 
 `github.com/ChristopherDavenport/agentworkspace/mcpworkspace` is for a
@@ -100,6 +119,26 @@ fsys := mcpworkspace.NewFS(mcpworkspace.SessionSource(cs))
 end()
 cs.Close()
 ```
+
+Two transports connect a program's MCP client to a stdio server in a
+workspace, here or at the other end of the connection, each `Connect`
+starting a new one, so a client that connects again after a server
+ended gets a fresh server:
+
+```go
+// A server the program names a command for, started in the workspace:
+t := mcpworkspace.CommandTransport(ws, agentworkspace.Command{Args: []string{"my-mcp-server"}})
+// A server the workspace offers, by name; over a connection, the
+// workspace there is mcpworkspace.Servers(conn):
+t = mcpworkspace.ServerTransport(mcpworkspace.Servers(conn), "rag", serverLog)
+```
+
+A server the program reaches on its own, on this machine or at a URL,
+needs neither: it is the SDK's command or streamable HTTP transport.
+On the server half, `NewProcesses` answers `agentworkspace/servers.list`
+and `servers.start` when its workspace is a `ServerProvider`; on the
+client half, `ListServers` and `StartServer` call them, and a server
+that does not answer them offers none.
 
 The processes are custom JSON-RPC methods (`agentworkspace/process.*`),
 never tools, so nothing offers them to a model; the files are one

@@ -5,6 +5,32 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added: `ServerProvider`, a workspace that offers MCP servers of its
+  own: `Servers` lists them (`Server`: a name, as `ValidServerName`
+  holds it, and a description) and `StartServer` starts one by name as
+  a `Process` with `Start`'s lifetime; a name not offered is
+  `ErrNoServer`. `Offer` makes one from a `Starter` and a command per
+  server (`OfferedServer`, `Offering`), which copies the commands and
+  refuses a nil workspace. `Local` offers none.
+- Added (mcpworkspace): `CommandTransport` and `ServerTransport`, MCP
+  transports to a stdio server started in a workspace, from a command
+  or by the name the workspace offers it under, each `Connect` starting
+  a new one (from dax's `startTransport`). The server methods
+  `agentworkspace/servers.list` and `servers.start`, which
+  `Processes.Register` answers when its workspace is a
+  `ServerProvider`, a started server being a process of the session's;
+  on the client half `ListServers`, `StartServer` and `Servers` (the
+  workspace at the other end as a `ServerProvider`), with
+  `ServersParams`, `ServersResult` and `ServerStartParams`, which
+  `RegisterClient` now registers too. A server that does not answer
+  the methods offers none.
+- Added (wire): `ServersPrefix`, `MethodServersList`,
+  `MethodServersStart`, `ServerMethods`, `ServerInfo`, `ServerList`,
+  `ServerStartArgs` and `CodeNoServer`, the JSON-RPC error code of a
+  name not offered.
+
 ## v0.0.2 - 2026-10-25
 
 - Added: `mcpworkspace`, a nested module

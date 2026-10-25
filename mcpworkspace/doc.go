@@ -23,11 +23,21 @@
 // ServeFiles serves a file system read-only under wire.FilesURITemplate.
 // NewProcesses answers the process methods for a workspace that is an
 // agentworkspace.Starter, keeping each MCP session's processes apart and
-// ending them with it.
+// ending them with it, and the server methods for one that is an
+// agentworkspace.ServerProvider.
 //
 // # Client
 //
-// RegisterClient adds the process methods to an *mcp.Client before it
-// connects. Start starts a process over a Conn; NewFS reads the files
-// over a Source.
+// RegisterClient adds the process and server methods to an *mcp.Client
+// before it connects. Start starts a process over a Conn; NewFS reads
+// the files over a Source; ListServers and StartServer reach the
+// servers the workspace offers, and Servers is that workspace as an
+// agentworkspace.ServerProvider.
+//
+// # Transports
+//
+// CommandTransport and ServerTransport are mcp.Transports to a stdio
+// MCP server started in a workspace, from a command or by the name the
+// workspace offers it under: on this machine, or at the other end of a
+// connection through the client half.
 package mcpworkspace

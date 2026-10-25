@@ -112,7 +112,15 @@ filter, and so is a secret whose value is empty. The filter is told its
 own copy of the values, once for each stream, and the two are read at
 once; a filter that gives no reader, or panics, fails the start, and one
 that holds standard error back is given a short grace when the server
-ends, past which the rest is dropped.
+ends. Standard error is never forwarded in part: when it cannot be
+filtered whole and in order (the filter more than a megabyte behind,
+so the lag can reach about twice that; the grace past; the filter
+failing) it is cut for the rest of the server's life, after one line of
+this package's own, `agentworkspace: <server>: standard error cut
+(<reason>)`, and nothing of the server's follows. Standard output is
+not cut. A secret holding a newline (a PEM key) is not found on its raw
+spelling by a filter that works a line at a time, as agentredact's
+`secrets` does.
 
 It is a backstop: a value the server encodes otherwise (base64, split
 across messages) passes through, and a very short value ("1", "true")

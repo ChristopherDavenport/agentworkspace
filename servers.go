@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -204,7 +205,10 @@ type offerConfig struct {
 // A secret is replaced wherever its value appears, so a very short one
 // ("1", "true") is replaced inside the server's own JSON-RPC too, which
 // breaks the conversation rather than leak; nothing here holds a value
-// to a length.
+// to a length. A value holding a newline, such as a PEM key, is not
+// found on its raw spelling by a filter that works a line at a time, as
+// agentredact's secrets does (its JSON spellings, with \n escaped, are
+// found); such values are taken, not refused.
 //
 // agentredact's secrets module is the filter this is shaped for, each
 // value replaced in every spelling a JSON encoder writes it in:
@@ -258,16 +262,26 @@ func (o *Offering) Servers(context.Context) ([]Server, error) {
 
 // StartServer starts the server called name from its command. With an
 // OutputFilter, a server that names Secrets has its standard output and
-// its standard error read through the filter. What the filter gives of
-// standard error is written to stderr by the time Wait or Close
-// returns, waiting at most a short grace after the process has exited
-// for the filter to give it; past the grace, what is left is dropped,
-// so a filter that holds on does not hold up the host. Standard error
-// that the workspace writes after its process's Wait returns is
-// dropped too (the queue is closed: io.ErrClosedPipe); Local writes all
-// of it before. So is what comes while the filter is more than a
-// megabyte of standard error behind: the workspace's writes never wait
-// on the filter.
+// its standard error read through the filter.
+//
+// What the filter gives of standard error is written to stderr by the
+// time Wait or Close returns. Nothing reaches stderr that the filter has
+// not seen whole and in order: when standard error cannot be filtered
+// so, it is cut, for the rest of the server's life, after one line of
+// this package's own saying why ("agentworkspace: <server>: standard
+// error cut (<reason>)"), and nothing of the server's comes after it.
+// It is cut when the filter falls behind by more than stderrBacklog (a
+// megabyte; with what the filter is reading, the lag can reach about
+// twice that), so the workspace's writes never wait on the filter; when
+// the filter still holds some of it a short grace after the process has
+// exited, so a filter that holds on does not hold up the host; and when
+// the filter fails or panics. When it is stderr itself that stalls past
+// the grace, Wait and Close return without it, and the notice is
+// written once stderr takes writes again. Standard error the workspace
+// writes after
+// its process's Wait returns is dropped (io.ErrClosedPipe); Local
+// writes all of it before. Standard output is not cut: a filter's
+// failure there is the read's error.
 func (o *Offering) StartServer(ctx context.Context, name string, stderr io.Writer) (Process, error) {
 	s, ok := o.servers[name]
 	if !ok {
@@ -282,58 +296,23 @@ func (o *Offering) StartServer(ctx context.Context, name string, stderr io.Write
 		return o.Start(ctx, cmd)
 	}
 	values := secretValues(s)
-	// Standard error goes to a queue that never blocks the workspace's
-	// writer, so a filter that stops reading cannot hold up the
-	// process's end; the queue feeds a pipe the filter reads.
-	var q *stderrQueue
-	var errR *io.PipeReader
-	drained := make(chan struct{})
-	if stderr == nil {
-		close(drained)
-	} else {
-		var errW *io.PipeWriter
-		errR, errW = io.Pipe()
-		filtered, err := applyFilter(filter, name, values, errR)
-		if err != nil {
-			errR.Close()
+	var se *stderrFilter
+	if stderr != nil {
+		var err error
+		if se, err = newStderrFilter(filter, name, values, stderr); err != nil {
 			return nil, err
 		}
-		q = newStderrQueue()
-		cmd.Stream = q
-		go q.feed(errW)
-		go func() {
-			defer close(drained)
-			if !copyFiltered(stderr, filtered) {
-				// Keep reading, so the queue's feed ends.
-				io.Copy(io.Discard, errR)
-			}
-		}()
-	}
-	// endStderr gives the stderr filter its end of file and waits, at
-	// most filterGrace, for what it holds back; past it, the rest is
-	// dropped.
-	endStderr := func() {
-		if q == nil {
-			return
-		}
-		q.close()
-		t := time.NewTimer(filterGrace)
-		defer t.Stop()
-		select {
-		case <-drained:
-		case <-t.C:
-			errR.CloseWithError(errFilterGrace)
-		}
+		cmd.Stream = se.q
 	}
 	p, err := o.Start(ctx, cmd)
 	if err != nil {
-		endStderr()
+		se.end()
 		return nil, err
 	}
 	stdout, err := applyFilter(filter, name, values, p.Stdout())
 	if err != nil {
 		p.Close()
-		endStderr()
+		se.end()
 		return nil, err
 	}
 	fp := &filteredProcess{Process: p, flushed: make(chan struct{})}
@@ -343,7 +322,7 @@ func (o *Offering) StartServer(ctx context.Context, name string, stderr io.Write
 		// written: the filter is given its end of file and what it
 		// holds back is written out.
 		p.Wait()
-		endStderr()
+		se.end()
 		close(fp.flushed)
 	}()
 	return fp, nil
@@ -354,36 +333,146 @@ func (o *Offering) StartServer(ctx context.Context, name string, stderr io.Write
 // process's output.
 const filterGrace = waitDelay
 
-// errFilterGrace is what the stderr filter reads once its grace is
-// past.
-var errFilterGrace = errors.New("agentworkspace: the output filter held standard error past its grace")
-
-// stderrBacklog is how much of a filtered server's standard error waits
-// for the filter to read it; what comes past it is dropped.
+// stderrBacklog is how much of a filtered server's standard error may
+// wait for the filter to read it; past it, standard error is cut.
 const stderrBacklog = 1 << 20
+
+// errStderrCut is what the stderr filter reads once standard error is
+// cut, and errStderrDone once the copy has ended.
+var (
+	errStderrCut  = errors.New("agentworkspace: standard error cut")
+	errStderrDone = errors.New("agentworkspace: standard error done")
+)
+
+// stderrFilter is a filtered server's standard error: the workspace
+// writes to q, which never blocks; q feeds a pipe the filter reads; and
+// what the filter gives is copied to the caller's writer through a gate
+// that, once cut, forwards nothing more.
+type stderrFilter struct {
+	name    string
+	q       *stderrQueue
+	errR    *io.PipeReader
+	w       io.Writer // the caller's
+	drained chan struct{}
+
+	mu     sync.Mutex
+	cut    atomic.Bool
+	reason string
+}
+
+func newStderrFilter(f OutputFilter, name string, values map[string]string, w io.Writer) (*stderrFilter, error) {
+	errR, errW := io.Pipe()
+	filtered, err := applyFilter(f, name, values, errR)
+	if err != nil {
+		errR.Close()
+		return nil, err
+	}
+	se := &stderrFilter{name: name, errR: errR, w: w, drained: make(chan struct{})}
+	se.q = &stderrQueue{ready: make(chan struct{}, 1), overflow: func() { se.cutFor("the filter fell more than a megabyte behind") }}
+	go se.q.feed(errW)
+	go se.copy(filtered)
+	return se, nil
+}
+
+// cutFor cuts standard error for reason, the first time: nothing more is
+// forwarded, the queue keeps nothing, and the filter's source ends. It
+// never blocks, so the queue may call it from the workspace's write.
+func (se *stderrFilter) cutFor(reason string) {
+	se.mu.Lock()
+	if se.cut.Load() {
+		se.mu.Unlock()
+		return
+	}
+	se.reason = reason
+	se.cut.Store(true)
+	se.mu.Unlock()
+	se.q.discard()
+	se.errR.CloseWithError(errStderrCut)
+}
+
+// copy copies what the filter gives to the caller's writer until the
+// filter ends, then says why standard error was cut, if it was.
+func (se *stderrFilter) copy(r io.Reader) {
+	defer close(se.drained)
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := safeRead(r, buf)
+		if err != nil && err != io.EOF {
+			// What a failing filter gives with its error, such as a
+			// line it held, is not forwarded.
+			se.cutFor("the filter failed")
+		}
+		if n > 0 && !se.cut.Load() {
+			if _, werr := se.w.Write(buf[:n]); werr != nil {
+				se.cutFor("the writer failed")
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	if se.cut.Load() {
+		se.mu.Lock()
+		reason := se.reason
+		se.mu.Unlock()
+		if reason != "the writer failed" {
+			fmt.Fprintf(se.w, "agentworkspace: %s: standard error cut (%s)\n", se.name, reason)
+		}
+	}
+	// The filter may end before its source has: the feed is let go.
+	se.errR.CloseWithError(errStderrDone)
+}
+
+// end gives the filter its end of file and waits, at most filterGrace,
+// for what it holds back; past it, standard error is cut. A nil se is
+// a server without standard error.
+func (se *stderrFilter) end() {
+	if se == nil {
+		return
+	}
+	se.q.close()
+	t := time.NewTimer(filterGrace)
+	defer t.Stop()
+	select {
+	case <-se.drained:
+	case <-t.C:
+		se.cutFor("the filter held it past its grace")
+	}
+}
 
 // stderrQueue is the Command.Stream of a filtered server: Write never
 // blocks, keeping at most stderrBacklog bytes the filter has not read,
-// and feed hands them to the filter's pipe.
+// and feed hands them to the filter's pipe. Past the backlog it calls
+// overflow, and from then on keeps nothing.
 type stderrQueue struct {
-	mu     sync.Mutex
-	buf    []byte
-	closed bool
-	ready  chan struct{}
+	mu       sync.Mutex
+	buf      []byte
+	closed   bool
+	cut      bool
+	ready    chan struct{}
+	overflow func()
 }
-
-func newStderrQueue() *stderrQueue { return &stderrQueue{ready: make(chan struct{}, 1)} }
 
 func (q *stderrQueue) Write(p []byte) (int, error) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	if q.closed {
+		q.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
-	if room := stderrBacklog - len(q.buf); room > 0 {
-		q.buf = append(q.buf, p[:min(len(p), room)]...)
+	if q.cut {
+		q.mu.Unlock()
+		return len(p), nil
 	}
+	if len(q.buf)+len(p) > stderrBacklog {
+		q.cut, q.buf = true, nil
+		q.signal()
+		q.mu.Unlock()
+		q.overflow()
+		return len(p), nil
+	}
+	q.buf = append(q.buf, p...)
 	q.signal()
+	q.mu.Unlock()
 	return len(p), nil
 }
 
@@ -396,6 +485,14 @@ func (q *stderrQueue) close() {
 	q.signal()
 }
 
+// discard keeps nothing more: standard error is cut.
+func (q *stderrQueue) discard() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.cut, q.buf = true, nil
+	q.signal()
+}
+
 // signal wakes feed; q.mu is held.
 func (q *stderrQueue) signal() {
 	select {
@@ -405,13 +502,17 @@ func (q *stderrQueue) signal() {
 }
 
 // feed writes what q holds to w until q is closed and empty, then
-// closes w; a write w refuses, the filter's grace past, ends it.
+// closes w. Once q is cut it feeds nothing more; a write w refuses, the
+// copy over or standard error cut, ends it too.
 func (q *stderrQueue) feed(w *io.PipeWriter) {
 	for {
 		q.mu.Lock()
-		b, closed := q.buf, q.closed
+		b, closed, cut := q.buf, q.closed, q.cut
 		q.buf = nil
 		q.mu.Unlock()
+		if cut {
+			return
+		}
 		if len(b) > 0 {
 			if _, err := w.Write(b); err != nil {
 				return
@@ -441,16 +542,14 @@ func applyFilter(f OutputFilter, name string, values map[string]string, r io.Rea
 	return out, nil
 }
 
-// copyFiltered copies r to w and reports whether it read r to its end:
-// false when w or r failed, a filter's panic among them.
-func copyFiltered(w io.Writer, r io.Reader) (ok bool) {
+// safeRead is r.Read, a panic its error.
+func safeRead(r io.Reader, p []byte) (n int, err error) {
 	defer func() {
-		if recover() != nil {
-			ok = false
+		if v := recover(); v != nil {
+			n, err = 0, fmt.Errorf("agentworkspace: the output filter panicked: %v", v)
 		}
 	}()
-	_, err := io.Copy(w, r)
-	return err == nil
+	return r.Read(p)
 }
 
 // secretValues is the value of each variable s names as a secret, by
@@ -491,19 +590,40 @@ func (p *filteredProcess) Close() error {
 }
 
 // filteredOutput is a filter's reader of a process's standard output,
-// closed as the output is. A filter's panic is the read's error.
+// closed as the output is. A filter's panic is the read's error, and
+// every later read's, the filter not asked again; the output is closed,
+// so the server's writes fail rather than pile up.
 type filteredOutput struct {
 	io.Reader
 	closer io.Closer
+	mu     sync.Mutex
+	err    error
 }
 
-func (f *filteredOutput) Read(p []byte) (n int, err error) {
-	defer func() {
-		if v := recover(); v != nil {
-			n, err = 0, fmt.Errorf("agentworkspace: the output filter panicked: %v", v)
-		}
+func (f *filteredOutput) Read(p []byte) (int, error) {
+	f.mu.Lock()
+	err := f.err
+	f.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	n, panicked := 0, false
+	func() {
+		defer func() {
+			if v := recover(); v != nil {
+				panicked, err = true, fmt.Errorf("agentworkspace: the output filter panicked: %v", v)
+			}
+		}()
+		n, err = f.Reader.Read(p)
 	}()
-	return f.Reader.Read(p)
+	if panicked {
+		f.mu.Lock()
+		f.err = err
+		f.mu.Unlock()
+		f.closer.Close()
+		return 0, err
+	}
+	return n, err
 }
 
 func (f *filteredOutput) Close() error { return f.closer.Close() }

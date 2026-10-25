@@ -20,10 +20,15 @@ versions may break the API.
   without a filter is refused, and so is an empty secret; a nil option
   is skipped. Each filter call gets its own copy of the values; a
   filter that gives no reader or panics fails the start (the server
-  ended), and one that holds standard error back is given a grace
-  (Local's) after the server ends, past which the rest is dropped.
-  Standard error never waits on the filter: past a megabyte behind it
-  is dropped. A backstop: it covers the offered servers' own output,
+  ended), and one that panics reading standard output fails that read
+  and every later one. Standard error is never forwarded in part: the
+  workspace's writes never wait on the filter, and when it cannot be
+  filtered whole and in order (more than a megabyte behind, the lag
+  reaching about twice that; still held a grace, Local's, after the
+  server ends; the filter failing) it is cut for the rest of the
+  server's life, after one notice line of this package's own. A secret
+  holding a newline is not found raw by a line-based filter. A
+  backstop: it covers the offered servers' own output,
   not what the embedded `Starter` runs, so a workspace that also runs a
   client's commands as the same user lets the client read a server's
   environment; offer secret-holding servers from one that runs nothing

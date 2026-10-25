@@ -534,10 +534,14 @@ func TestEachFilterCallHasItsOwnValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var out []byte
 	within(t, 10*time.Second, "the output", func() {
-		io.ReadAll(p.Stdout())
+		out, _ = io.ReadAll(p.Stdout())
 		p.Close()
 	})
+	if string(out) != "out [TOKEN]\n" {
+		t.Errorf("standard output = %q", out)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(seen) != 2 {
@@ -549,3 +553,181 @@ func TestEachFilterCallHasItsOwnValues(t *testing.T) {
 		t.Errorf("standard error = %q", got)
 	}
 }
+
+// longSecret is a token long enough that a cut inside it would leave a
+// recognisable piece.
+const longSecret = "sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef"
+
+// stalledWriter blocks its first Write until release is closed, and
+// keeps what it is given.
+type stalledWriter struct {
+	release chan struct{}
+	once    sync.Once
+	syncBuffer
+}
+
+func (w *stalledWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { <-w.release })
+	return w.syncBuffer.Write(p)
+}
+
+// cutOutput checks what a cut standard error gave: whole lines the
+// filter redacted, then the notice, then nothing; no piece of the
+// secret anywhere.
+func cutOutput(t *testing.T, got, line, reason string) {
+	t.Helper()
+	for i := 4; i <= len(longSecret); i++ {
+		if strings.Contains(got, longSecret[:i]) {
+			t.Fatalf("a piece of the secret, %q, reached the writer", longSecret[:i])
+		}
+	}
+	notice := "agentworkspace: s: standard error cut (" + reason + ")\n"
+	if !strings.HasSuffix(got, notice) {
+		t.Fatalf("standard error does not end with the notice %q:\n%q", notice, got[max(0, len(got)-300):])
+	}
+	for _, l := range strings.SplitAfter(strings.TrimSuffix(got, notice), "\n") {
+		if l != "" && !strings.HasPrefix(l, line) {
+			t.Fatalf("a line that is not a whole redacted one: %q", l)
+		}
+	}
+}
+
+// A filter more than the backlog behind cuts standard error: what it
+// gave whole before the cut, the notice, and nothing after; the server
+// writing on is never blocked and never has a secret split by a gap.
+func TestAnOverflowCutsStandardError(t *testing.T) {
+	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	o, err := Offer(l, []OfferedServer{{
+		Server: Server{Name: "s"},
+		Command: Command{
+			Args: []string{"sh", "-c", `yes "err $TOKEN padding" | head -n 60000 >&2; echo done; exec sleep 1000`},
+			Env:  []string{"TOKEN=" + longSecret},
+		},
+		Secrets: []string{"TOKEN"},
+	}}, WithOutputFilter(func(_ string, secrets map[string]string, r io.Reader) io.Reader {
+		return &replacer{r: bufio.NewReader(r), values: secrets}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &stalledWriter{release: make(chan struct{})}
+	p, err := o.StartServer(context.Background(), "s", w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := bufio.NewReader(p.Stdout())
+	within(t, 30*time.Second, "the server writing past the backlog", func() {
+		if got, err := out.ReadString('\n'); got != "done\n" || err != nil {
+			t.Errorf("standard output = %q, %v", got, err)
+		}
+	})
+	close(w.release)
+	within(t, 30*time.Second, "Close", func() { p.Close() })
+	cutOutput(t, w.String(), "err [TOKEN] padding\n", "the filter fell more than a megabyte behind")
+}
+
+// A filter still holding a partial line, a secret's start, when the
+// grace runs out is cut: the line it held is not written, and nothing
+// after the notice is.
+func TestAGraceCutWritesNothingHeld(t *testing.T) {
+	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	o, err := Offer(l, []OfferedServer{{
+		Server: Server{Name: "s"},
+		Command: Command{
+			Args: []string{"sh", "-c", `printf 'err %s whole\nheld %s' "$TOKEN" "$PART" >&2`},
+			Env:  []string{"TOKEN=" + longSecret, "PART=" + longSecret[:20]},
+		},
+		Secrets: []string{"TOKEN"},
+	}}, WithOutputFilter(func(_ string, secrets map[string]string, r io.Reader) io.Reader {
+		return &replacer{r: bufio.NewReader(r), values: secrets}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &stalledWriter{release: make(chan struct{})}
+	p, err := o.StartServer(context.Background(), "s", w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go io.Copy(io.Discard, p.Stdout())
+	// The writer stalls past the grace: Wait returns once it is over.
+	within(t, filterGrace+15*time.Second, "Wait", func() { p.Wait() })
+	close(w.release)
+	within(t, 15*time.Second, "the notice", func() {
+		for !strings.Contains(w.String(), "standard error cut") {
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	p.Close()
+	got := w.String()
+	cutOutput(t, got, "err [TOKEN] whole\n", "the filter held it past its grace")
+	if strings.Contains(got, "held sk") || strings.HasPrefix(got, "held") || strings.Contains(got, "\nheld") {
+		t.Errorf("the line the filter held reached the writer: %q", got)
+	}
+}
+
+// A filter that ends before its source has does not leave the feed
+// waiting: nothing is left running once the server is closed.
+func TestAFilterEndingEarlyLeavesNoGoroutine(t *testing.T) {
+	var mu sync.Mutex
+	n := 0
+	filter := func(_ string, secrets map[string]string, r io.Reader) io.Reader {
+		mu.Lock()
+		n++
+		first := n == 1
+		mu.Unlock()
+		if first {
+			return strings.NewReader("")
+		}
+		return &replacer{r: bufio.NewReader(r), values: secrets}
+	}
+	o, _, _ := secretServer(t, []string{"sh", "-c", `yes "err $TOKEN" | head -n 20000 >&2; exec sleep 1000`}, filter)
+	before := runtime.NumGoroutine()
+	var stderr syncBuffer
+	p, err := o.StartServer(context.Background(), "s", &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go io.Copy(io.Discard, p.Stdout())
+	time.Sleep(500 * time.Millisecond)
+	within(t, 15*time.Second, "Close", func() { p.Close() })
+	noLeak(t, before)
+}
+
+// A filter that panics reading standard output fails that read and
+// every later one, without being asked again, and the output is closed.
+func TestAStdoutPanicIsSticky(t *testing.T) {
+	var mu sync.Mutex
+	reads := 0
+	filter := func(_ string, secrets map[string]string, r io.Reader) io.Reader {
+		return readerFunc(func(p []byte) (int, error) {
+			mu.Lock()
+			reads++
+			mu.Unlock()
+			panic("a filter's bug")
+		})
+	}
+	o, _, _ := secretServer(t, []string{"sh", "-c", `while echo "out $TOKEN"; do :; done`}, filter)
+	p, err := o.StartServer(context.Background(), "s", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 64)
+	_, err1 := p.Stdout().Read(buf)
+	_, err2 := p.Stdout().Read(buf)
+	if err1 == nil || err2 == nil || err1.Error() != err2.Error() {
+		t.Errorf("reads = %v, %v; want the panic, twice", err1, err2)
+	}
+	mu.Lock()
+	if reads != 1 {
+		t.Errorf("the filter was read %d times, want once", reads)
+	}
+	mu.Unlock()
+	// With its output closed the server's writes fail, and it ends.
+	within(t, 15*time.Second, "the server's end", func() { p.Wait() })
+	p.Close()
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }

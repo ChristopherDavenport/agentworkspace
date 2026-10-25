@@ -3,7 +3,8 @@
 # permanent: the module proxy and the checksum database keep the version
 # forever, so a mistake can only be retracted, never withdrawn.
 #
-#   scripts/release-guard.sh v0.0.1
+#   scripts/release-guard.sh v0.0.2
+#   scripts/release-guard.sh mcpworkspace/v0.0.2
 #
 # Exits non-zero, with the reason, if the tree is dirty, the tag already
 # exists, or the version does not sort above the current release. When no
@@ -14,11 +15,13 @@
 # until the push, so a refusal costs a git reset --hard HEAD~1 and a git
 # tag -d at worst.
 #
-# This repository is a single module, so every tag is a root tag. The
-# sibling repositories with nested modules carry a longer version of this
-# script that also holds a <dir>/vX.Y.Z tag to its module's go.mod and to
-# the root tag of the same version. If a nested module is ever added
-# here, that is the part to bring over.
+# A nested module's tag, <dir>/vX.Y.Z, is held to the shared version
+# line: at or above the root's release, above the module's own, its
+# go.mod requiring the root at that very version, and the root tag of
+# that version naming this commit. It is only checkable once that root
+# tag exists locally, so run it in the order make release does: guard
+# the root, tag it, then guard and tag each nested module. This half is
+# agenttool's script's, which holds the same line.
 
 set -euo pipefail
 
@@ -119,13 +122,92 @@ case "$TAG" in
     ;;
 
   */v*)
-    die "$TAG names a nested module, and this repository has a single module.
-            Release it as vX.Y.Z, or bring over the nested-module checks
-            from a sibling repository's release-guard.sh first."
+    DIR="${TAG%/v*}"                 # mcpworkspace
+    VERSION="v${TAG##*/v}"           # v0.0.7
+    [ -f "$DIR/go.mod" ] || die "no module at $DIR (expected $DIR/go.mod)"
+
+    # Every published module shares one version line. A nested module
+    # numbered below the newest root drags consumers' root module
+    # backwards: they select the highest nested version available, and
+    # its go.mod then pins the root, through minimal version selection.
+    [ "$(printf '%s\n%s\n' "$LATEST" "$VERSION" | newest)" = "$VERSION" ] \
+      || die "$VERSION sorts below the current root release $LATEST;
+            a nested version under the root silently downgrades consumers.
+            Tag $LATEST or later."
+    ok "$VERSION is at or above the root release $LATEST"
+
+    # And it has to move that module forward too, or the proxy keeps
+    # serving the older content under a version nobody can supersede.
+    DIR_LATEST="$(matching "^$DIR/v" | sed "s|^$DIR/||" | newest)"
+    if [ -n "$DIR_LATEST" ]; then
+      [ "$(printf '%s\n%s\n' "$DIR_LATEST" "$VERSION" | newest)" = "$VERSION" ] \
+        || die "$VERSION does not sort above $DIR's current release $DIR_LATEST"
+      ok "$VERSION is newer than $DIR/$DIR_LATEST"
+    fi
+
+    # The whole invariant, in two checks.
+    #
+    # First: every first-party version this module requires is the
+    # version being tagged. A consumer who takes only this module gets
+    # exactly those versions, so this is what makes the shared version
+    # line mean something rather than being decoration.
+    scripts/versions.sh check "$VERSION" "$DIR" \
+      || die "$DIR does not require its first-party siblings at $VERSION"
+    ok "requires every first-party sibling at $VERSION"
+
+    # Second: the root tag of that version names this very commit. The
+    # require above claims this module was built against root $VERSION;
+    # this is what makes the claim true rather than merely asserted. It
+    # is why there is no build against a published root here — there is
+    # no older root in the picture to drift from.
+    ROOT_TAG_COMMIT="$(git rev-list -n1 "$VERSION" 2>/dev/null || true)"
+    [ -n "$ROOT_TAG_COMMIT" ] \
+      || die "$VERSION is not tagged; the root and its nested modules are tagged from one commit,
+            so tag the root in the same run (make release does this)"
+    [ "$ROOT_TAG_COMMIT" = "$(git rev-parse HEAD)" ] \
+      || die "root $VERSION points at $ROOT_TAG_COMMIT, not HEAD;
+            $DIR would claim to be built against a root it was not built against"
+    ok "root $VERSION is this commit"
+
+    # Build, vet and test it the way a consumer gets it: extracted, with
+    # the replace dropped, so the require line above is resolved from the
+    # proxy rather than from the directory next door.
+    #
+    # This line used to read (cd "$DIR" && GOWORK=off go build ./...),
+    # described as proof the module "is buildable as published". It was
+    # that, once. A nested go.mod carrying replace <root> => .. makes
+    # GOWORK=off resolve the root from the tree, so it became a build of
+    # the tree against itself — make build, run twice — while still
+    # printing ok. check-extracted.sh restores what the line claimed.
+    #
+    # It can only run once the root version is on the proxy, and during
+    # make release it is not: the root tag is written locally and pushed
+    # on the last line. Nothing is lost by skipping it there. The two
+    # checks immediately above have already established that every
+    # first-party require names $VERSION and that root $VERSION is this
+    # commit, so root $VERSION *is* this tree, and make check compiled
+    # $DIR against this tree before the release commit was written. The
+    # extracted build would re-derive that through the proxy. Where it
+    # earns its keep is on a require naming an earlier release, which is
+    # every run outside make release: CI on pull requests and on main,
+    # and make release-guard on a tag whose root is already published.
+    # go list -m reports every module in the workspace, so the root has
+    # to be asked for outside it.
+    MODULE="$(GOWORK=off go list -m)"
+    if [ -z "$(GOWORK=off go list -m -e -f '{{with .Error}}{{.Err}}{{end}}' \
+                 "$MODULE@$VERSION")" ]; then
+      scripts/check-extracted.sh "$DIR" \
+        || die "$DIR does not build against $MODULE@$VERSION as a consumer gets it"
+    else
+      echo "  --  $MODULE@$VERSION is not on the proxy yet, so $DIR cannot be"
+      echo "      built the way a consumer gets it. Root $VERSION is this commit"
+      echo "      and make check compiled $DIR against it, so nothing is unproven;"
+      echo "      the extracted build runs in CI once the tags are pushed."
+    fi
     ;;
 
   *)
-    die "unrecognised tag shape: $TAG (expected vX.Y.Z)"
+    die "unrecognised tag shape: $TAG (expected vX.Y.Z or <dir>/vX.Y.Z)"
     ;;
 esac
 

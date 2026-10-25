@@ -1,8 +1,10 @@
 package mcpworkspace
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -20,6 +22,10 @@ import (
 // process's pipes.
 const serverEnv = "MCPWORKSPACE_TEST_SERVER"
 
+// tokenEnv gives the test server a secret, which its "token" tool
+// tells.
+const tokenEnv = "MCPWORKSPACE_TEST_TOKEN"
+
 func TestMain(m *testing.M) {
 	if os.Getenv(serverEnv) == "1" {
 		srv := mcp.NewServer(&mcp.Implementation{Name: "in-the-workspace", Version: "1"}, nil)
@@ -35,6 +41,12 @@ func TestMain(m *testing.M) {
 			func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
 				return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: strconv.Itoa(os.Getpid())}}}, struct{}{}, nil
 			})
+		if tok := os.Getenv(tokenEnv); tok != "" {
+			mcp.AddTool(srv, &mcp.Tool{Name: "token", Description: "The server's own secret, as a careless server tells it."},
+				func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "my token is " + tok}}}, struct{}{}, nil
+				})
+		}
 		if err := srv.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 			os.Exit(1)
 		}
@@ -277,4 +289,71 @@ func TestTheServerRefusesANameNotOffered(t *testing.T) {
 			t.Errorf("servers.start %q = %v, want a refusal of the name, not CodeNoServer", name, err)
 		}
 	}
+}
+
+// lineFilter is an OutputFilter's reader for the test, as a redactor
+// is: it holds what it reads until a newline, then gives the line with
+// each secret's value written as its name in brackets.
+type lineFilter struct {
+	r      *bufio.Reader
+	values map[string]string
+	buf    []byte
+	err    error
+}
+
+func (f *lineFilter) Read(p []byte) (int, error) {
+	for len(f.buf) == 0 {
+		if f.err != nil {
+			return 0, f.err
+		}
+		line, err := f.r.ReadString('\n')
+		for name, v := range f.values {
+			line = strings.ReplaceAll(line, v, "["+name+"]")
+		}
+		f.buf, f.err = []byte(line), err
+	}
+	n := copy(p, f.buf)
+	f.buf = f.buf[n:]
+	return n, nil
+}
+
+// A server holding a secret, offered through a filter that holds what
+// it reads until a newline, answers over the connection as any other:
+// initialize, tools/list and a call pass the filter whole, and the
+// secret the server tells comes back as its name.
+func TestAFilteredOfferedServerOverTheConnection(t *testing.T) {
+	const secret = "tok-5678-fake"
+	dir := t.TempDir()
+	ws, err := agentworkspace.NewLocal(dir, []string{"PATH=" + os.Getenv("PATH")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ws.Close() })
+	cmd := serverCommand(t)
+	cmd.Env = append(cmd.Env, tokenEnv+"="+secret)
+	o, err := agentworkspace.Offer(ws, []agentworkspace.OfferedServer{
+		{Server: agentworkspace.Server{Name: "secret"}, Command: cmd, Secrets: []string{tokenEnv}},
+	}, agentworkspace.WithOutputFilter(func(_ string, values map[string]string, r io.Reader) io.Reader {
+		return &lineFilter{r: bufio.NewReader(r), values: values}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := serving(t, dir, o)
+	cs, _ := s.connect(t)
+	inner := dial(t, ServerTransport(Servers(conn(t, cs)), "secret", nil))
+	tools, err := inner.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools.Tools) != 3 || tools.Tools[1].Name != "token" {
+		t.Fatalf("tools %+v", tools.Tools)
+	}
+	if got := callText(t, inner, "token"); got != "my token is ["+tokenEnv+"]" {
+		t.Errorf("the token tool said %q, want the secret's name in its place", got)
+	}
+	if got := callText(t, inner, "where"); got != s.ws.Root() {
+		t.Errorf("the server runs in %q, want %q", got, s.ws.Root())
+	}
+	within(t, 15*time.Second, "the server's end", func() { inner.Close() })
 }

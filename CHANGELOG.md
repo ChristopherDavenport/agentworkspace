@@ -16,8 +16,18 @@ versions may break the API.
   server's name and the secrets' values, its standard error written by
   the time `Wait` or `Close` returns. Shaped for agentredact's
   `secrets` module (`secrets.New(values).Reader(r, nil)`), which the
-  root does not import. A backstop, and nothing reads a server's output
-  without a filter (#8).
+  root does not import. `Offer` fails closed: a server naming secrets
+  without a filter is refused, and so is an empty secret; a nil option
+  is skipped. Each filter call gets its own copy of the values; a
+  filter that gives no reader or panics fails the start (the server
+  ended), and one that holds standard error back is given a grace
+  (Local's) after the server ends, past which the rest is dropped.
+  Standard error never waits on the filter: past a megabyte behind it
+  is dropped. A backstop: it covers the offered servers' own output,
+  not what the embedded `Starter` runs, so a workspace that also runs a
+  client's commands as the same user lets the client read a server's
+  environment; offer secret-holding servers from one that runs nothing
+  else for the client (#8).
 
 ## v0.0.3 - 2026-10-25
 

@@ -8,6 +8,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 )
 
 // ErrNoServer is a server name a ServerProvider does not offer.
@@ -78,15 +80,30 @@ type ServerProvider interface {
 // Command.Stream is replaced by StartServer's stderr. A name that is
 // not ValidServerName is an error, and so is a name given twice, and so
 // is a nil ws. A server's Secrets must each name a variable its
-// Command.Env sets exactly once. The commands are copied: changing the
-// slices given changes nothing Offer offers.
+// Command.Env sets exactly once, to a value that is not empty, and a
+// server that names any is refused unless WithOutputFilter is given:
+// nothing would keep them out of its output. A nil option is skipped.
+// The commands are copied: changing the slices given changes nothing
+// Offer offers.
+//
+// The filter covers the offered servers' own output and nothing else.
+// An Offering embeds ws, so its Start and Exec run whatever they are
+// given, unfiltered, as the same user as the servers; a client of a
+// workspace that runs its commands (one served through mcpworkspace's
+// NewProcesses answers both servers.start and process.start) can read
+// a running server's environment, its secrets among it, from
+// /proc/<pid>/environ. Offer secret-holding servers from a workspace
+// that runs nothing else for the client, as dax's box host does with
+// each server a unit in its own container.
 func Offer(ws Starter, servers []OfferedServer, opts ...OfferOption) (*Offering, error) {
 	if ws == nil {
 		return nil, errors.New("agentworkspace: Offer of no workspace")
 	}
 	o := &Offering{Starter: ws, servers: map[string]OfferedServer{}}
 	for _, opt := range opts {
-		opt(o)
+		if opt != nil {
+			opt(&o.config)
+		}
 	}
 	for _, s := range servers {
 		if !ValidServerName(s.Name) {
@@ -101,6 +118,9 @@ func Offer(ws Starter, servers []OfferedServer, opts ...OfferOption) (*Offering,
 		if err := checkSecrets(s); err != nil {
 			return nil, err
 		}
+		if len(s.Secrets) > 0 && o.config.filter == nil {
+			return nil, fmt.Errorf("agentworkspace: server %q names secrets, but no WithOutputFilter keeps them out of its output", s.Name)
+		}
 		// The caller's slices are its own to change after Offer.
 		s.Command.Args = slices.Clone(s.Command.Args)
 		s.Command.Env = slices.Clone(s.Command.Env)
@@ -112,8 +132,8 @@ func Offer(ws Starter, servers []OfferedServer, opts ...OfferOption) (*Offering,
 
 // checkSecrets refuses a server whose Secrets name a variable that is
 // not a variable's name, is named twice, or that its Env does not set
-// exactly once: the value a filter is told of is then the value the
-// server is given.
+// exactly once, or sets to nothing: the value a filter is told of is
+// then the value the server is given, and one a filter can look for.
 func checkSecrets(s OfferedServer) error {
 	seen := map[string]bool{}
 	for _, name := range s.Secrets {
@@ -124,18 +144,20 @@ func checkSecrets(s OfferedServer) error {
 			return fmt.Errorf("agentworkspace: server %q: secret %q named twice", s.Name, name)
 		}
 		seen[name] = true
-		n := 0
+		n, empty := 0, false
 		for _, kv := range s.Command.Env {
-			if strings.HasPrefix(kv, name+"=") {
+			if v, ok := strings.CutPrefix(kv, name+"="); ok {
 				n++
+				empty = v == ""
 			}
 		}
-		switch n {
-		case 0:
+		switch {
+		case n == 0:
 			return fmt.Errorf("agentworkspace: server %q: secret %q is not set in its Env", s.Name, name)
-		case 1:
-		default:
+		case n > 1:
 			return fmt.Errorf("agentworkspace: server %q: secret %q is set %d times in its Env", s.Name, name, n)
+		case empty:
+			return fmt.Errorf("agentworkspace: server %q: secret %q is empty", s.Name, name)
 		}
 	}
 	return nil
@@ -160,15 +182,29 @@ func validEnvName(name string) bool {
 	return true
 }
 
-// An OfferOption changes how an Offering starts its servers.
-type OfferOption func(*Offering)
+// An OfferOption changes how an Offering starts its servers. The
+// options are this package's own, such as WithOutputFilter.
+type OfferOption func(*offerConfig)
+
+// offerConfig is what the options set.
+type offerConfig struct {
+	filter OutputFilter
+}
 
 // An OutputFilter is what a server's output is read through on its way
 // out of an Offering: r is the server's standard output, or its
 // standard error, and secrets are the values of the variables the
-// server names as Secrets, by name. The reader it returns must pass a
-// line on as soon as it has it, since the MCP stream on standard output
-// is a line at a time, and give what it holds back at r's end of file.
+// server names as Secrets, by name, a copy of its own on each call. It
+// is called twice for each start, once for each stream, and the two
+// readers are read at once. The reader it returns must pass a line on
+// as soon as it has it, since the MCP stream on standard output is a
+// line at a time, and give what it holds back at r's end of file. A
+// nil reader is refused: the start fails, and the server is ended.
+//
+// A secret is replaced wherever its value appears, so a very short one
+// ("1", "true") is replaced inside the server's own JSON-RPC too, which
+// breaks the conversation rather than leak; nothing here holds a value
+// to a length.
 //
 // agentredact's secrets module is the filter this is shaped for, each
 // value replaced in every spelling a JSON encoder writes it in:
@@ -183,10 +219,10 @@ type OutputFilter func(server string, secrets map[string]string, r io.Reader) io
 
 // WithOutputFilter has every server that names Secrets started with its
 // standard output and standard error read through f. A server that
-// names none is started as without it, and without a filter nothing
-// reads a server's output for its secrets, whatever it names.
+// names none is started as without it. It covers what the server
+// writes, and nothing else the workspace runs: see Offer.
 func WithOutputFilter(f OutputFilter) OfferOption {
-	return func(o *Offering) { o.filter = f }
+	return func(c *offerConfig) { c.filter = f }
 }
 
 // OfferedServer is one server Offer offers: the Server a client is told
@@ -206,7 +242,7 @@ type OfferedServer struct {
 type Offering struct {
 	Starter
 	servers map[string]OfferedServer
-	filter  OutputFilter
+	config  offerConfig
 }
 
 var _ ServerProvider = (*Offering)(nil)
@@ -222,10 +258,16 @@ func (o *Offering) Servers(context.Context) ([]Server, error) {
 
 // StartServer starts the server called name from its command. With an
 // OutputFilter, a server that names Secrets has its standard output and
-// its standard error read through the filter: what the filter gives of
+// its standard error read through the filter. What the filter gives of
 // standard error is written to stderr by the time Wait or Close
-// returns, for a workspace that, as Local does, has written all of a
-// process's standard error to Command.Stream once its Wait returns.
+// returns, waiting at most a short grace after the process has exited
+// for the filter to give it; past the grace, what is left is dropped,
+// so a filter that holds on does not hold up the host. Standard error
+// that the workspace writes after its process's Wait returns is
+// dropped too (the queue is closed: io.ErrClosedPipe); Local writes all
+// of it before. So is what comes while the filter is more than a
+// megabyte of standard error behind: the workspace's writes never wait
+// on the filter.
 func (o *Offering) StartServer(ctx context.Context, name string, stderr io.Writer) (Process, error) {
 	s, ok := o.servers[name]
 	if !ok {
@@ -235,49 +277,180 @@ func (o *Offering) StartServer(ctx context.Context, name string, stderr io.Write
 	cmd.Args = slices.Clone(cmd.Args)
 	cmd.Env = slices.Clone(cmd.Env)
 	cmd.Stream = stderr
-	if o.filter == nil || len(s.Secrets) == 0 {
+	filter := o.config.filter
+	if filter == nil || len(s.Secrets) == 0 {
 		return o.Start(ctx, cmd)
 	}
 	values := secretValues(s)
-	fp := &filteredProcess{flushed: make(chan struct{})}
-	var errW *io.PipeWriter
+	// Standard error goes to a queue that never blocks the workspace's
+	// writer, so a filter that stops reading cannot hold up the
+	// process's end; the queue feeds a pipe the filter reads.
+	var q *stderrQueue
+	var errR *io.PipeReader
 	drained := make(chan struct{})
 	if stderr == nil {
 		close(drained)
 	} else {
-		var errR *io.PipeReader
+		var errW *io.PipeWriter
 		errR, errW = io.Pipe()
-		cmd.Stream = errW
+		filtered, err := applyFilter(filter, name, values, errR)
+		if err != nil {
+			errR.Close()
+			return nil, err
+		}
+		q = newStderrQueue()
+		cmd.Stream = q
+		go q.feed(errW)
 		go func() {
 			defer close(drained)
-			if _, err := io.Copy(stderr, o.filter(name, values, errR)); err != nil {
-				// Keep reading, or the process blocks writing.
+			if !copyFiltered(stderr, filtered) {
+				// Keep reading, so the queue's feed ends.
 				io.Copy(io.Discard, errR)
 			}
 		}()
 	}
+	// endStderr gives the stderr filter its end of file and waits, at
+	// most filterGrace, for what it holds back; past it, the rest is
+	// dropped.
+	endStderr := func() {
+		if q == nil {
+			return
+		}
+		q.close()
+		t := time.NewTimer(filterGrace)
+		defer t.Stop()
+		select {
+		case <-drained:
+		case <-t.C:
+			errR.CloseWithError(errFilterGrace)
+		}
+	}
 	p, err := o.Start(ctx, cmd)
 	if err != nil {
-		if errW != nil {
-			errW.Close()
-		}
-		<-drained
+		endStderr()
 		return nil, err
 	}
-	fp.Process = p
-	fp.stdout = &filteredOutput{Reader: o.filter(name, values, p.Stdout()), closer: p.Stdout()}
+	stdout, err := applyFilter(filter, name, values, p.Stdout())
+	if err != nil {
+		p.Close()
+		endStderr()
+		return nil, err
+	}
+	fp := &filteredProcess{Process: p, flushed: make(chan struct{})}
+	fp.stdout = &filteredOutput{Reader: stdout, closer: p.Stdout()}
 	go func() {
 		// Once the process has exited, its standard error is all
 		// written: the filter is given its end of file and what it
 		// holds back is written out.
 		p.Wait()
-		if errW != nil {
-			errW.Close()
-		}
-		<-drained
+		endStderr()
 		close(fp.flushed)
 	}()
 	return fp, nil
+}
+
+// filterGrace is how long a filtered server's end waits for the filter
+// to give the rest of its standard error: the grace Local gives a
+// process's output.
+const filterGrace = waitDelay
+
+// errFilterGrace is what the stderr filter reads once its grace is
+// past.
+var errFilterGrace = errors.New("agentworkspace: the output filter held standard error past its grace")
+
+// stderrBacklog is how much of a filtered server's standard error waits
+// for the filter to read it; what comes past it is dropped.
+const stderrBacklog = 1 << 20
+
+// stderrQueue is the Command.Stream of a filtered server: Write never
+// blocks, keeping at most stderrBacklog bytes the filter has not read,
+// and feed hands them to the filter's pipe.
+type stderrQueue struct {
+	mu     sync.Mutex
+	buf    []byte
+	closed bool
+	ready  chan struct{}
+}
+
+func newStderrQueue() *stderrQueue { return &stderrQueue{ready: make(chan struct{}, 1)} }
+
+func (q *stderrQueue) Write(p []byte) (int, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return 0, io.ErrClosedPipe
+	}
+	if room := stderrBacklog - len(q.buf); room > 0 {
+		q.buf = append(q.buf, p[:min(len(p), room)]...)
+	}
+	q.signal()
+	return len(p), nil
+}
+
+// close ends the queue: what it holds is fed, then the pipe's end of
+// file, and a later Write is io.ErrClosedPipe.
+func (q *stderrQueue) close() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.closed = true
+	q.signal()
+}
+
+// signal wakes feed; q.mu is held.
+func (q *stderrQueue) signal() {
+	select {
+	case q.ready <- struct{}{}:
+	default:
+	}
+}
+
+// feed writes what q holds to w until q is closed and empty, then
+// closes w; a write w refuses, the filter's grace past, ends it.
+func (q *stderrQueue) feed(w *io.PipeWriter) {
+	for {
+		q.mu.Lock()
+		b, closed := q.buf, q.closed
+		q.buf = nil
+		q.mu.Unlock()
+		if len(b) > 0 {
+			if _, err := w.Write(b); err != nil {
+				return
+			}
+			continue
+		}
+		if closed {
+			w.Close()
+			return
+		}
+		<-q.ready
+	}
+}
+
+// applyFilter is f's reader of r, for the server called name, told its
+// own copy of values; a nil reader, or a filter that panics, is an
+// error.
+func applyFilter(f OutputFilter, name string, values map[string]string, r io.Reader) (out io.Reader, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			out, err = nil, fmt.Errorf("agentworkspace: server %q: the output filter panicked: %v", name, v)
+		}
+	}()
+	if out = f(name, maps.Clone(values), r); out == nil {
+		return nil, fmt.Errorf("agentworkspace: server %q: the output filter gave no reader", name)
+	}
+	return out, nil
+}
+
+// copyFiltered copies r to w and reports whether it read r to its end:
+// false when w or r failed, a filter's panic among them.
+func copyFiltered(w io.Writer, r io.Reader) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	_, err := io.Copy(w, r)
+	return err == nil
 }
 
 // secretValues is the value of each variable s names as a secret, by
@@ -318,10 +491,19 @@ func (p *filteredProcess) Close() error {
 }
 
 // filteredOutput is a filter's reader of a process's standard output,
-// closed as the output is.
+// closed as the output is. A filter's panic is the read's error.
 type filteredOutput struct {
 	io.Reader
 	closer io.Closer
+}
+
+func (f *filteredOutput) Read(p []byte) (n int, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			n, err = 0, fmt.Errorf("agentworkspace: the output filter panicked: %v", v)
+		}
+	}()
+	return f.Reader.Read(p)
 }
 
 func (f *filteredOutput) Close() error { return f.closer.Close() }

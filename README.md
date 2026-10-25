@@ -107,9 +107,25 @@ ws, err := agentworkspace.Offer(local, []agentworkspace.OfferedServer{
 }))
 ```
 
+`Offer` fails closed: a server that names secrets is refused without a
+filter, and so is a secret whose value is empty. The filter is told its
+own copy of the values, once for each stream, and the two are read at
+once; a filter that gives no reader, or panics, fails the start, and one
+that holds standard error back is given a short grace when the server
+ends, past which the rest is dropped.
+
 It is a backstop: a value the server encodes otherwise (base64, split
-across messages) passes through, and without a filter nothing reads a
-server's output, whatever it names.
+across messages) passes through, and a very short value ("1", "true")
+is replaced inside the server's JSON-RPC too, which breaks the
+conversation rather than leak. It covers the offered servers' own
+output and nothing else: an `Offering` embeds its `Starter`, so its
+`Start` and `Exec` run anything unfiltered, as the same user, and a
+client of a workspace that runs its commands (one served through
+`mcpworkspace.NewProcesses` answers `process.start` as well as
+`servers.start`) can read a running server's environment from
+`/proc/<pid>/environ`. Offer secret-holding servers from a workspace
+that runs nothing else for the client, as dax's box host does, each
+server a unit in its own container.
 
 ## Over MCP: mcpworkspace
 

@@ -4,7 +4,8 @@ Where an agent's tools act: a file tree, processes, a working directory
 and an environment, behind one interface, so the same read, write, edit
 and bash tools run unchanged against a directory on this machine, a
 container or a remote runtime. The module imports the standard library
-alone.
+alone; `mcpworkspace`, a module of its own beside it, carries a
+workspace's processes and files over an MCP connection.
 
 ```go
 ws, err := agentworkspace.NewLocal(dir, env) // env: this process's, credentials removed
@@ -68,6 +69,37 @@ when it exits by itself what it left running goes with it. `Starter` is
 an interface of its own, beside `Workspace` as `fs.ReadLinkFS` is beside
 `fs.FS`, so a workspace that only stores files, or a runtime that runs
 one command at a time, is still a `Workspace`.
+
+## Over MCP: mcpworkspace
+
+`github.com/ChristopherDavenport/agentworkspace/mcpworkspace` is for a
+program whose tools act in a workspace at the other end of an MCP
+connection it already has, such as a sandbox's: the server half answers
+for a `Workspace`, and the client half is that workspace's `Starter` and
+read-only file system on this side. It rides the program's connection
+rather than dialing one, so a program that relays one stream (stdio
+through a container's exec) carries the workspace on it too.
+
+```go
+// In the sandbox, on each session's server:
+mcpworkspace.ServeFiles(srv, ws.FS())
+procs := mcpworkspace.NewProcesses(ws) // ws is a Starter
+err := procs.Register(srv)
+
+// On this side, before the client connects:
+err = mcpworkspace.RegisterClient(client)
+// ... then, once it has:
+p, err := mcpworkspace.Start(ctx, mcpworkspace.Conn{Session: cs, Bounds: wire.DefaultBounds}, cmd)
+fsys := mcpworkspace.NewFS(mcpworkspace.SessionSource(cs))
+```
+
+The processes are custom JSON-RPC methods (`agentworkspace/process.*`),
+never tools, so nothing offers them to a model; the files are one
+read-only resource template, `agentworkspace:///{op}{?path}`. Package
+`mcpworkspace/wire` names the protocol in the standard library alone,
+for a program that only relays or answers the methods. What the
+connection is, how it is authenticated and whether it is made again are
+the program's.
 
 ## Planned
 

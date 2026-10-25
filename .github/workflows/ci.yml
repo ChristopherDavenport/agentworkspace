@@ -22,13 +22,18 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
+          # The root has no go.sum (it needs nothing); the nested modules'
+          # are what to cache.
+          cache-dependency-path: "**/go.sum"
       - name: Build
         run: make build
-      - name: Module depends on the standard library only
+      - name: Root module and mcpworkspace/wire depend on the standard library only
         run: make deps
-      - name: Vet
+      - name: Every first-party require is replaced with the tree
+        run: make replaces
+      - name: Vet (root and nested modules)
         run: make vet
-      - name: Test
+      - name: Test (root and nested modules)
         run: make test
 
   lint:
@@ -45,9 +50,12 @@ jobs:
           # The runner's cached 1.26 can lag a security release, which
           # govulncheck then reports.
           check-latest: true
+          # The root has no go.sum (it needs nothing); the nested modules'
+          # are what to cache.
+          cache-dependency-path: "**/go.sum"
       - name: Check formatting
         run: make fmt
-      - name: Check go.mod and go.sum are tidy
+      - name: Check go.mod and go.sum are tidy in every module
         run: make tidy-check
       - name: staticcheck
         run: make lint
@@ -56,12 +64,33 @@ jobs:
       - name: Release guard tests
         run: make guard-test
 
+  # The one job that resolves a nested module's require lines. Every
+  # other job builds inside the tree, where the replace answers first and
+  # those lines are never read; a consumer reads nothing else.
+  extracted:
+    name: Nested modules build extracted
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The tags, so it can tell whether the tree is still the release
+          # a require names; see check-extracted.sh.
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          # The root has no go.sum (it needs nothing); the nested modules'
+          # are what to cache.
+          cache-dependency-path: "**/go.sum"
+      - name: Every nested module builds against the versions it requires
+        run: make extracted
+
   # Single required status check for branch protection; it fails if any job
   # above failed, was cancelled or was skipped.
   checks:
     name: Checks
     if: always()
-    needs: [test, lint]
+    needs: [test, lint, extracted]
     runs-on: ubuntu-latest
     steps:
       - name: Verify every job succeeded

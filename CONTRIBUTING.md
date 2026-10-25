@@ -20,8 +20,12 @@ is:
 make check        # gofmt, tidy, vet, deps, staticcheck, govulncheck, race tests, guard tests
 ```
 
-The module imports the standard library alone; `make deps` and a test
-fail if anything else creeps in.
+The root module imports the standard library alone, and so does
+`mcpworkspace/wire`; `make deps` and a test fail if anything else creeps
+in. `mcpworkspace` is a nested module, released at the root's version
+from the same commit (`make release` tags both); `make extracted` builds
+it the way a consumer gets it, against the published root, and needs the
+network.
 
 ## Pull requests
 

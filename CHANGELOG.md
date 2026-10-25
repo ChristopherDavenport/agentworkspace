@@ -5,6 +5,35 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added: an offered server's `Secrets`, the variables of its
+  `Command.Env` whose values are secrets (each a variable's name its
+  Env sets exactly once; `Offer` refuses anything else and copies the
+  list), and `Offer`'s options (`OfferOption`), one of them
+  `WithOutputFilter`: an `OutputFilter` that the `Offering` reads such
+  a server's standard output and standard error through, told the
+  server's name and the secrets' values, its standard error written by
+  the time `Wait` or `Close` returns. Shaped for agentredact's
+  `secrets` module (`secrets.New(values).Reader(r, nil)`), which the
+  root does not import. `Offer` fails closed: a server naming secrets
+  without a filter is refused, and so is an empty secret; a nil option
+  is skipped. Each filter call gets its own copy of the values; a
+  filter that gives no reader or panics fails the start (the server
+  ended), and one that panics reading standard output fails that read
+  and every later one. Standard error is never forwarded in part: the
+  workspace's writes never wait on the filter, and when it cannot be
+  filtered whole and in order (more than a megabyte behind, the lag
+  reaching about twice that; still held a grace, Local's, after the
+  server ends; the filter failing) it is cut for the rest of the
+  server's life, after one notice line of this package's own. A secret
+  holding a newline is not found raw by a line-based filter. A
+  backstop: it covers the offered servers' own output,
+  not what the embedded `Starter` runs, so a workspace that also runs a
+  client's commands as the same user lets the client read a server's
+  environment; offer secret-holding servers from one that runs nothing
+  else for the client (#8).
+
 ## v0.0.3 - 2026-10-25
 
 - Added: `ServerProvider`, a workspace that offers MCP servers of its

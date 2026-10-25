@@ -89,6 +89,52 @@ ws, err := agentworkspace.Offer(local, []agentworkspace.OfferedServer{
 })
 ```
 
+A server given a credential names it in `Secrets`, each a variable its
+`Command.Env` sets once, and `WithOutputFilter` has the `Offering` read
+that server's standard output and standard error through a filter told
+the values, so a server that quotes its own token (an env tool, an
+error message) does not hand it to the session. The root imports no
+redactor; agentredact's standard-library-only `secrets` module is the
+filter it is shaped for:
+
+```go
+ws, err := agentworkspace.Offer(local, []agentworkspace.OfferedServer{
+	{Server: agentworkspace.Server{Name: "github"},
+		Command: agentworkspace.Command{Args: []string{"github-mcp", "stdio"}, Env: []string{"GITHUB_TOKEN=" + tok}},
+		Secrets: []string{"GITHUB_TOKEN"}},
+}, agentworkspace.WithOutputFilter(func(_ string, values map[string]string, r io.Reader) io.Reader {
+	return secrets.New(values).Reader(r, nil) // github.com/ChristopherDavenport/agentredact/secrets
+}))
+```
+
+`Offer` fails closed: a server that names secrets is refused without a
+filter, and so is a secret whose value is empty. The filter is told its
+own copy of the values, once for each stream, and the two are read at
+once; a filter that gives no reader, or panics, fails the start, and one
+that holds standard error back is given a short grace when the server
+ends. Standard error is never forwarded in part: when it cannot be
+filtered whole and in order (the filter more than a megabyte behind,
+so the lag can reach about twice that; the grace past; the filter
+failing) it is cut for the rest of the server's life, after one line of
+this package's own, `agentworkspace: <server>: standard error cut
+(<reason>)`, and nothing of the server's follows. Standard output is
+not cut. A secret holding a newline (a PEM key) is not found on its raw
+spelling by a filter that works a line at a time, as agentredact's
+`secrets` does.
+
+It is a backstop: a value the server encodes otherwise (base64, split
+across messages) passes through, and a very short value ("1", "true")
+is replaced inside the server's JSON-RPC too, which breaks the
+conversation rather than leak. It covers the offered servers' own
+output and nothing else: an `Offering` embeds its `Starter`, so its
+`Start` and `Exec` run anything unfiltered, as the same user, and a
+client of a workspace that runs its commands (one served through
+`mcpworkspace.NewProcesses` answers `process.start` as well as
+`servers.start`) can read a running server's environment from
+`/proc/<pid>/environ`. Offer secret-holding servers from a workspace
+that runs nothing else for the client, as dax's box host does, each
+server a unit in its own container.
+
 ## Over MCP: mcpworkspace
 
 `github.com/ChristopherDavenport/agentworkspace/mcpworkspace` is for a

@@ -64,7 +64,17 @@ them, and a new backend runs the same tables (`backends` in
 - So is offering MCP servers (`ServerProvider`): a server it starts
   keeps `Start`'s lifetime, its name is `ValidServerName`'s, and which
   servers a session uses is the program's to decide, never the
-  workspace's.
+  workspace's. A server's secrets are named on its offer and never
+  told to a client; redacting its output is an `OutputFilter`'s, and
+  the root imports no redactor (agentredact's `secrets` module is the
+  one it is shaped for). `Offer` fails closed (secrets without a
+  filter, an empty secret), and a filter that gives no reader, panics
+  in a call or a read, or holds standard error back does not crash or
+  hold up the host (a goroutine of the filter's own is the filter's). The filter covers the server's own output only: an `Offering`
+  embeds its `Starter`, so a workspace that also runs a client's
+  commands as the same user exposes a server's environment; secret
+  holders are offered from a workspace that runs nothing else for the
+  client.
 
 ## Siblings
 

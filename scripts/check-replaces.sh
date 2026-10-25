@@ -18,7 +18,12 @@
 
 set -euo pipefail
 
-MODULE_ROOT="github.com/ChristopherDavenport/agentworkspace"
+# The root module's path, read from the go.mod at the repository's root,
+# where this runs: written out here, the release guard's own tests (whose
+# throwaway repositories have a module path of their own) could not
+# exercise the check.
+MODULE_ROOT="$(sed -n 's/^module[[:space:]]*//p' go.mod | head -1)"
+[ -n "$MODULE_ROOT" ] || { echo "$0: no module line in ./go.mod; run from the repository's root" >&2; exit 1; }
 
 die() { echo "check-replaces: $*" >&2; exit 1; }
 

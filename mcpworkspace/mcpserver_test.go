@@ -45,7 +45,7 @@ func TestAnMCPServerRunsThroughStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := start(t, conn(cs), agentworkspace.Command{Args: []string{exe}, Env: []string{serverEnv + "=1"}})
+	p := start(t, conn(t, cs), agentworkspace.Command{Args: []string{exe}, Env: []string{serverEnv + "=1"}})
 
 	ctx := context.Background()
 	inner, err := mcp.NewClient(&mcp.Implementation{Name: "program", Version: "test"}, nil).

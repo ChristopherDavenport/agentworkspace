@@ -34,22 +34,26 @@ type Conn struct {
 	// read ask for no more than these, nor than wire's constants. Every
 	// bound must be positive.
 	Bounds wire.Bounds
-	// Done, when not nil, ends when the connection is lost or closed:
-	// the process's requests in flight end with it. A program ends it
-	// before it closes the session, since the SDK's close waits for the
-	// requests in flight, and a process's wait, or a read waiting for
-	// output, is one until the process ends. Nil is a connection whose
-	// end the program does not watch: the requests then end with the
-	// processes, or when the session is lost.
+	// Done ends when the connection is lost or is to be closed, and is
+	// required. Ending it ends this side's requests about the process
+	// (its wait, a read waiting for output), not the process: the server
+	// ends that when its session ends. A program ends Done, or closes
+	// every process it started, before it closes Session: the SDK's
+	// close waits for the requests in flight, and a process's wait is
+	// one for as long as the process runs, so the close would wait as
+	// long. A process whose wait Done ended reports Done's cause from
+	// Wait, or os.ErrClosed when Done was ended with no cause of its own.
 	Done context.Context
 	// Lost is the cause Done ends with when the connection was lost, as
 	// against closed: a read or a wait that ends under it is reported
 	// through Err, as the loss it is, and one that ends under any other
 	// cause as the process's close.
 	Lost error
-	// Err, when not nil, is what a failed request's error becomes for
-	// the process's caller, such as a program's word for a lost
-	// connection; nil leaves it as it is.
+	// Err, when not nil, is what a failed request's error about a
+	// started process becomes for the process's caller, such as a
+	// program's word for a lost connection; nil leaves it as it is.
+	// Start's own error is not passed through it: a process that never
+	// started was not lost with the connection.
 	Err func(error) error
 }
 
@@ -61,7 +65,10 @@ type Conn struct {
 // ends with Close, the end of ctx, cmd.Timeout, the end of c.Done or the
 // server's. It lives on c alone: when the connection ends, the server
 // ends the process with its session, and the process's requests fail.
-// cmd.Stdin is refused; write to the process's input instead.
+// cmd.Stdin is refused; write to the process's input instead, and a
+// Conn with no Done is refused (see Conn.Done: end it, or close every
+// process, before closing c.Session). Start's error, when the start
+// request fails, is that request's, as it is.
 func Start(ctx context.Context, c Conn, cmd agentworkspace.Command) (agentworkspace.Process, error) {
 	switch {
 	case len(cmd.Args) == 0:
@@ -72,12 +79,11 @@ func Start(ctx context.Context, c Conn, cmd agentworkspace.Command) (agentworksp
 		return nil, errors.New("mcpworkspace: a Conn with no session")
 	case !c.Bounds.Valid():
 		return nil, fmt.Errorf("mcpworkspace: a bound that is not positive: %+v", c.Bounds)
+	case c.Done == nil:
+		return nil, errors.New("mcpworkspace: a Conn with no Done; the session's close would wait on the process for as long as it runs")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if c.Done == nil {
-		c.Done = context.Background()
 	}
 	if c.Err == nil {
 		c.Err = func(err error) error { return err }
@@ -88,7 +94,7 @@ func Start(ctx context.Context, c Conn, cmd agentworkspace.Command) (agentworksp
 		Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: cmd.Timeout.Milliseconds(), Stderr: cmd.Stream != nil,
 	}})
 	if err != nil {
-		return nil, fmt.Errorf("start %s: %w", cmd.Args[0], c.Err(err))
+		return nil, fmt.Errorf("start %s: %w", cmd.Args[0], err)
 	}
 	p := &process{
 		c: c, id: res.ID,
@@ -154,6 +160,7 @@ type process struct {
 	status    int
 	err       error
 
+	closing  atomic.Bool // set by Close before anything it does ends a request
 	closeOne sync.Once
 	closeErr error
 }
@@ -195,11 +202,21 @@ func (p *process) finish(r *ExitResult, err error) {
 // waitFor waits in the server for the process to exit.
 func (p *process) waitFor() {
 	r, err := mcp.CallCustomMethod[*IDParams, *ExitResult](p.ctx, p.c.Session, wire.MethodWait, &IDParams{ProcessID: wire.ProcessID{ID: p.id}})
-	if err != nil && p.ctx.Err() != nil && !p.lost() {
+	switch {
+	case err == nil:
+	case p.closing.Load():
 		// Close ended the wait; its reply says how the process ended.
 		return
-	}
-	if err != nil {
+	case p.ctx.Err() != nil && !p.lost():
+		// Done ended it, and nothing may close the process: Wait says
+		// so rather than wait for ever.
+		cause := context.Cause(p.ctx)
+		if cause == nil || errors.Is(cause, context.Canceled) {
+			cause = os.ErrClosed
+		}
+		p.finish(nil, cause)
+		return
+	default:
 		// The connection is lost, and the process with it.
 		err = p.c.Err(err)
 	}
@@ -261,6 +278,7 @@ func (p *process) Signal(sig os.Signal) error {
 // exited there and its standard error is written to the stream; then
 // the reads and the wait still in flight end.
 func (p *process) Close() error {
+	p.closing.Store(true)
 	p.closeOne.Do(func() {
 		p.mu.Lock()
 		if p.stopWatch != nil {

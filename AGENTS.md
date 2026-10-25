@@ -25,7 +25,7 @@ interface.
   (`RegisterClient`, `Start` over a `Conn`, `NewFS` over a `Source`) is
   its `Starter` and read-only `fs.FS`. Package `mcpworkspace/wire`, the
   method names, resource template, JSON shapes and bounds, imports the
-  standard library alone (`make deps`), so a relay can name them
+  standard library alone (`make deps` and its `TestImportBoundary`), so a relay can name them
   without the SDK. The processes are custom methods, never tools. It
   came from dax's executor (`internal/executor`'s `process.go` and
   `files.go`); dax keeps the connection, its redial and its capability.

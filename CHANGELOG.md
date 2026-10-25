@@ -17,16 +17,19 @@ versions may break the API.
   (`NewProcesses`, `Register`, `End`, `Close`: the process methods for
   a `Starter`, each MCP session's processes apart and ended with it).
   The client half: `RegisterClient`, `Start` over a `Conn` (the
-  session, the server's bounds, the connection's end and how a lost
-  one is reported), `ProcessID`, and `NewFS` over a `Source`
+  session, the server's bounds, the connection's end, which is
+  required and ends this side's requests before the session closes,
+  and how a lost one is reported), `ProcessID`, and `NewFS` over a `Source`
   (`SessionSource`, `WithTimeout`, `WithName`). The parameter types
   for calling a method directly (`StartParams` and the rest).
 - Added: `mcpworkspace/wire`, the protocol in the standard library
   alone: the method names (`agentworkspace/process.start`, `write`,
   `read`, `closeStdin`, `signal`, `wait`, `close`), `FilesURITemplate`,
-  the file ops and error kinds, the JSON shapes, `Bounds` and the
-  constants, the signal names (`SignalName`), `FileURI` and
-  `ParseFileURI`. Changed from dax's: the names are
+  the file ops (`Ops()`) and error kinds, the JSON shapes, `Bounds`,
+  `DefaultBounds()` and the constants, the signal names (`SignalOf`,
+  `SignalName`), `Methods()`, `FileURI` and `ParseFileURI`; the tables
+  a server checks against are copies, so an importer cannot change
+  them. Changed from dax's: the names are
   `agentworkspace/process.*` and `agentworkspace:///`, not
   `dax/process.*` and `dax-workspace:///`.
 - Changed: the root and `mcpworkspace` are released together, at one

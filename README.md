@@ -88,9 +88,17 @@ err := procs.Register(srv)
 
 // On this side, before the client connects:
 err = mcpworkspace.RegisterClient(client)
-// ... then, once it has:
-p, err := mcpworkspace.Start(ctx, mcpworkspace.Conn{Session: cs, Bounds: wire.DefaultBounds}, cmd)
+// ... then, once it has, with a context that ends with the connection:
+done, end := context.WithCancel(context.Background())
+p, err := mcpworkspace.Start(ctx, mcpworkspace.Conn{Session: cs, Bounds: wire.DefaultBounds(), Done: done}, cmd)
 fsys := mcpworkspace.NewFS(mcpworkspace.SessionSource(cs))
+
+// And to hang up: end Done (or close every process) first, since the
+// session's close waits for the requests in flight and a process's wait
+// is one for as long as it runs. The server ends the processes when the
+// session ends.
+end()
+cs.Close()
 ```
 
 The processes are custom JSON-RPC methods (`agentworkspace/process.*`),

@@ -29,7 +29,7 @@ import (
 func TestAProcessOverTheConnectionEchoes(t *testing.T) {
 	s := newTestServer(t)
 	cs, _ := s.connect(t)
-	c := conn(cs)
+	c := conn(t, cs)
 	p := start(t, c, agentworkspace.Command{Args: []string{"cat"}})
 
 	big := bytes.Repeat([]byte("0123456789abcdef"), (wire.MaxWriteBytes+wire.MaxWriteBytes/2)/16)
@@ -81,7 +81,7 @@ func TestAProcessStandardErrorReachesTheStream(t *testing.T) {
 	s := newTestServer(t)
 	cs, _ := s.connect(t)
 	var stream lockedBuffer
-	p := start(t, conn(cs), agentworkspace.Command{Args: []string{"sh", "-c", "echo oops >&2; echo out"}, Stream: &stream})
+	p := start(t, conn(t, cs), agentworkspace.Command{Args: []string{"sh", "-c", "echo oops >&2; echo out"}, Stream: &stream})
 	out, err := io.ReadAll(p.Stdout())
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +95,7 @@ func TestAProcessStandardErrorReachesTheStream(t *testing.T) {
 		t.Errorf("stderr %q, want oops", got)
 	}
 
-	q := start(t, conn(cs), agentworkspace.Command{Args: []string{"sh", "-c", "echo oops >&2"}})
+	q := start(t, conn(t, cs), agentworkspace.Command{Args: []string{"sh", "-c", "echo oops >&2"}})
 	q.Wait()
 	if _, err := mcp.CallCustomMethod[*ReadParams, *ReadResult](context.Background(), cs, wire.MethodRead, &ReadParams{ReadArgs: wire.ReadArgs{ID: idOf(t, q), FD: 2}}); err == nil {
 		t.Error("read fd 2 of a process started without a stream")
@@ -108,7 +108,7 @@ func TestAProcessStandardErrorReachesTheStream(t *testing.T) {
 func TestClosingAProcessKillsIt(t *testing.T) {
 	s := newTestServer(t)
 	cs, _ := s.connect(t)
-	p := start(t, conn(cs), sleeper)
+	p := start(t, conn(t, cs), sleeper)
 	pid := pidOf(t, p)
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestClosingAProcessKillsIt(t *testing.T) {
 		t.Errorf("status %d, want -1 (a signal)", status)
 	}
 
-	q := start(t, conn(cs), sleeper)
+	q := start(t, conn(t, cs), sleeper)
 	pid = pidOf(t, q)
 	if err := q.Signal(syscall.SIGKILL); err != nil {
 		t.Fatal(err)
@@ -140,7 +140,7 @@ func TestAProcessEndsWithItsContext(t *testing.T) {
 	s := newTestServer(t)
 	cs, _ := s.connect(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	p, err := Start(ctx, conn(cs), sleeper)
+	p, err := Start(ctx, conn(t, cs), sleeper)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +152,105 @@ func TestAProcessEndsWithItsContext(t *testing.T) {
 	gone(t, pid)
 }
 
+// A Conn with no Done is refused: the session's close would wait on
+// the process's wait for as long as it ran.
+func TestAConnWithoutDoneIsRefused(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	c := conn(t, cs)
+	c.Done = nil
+	if _, err := Start(context.Background(), c, agentworkspace.Command{Args: []string{"true"}}); err == nil || !strings.Contains(err.Error(), "no Done") {
+		t.Errorf("start: %v", err)
+	}
+}
+
+// With Done ended, the client's session closes while a process it
+// started still runs: nothing of this side waits on the process. The
+// server ends the process with the session.
+func TestTheSessionClosesOnceDoneEnds(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	done, end := context.WithCancel(context.Background())
+	c := conn(t, cs)
+	c.Done = done
+	p, err := Start(context.Background(), c, sleeper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := pidOf(t, p)
+	go io.Copy(io.Discard, p.Stdout()) // a read waiting for output too
+	end()
+	within(t, 15*time.Second, "the client's close", func() { cs.Close() })
+	gone(t, pid)
+}
+
+// When Done ends the wait and nothing closes the process, Wait returns
+// Done's cause (os.ErrClosed for one without a cause of its own) rather
+// than wait for ever; when Close is what ends it, Wait has the
+// process's own status, which Close's reply carries.
+func TestWaitReturnsWhenDoneEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause error
+		want  error
+	}{
+		{"a cause", errors.New("hung up"), nil},
+		{"no cause", nil, os.ErrClosed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			cs, _ := s.connect(t)
+			done, end := context.WithCancelCause(context.Background())
+			c := conn(t, cs)
+			c.Done = done
+			p, err := Start(context.Background(), c, sleeper)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pidOf(t, p)
+			end(tc.cause)
+			var status int
+			within(t, 10*time.Second, "Wait", func() { status, err = p.Wait() })
+			want := tc.want
+			if want == nil {
+				want = tc.cause
+			}
+			if status != -1 || !errors.Is(err, want) {
+				t.Errorf("wait: %d, %v, want -1, %v", status, err, want)
+			}
+		})
+	}
+	t.Run("Close", func(t *testing.T) {
+		s := newTestServer(t)
+		cs, _ := s.connect(t)
+		// It exits 7 once its input closes, which Close does first.
+		p := start(t, conn(t, cs), agentworkspace.Command{Args: []string{"sh", "-c", "read x; exit 7"}})
+		if err := p.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if status, err := p.Wait(); status != 7 || err != nil {
+			t.Errorf("wait: %d, %v, want 7 and no error", status, err)
+		}
+	})
+}
+
+// A Command.Timeout ends the process at the server, and Wait says it
+// was the timeout.
+func TestAProcessEndsWithItsTimeout(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	cmd := sleeper
+	cmd.Timeout = 200 * time.Millisecond
+	p := start(t, conn(t, cs), cmd)
+	pid := pidOf(t, p)
+	var err error
+	within(t, 15*time.Second, "Wait", func() { _, err = p.Wait() })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("wait: %v, want the deadline", err)
+	}
+	gone(t, pid)
+}
+
 // A session's end, the client gone, ends every process it started. The
 // client ends Done first: a session's close waits for its requests in
 // flight, and a process's wait is one.
@@ -159,7 +258,7 @@ func TestASessionsEndKillsItsProcesses(t *testing.T) {
 	s := newTestServer(t)
 	cs, _ := s.connect(t)
 	done, end := context.WithCancel(context.Background())
-	c := conn(cs)
+	c := conn(t, cs)
 	c.Done = done
 	pid := pidOf(t, start(t, c, sleeper))
 	end()
@@ -175,7 +274,7 @@ func TestCloseEndsTheProcessesAndTheirReads(t *testing.T) {
 		t.Run(how, func(t *testing.T) {
 			s := newTestServer(t)
 			cs, ss := s.connect(t)
-			p := start(t, conn(cs), sleeper)
+			p := start(t, conn(t, cs), sleeper)
 			pid := pidOf(t, p)
 			go io.Copy(io.Discard, p.Stdout()) // a read waiting for output
 			time.Sleep(50 * time.Millisecond)
@@ -188,7 +287,7 @@ func TestCloseEndsTheProcessesAndTheirReads(t *testing.T) {
 			gone(t, pid)
 			if how == "Close" {
 				cs2, _ := s.connect(t)
-				if _, err := Start(context.Background(), conn(cs2), agentworkspace.Command{Args: []string{"true"}}); err == nil || !strings.Contains(err.Error(), "stopping") {
+				if _, err := Start(context.Background(), conn(t, cs2), agentworkspace.Command{Args: []string{"true"}}); err == nil || !strings.Contains(err.Error(), "stopping") {
 					t.Errorf("a start after Close: %v", err)
 				}
 			}
@@ -202,7 +301,7 @@ func TestAnotherSessionsProcessIsRefused(t *testing.T) {
 	s := newTestServer(t)
 	a, _ := s.connect(t)
 	b, _ := s.connect(t)
-	p := start(t, conn(a), agentworkspace.Command{Args: []string{"cat"}})
+	p := start(t, conn(t, a), agentworkspace.Command{Args: []string{"cat"}})
 	id := idOf(t, p)
 	ctx := context.Background()
 	pid := wire.ProcessID{ID: id}
@@ -252,7 +351,7 @@ func TestAnotherSessionsProcessIsRefused(t *testing.T) {
 func TestTheProcessMethodsAreBounded(t *testing.T) {
 	s := newTestServer(t)
 	cs, _ := s.connect(t)
-	c := conn(cs)
+	c := conn(t, cs)
 	ctx := context.Background()
 	var open []agentworkspace.Process
 	for range wire.MaxProcesses {
@@ -317,7 +416,7 @@ func TestTheProcessMethodsAreBounded(t *testing.T) {
 			t.Errorf("a start with %s", name)
 		}
 	}
-	if _, err := Start(ctx, Conn{Session: cs, Bounds: wire.Bounds{MaxProcesses: 1, MaxReadBytes: 1}}, agentworkspace.Command{Args: []string{"true"}}); err == nil {
+	if _, err := Start(ctx, Conn{Session: cs, Bounds: wire.Bounds{MaxProcesses: 1, MaxReadBytes: 1}, Done: context.Background()}, agentworkspace.Command{Args: []string{"true"}}); err == nil {
 		t.Error("a start under a bound of zero")
 	}
 
@@ -340,7 +439,7 @@ func TestTheProcessMethodsAreBounded(t *testing.T) {
 		}
 	})
 	small, _ := connectTo(t, srv)
-	q := start(t, Conn{Session: small, Bounds: wire.Bounds{MaxProcesses: 1, MaxWriteBytes: 3, MaxReadBytes: 2}}, agentworkspace.Command{Args: []string{"cat"}})
+	q := start(t, Conn{Session: small, Bounds: wire.Bounds{MaxProcesses: 1, MaxWriteBytes: 3, MaxReadBytes: 2}, Done: conn(t, small).Done}, agentworkspace.Command{Args: []string{"cat"}})
 	if _, err := q.Stdin().Write([]byte("0123456789")); err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +467,7 @@ func TestAWorkspaceThatCannotStartRefuses(t *testing.T) {
 	s := &testServer{dir: dir, ws: notStarter{ws}, procs: NewProcesses(notStarter{ws})}
 	cs, _ := s.connect(t)
 	sentinel := filepath.Join(dir, "started")
-	_, err = Start(context.Background(), conn(cs), agentworkspace.Command{Args: []string{"touch", sentinel}})
+	_, err = Start(context.Background(), conn(t, cs), agentworkspace.Command{Args: []string{"touch", sentinel}})
 	if err == nil || !strings.Contains(err.Error(), errors.ErrUnsupported.Error()) {
 		t.Errorf("start: %v", err)
 	}
@@ -397,7 +496,7 @@ func TestTheConnectionsEndEndsTheRequests(t *testing.T) {
 			s := newTestServer(t)
 			cs, _ := s.connect(t)
 			done, end := context.WithCancelCause(context.Background())
-			c := conn(cs)
+			c := conn(t, cs)
 			c.Done, c.Lost = done, lost
 			c.Err = func(err error) error {
 				if errors.Is(context.Cause(done), lost) {

@@ -303,7 +303,7 @@ func (s *Processes) signal(_ context.Context, ss *mcp.ServerSession, p *SignalPa
 	if p == nil {
 		return nil, errors.New("no parameters")
 	}
-	sig, ok := wire.Signals[p.Signal]
+	sig, ok := wire.SignalOf(p.Signal)
 	if !ok {
 		return nil, fmt.Errorf("signal %q: want INT, TERM or KILL", p.Signal)
 	}

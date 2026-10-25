@@ -91,9 +91,13 @@ func connectTo(t *testing.T, srv *mcp.Server) (*mcp.ClientSession, *mcp.ServerSe
 	return cs, ss
 }
 
-// conn is cs as a Conn with the default bounds.
-func conn(cs *mcp.ClientSession) Conn {
-	return Conn{Session: cs, Bounds: wire.DefaultBounds}
+// conn is cs as a Conn with the default bounds and a Done ended at the
+// test's end, before cs is closed (connectTo's cleanup runs after it).
+func conn(t *testing.T, cs *mcp.ClientSession) Conn {
+	t.Helper()
+	done, end := context.WithCancel(context.Background())
+	t.Cleanup(end)
+	return Conn{Session: cs, Bounds: wire.DefaultBounds(), Done: done}
 }
 
 // start is Start of cmd over c, failing the test on an error; the

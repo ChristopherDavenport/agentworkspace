@@ -70,8 +70,11 @@ const (
 	MethodClose      = MethodPrefix + "close"
 )
 
-// Methods are the process methods, in the order above.
-var Methods = []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose}
+// Methods are the process methods, in the order above, as a new slice
+// each call.
+func Methods() []string {
+	return []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose}
+}
 
 // The bounds of the process methods: processes open at once in one
 // session, bytes in one write, and bytes in one read's reply.
@@ -91,7 +94,9 @@ type Bounds struct {
 }
 
 // DefaultBounds are the constants as Bounds.
-var DefaultBounds = Bounds{MaxProcesses: MaxProcesses, MaxWriteBytes: MaxWriteBytes, MaxReadBytes: MaxReadBytes}
+func DefaultBounds() Bounds {
+	return Bounds{MaxProcesses: MaxProcesses, MaxWriteBytes: MaxWriteBytes, MaxReadBytes: MaxReadBytes}
+}
 
 // Valid reports whether every bound is positive.
 func (b Bounds) Valid() bool { return b.MaxProcesses > 0 && b.MaxWriteBytes > 0 && b.MaxReadBytes > 0 }
@@ -103,13 +108,22 @@ const (
 	SignalKILL = "KILL"
 )
 
-// Signals are the signals a process may be sent, by name.
-var Signals = map[string]syscall.Signal{SignalINT: syscall.SIGINT, SignalTERM: syscall.SIGTERM, SignalKILL: syscall.SIGKILL}
+// signals are the signals a process may be sent, by name. Unexported,
+// so that what a server accepts cannot be changed by anyone who imports
+// the package.
+var signals = map[string]syscall.Signal{SignalINT: syscall.SIGINT, SignalTERM: syscall.SIGTERM, SignalKILL: syscall.SIGKILL}
+
+// SignalOf is the signal named name on the wire, false for a name that
+// is not INT, TERM or KILL.
+func SignalOf(name string) (syscall.Signal, bool) {
+	s, ok := signals[name]
+	return s, ok
+}
 
 // SignalName is sig's name on the wire, false for a signal that cannot
 // be sent.
 func SignalName(sig syscall.Signal) (string, bool) {
-	for n, s := range Signals {
+	for n, s := range signals {
 		if s == sig {
 			return n, true
 		}
@@ -215,8 +229,11 @@ const (
 	OpRead     = "read"
 )
 
-// Ops are the operations of FilesURITemplate.
-var Ops = []string{OpStat, OpLstat, OpReadDir, OpReadLink, OpRead}
+// ops are the operations of FilesURITemplate.
+var ops = []string{OpStat, OpLstat, OpReadDir, OpReadLink, OpRead}
+
+// Ops are the operations of FilesURITemplate, as a new slice each call.
+func Ops() []string { return slices.Clone(ops) }
 
 // The kinds of a FileError.
 const (
@@ -281,8 +298,8 @@ func ParseFileURI(uri string) (op, name string, err error) {
 		return bad("not a " + FilesURITemplate + " URI")
 	}
 	op = strings.TrimPrefix(u.Path, "/")
-	if !slices.Contains(Ops, op) {
-		return bad(fmt.Sprintf("op %q: want one of %s", op, strings.Join(Ops, ", ")))
+	if !slices.Contains(ops, op) {
+		return bad(fmt.Sprintf("op %q: want one of %s", op, strings.Join(ops, ", ")))
 	}
 	q, err := url.ParseQuery(u.RawQuery)
 	if err != nil {

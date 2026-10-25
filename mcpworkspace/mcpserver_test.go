@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/mcpworkspace/wire"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -156,6 +158,7 @@ func offering(t *testing.T) *testServer {
 	o, err := agentworkspace.Offer(ws, []agentworkspace.OfferedServer{
 		{Server: agentworkspace.Server{Name: "inner", Description: "the test's server"}, Command: serverCommand(t)},
 		{Server: agentworkspace.Server{Name: "noisy"}, Command: agentworkspace.Command{Args: []string{"sh", "-c", "echo hello from noisy >&2; exec cat"}}},
+		{Server: agentworkspace.Server{Name: "sleeper"}, Command: sleeper},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -173,8 +176,8 @@ func TestOfferedServersOverTheConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []agentworkspace.Server{{Name: "inner", Description: "the test's server"}, {Name: "noisy"}}
-	if len(list) != len(want) || list[0] != want[0] || list[1] != want[1] {
+	want := []agentworkspace.Server{{Name: "inner", Description: "the test's server"}, {Name: "noisy"}, {Name: "sleeper"}}
+	if len(list) != len(want) || list[0] != want[0] || list[1] != want[1] || list[2] != want[2] {
 		t.Fatalf("ListServers = %+v, want %+v", list, want)
 	}
 	inner := dial(t, ServerTransport(Servers(c), "inner", nil))
@@ -233,5 +236,45 @@ func TestServersNotOffered(t *testing.T) {
 			p.Close()
 		}
 		t.Errorf("StartServer on a workspace offering none = %v, want ErrNoServer", err)
+	}
+}
+
+// A started server is a process of its MCP session's: the session's end
+// ends it, as it ends a process Start started, with no Close.
+func TestAStartedServerEndsWithItsSession(t *testing.T) {
+	s := offering(t)
+	cs, _ := s.connect(t)
+	done, end := context.WithCancel(context.Background())
+	c := conn(t, cs)
+	c.Done = done
+	p, err := StartServer(context.Background(), c, "sleeper", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := pidOf(t, p)
+	end()
+	within(t, 15*time.Second, "the client's close", func() { cs.Close() })
+	gone(t, pid)
+}
+
+// The server half refuses a name the workspace does not offer with
+// CodeNoServer, and a name no workspace could offer, sent as the raw
+// request since the client refuses it before sending.
+func TestTheServerRefusesANameNotOffered(t *testing.T) {
+	s := offering(t)
+	cs, _ := s.connect(t)
+	ctx := context.Background()
+	for name, wantCode := range map[string]bool{"absent": true, "Not_A_Name": false, "": false} {
+		_, err := mcp.CallCustomMethod[*ServerStartParams, *StartResult](ctx, cs, wire.MethodServersStart,
+			&ServerStartParams{ServerStartArgs: wire.ServerStartArgs{Name: name}})
+		var we *jsonrpc.Error
+		switch {
+		case err == nil:
+			t.Errorf("servers.start %q was taken", name)
+		case wantCode && !(errors.As(err, &we) && we.Code == wire.CodeNoServer):
+			t.Errorf("servers.start %q = %v, want CodeNoServer", name, err)
+		case !wantCode && errors.As(err, &we) && we.Code == wire.CodeNoServer:
+			t.Errorf("servers.start %q = %v, want a refusal of the name, not CodeNoServer", name, err)
+		}
 	}
 }

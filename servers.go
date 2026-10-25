@@ -75,8 +75,13 @@ type ServerProvider interface {
 // commands of its own in the workspace can keep doing so. A server's
 // Command.Stdin is refused when it starts, as Start refuses it, and its
 // Command.Stream is replaced by StartServer's stderr. A name that is
-// not ValidServerName is an error, and so is a name given twice.
+// not ValidServerName is an error, and so is a name given twice, and so
+// is a nil ws. The commands are copied: changing the slices given
+// changes nothing Offer offers.
 func Offer(ws Starter, servers []OfferedServer) (*Offering, error) {
+	if ws == nil {
+		return nil, errors.New("agentworkspace: Offer of no workspace")
+	}
 	o := &Offering{Starter: ws, servers: map[string]OfferedServer{}}
 	for _, s := range servers {
 		if !ValidServerName(s.Name) {
@@ -88,6 +93,9 @@ func Offer(ws Starter, servers []OfferedServer) (*Offering, error) {
 		if len(s.Command.Args) == 0 {
 			return nil, fmt.Errorf("agentworkspace: server %q has no command", s.Name)
 		}
+		// The caller's slices are its own to change after Offer.
+		s.Command.Args = slices.Clone(s.Command.Args)
+		s.Command.Env = slices.Clone(s.Command.Env)
 		o.servers[s.Name] = s
 	}
 	return o, nil

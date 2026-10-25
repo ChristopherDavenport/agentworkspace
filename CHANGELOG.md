@@ -12,7 +12,8 @@ versions may break the API.
   holds it, and a description) and `StartServer` starts one by name as
   a `Process` with `Start`'s lifetime; a name not offered is
   `ErrNoServer`. `Offer` makes one from a `Starter` and a command per
-  server (`OfferedServer`, `Offering`). `Local` offers none.
+  server (`OfferedServer`, `Offering`), which copies the commands and
+  refuses a nil workspace. `Local` offers none.
 - Added (mcpworkspace): `CommandTransport` and `ServerTransport`, MCP
   transports to a stdio server started in a workspace, from a command
   or by the name the workspace offers it under, each `Connect` starting

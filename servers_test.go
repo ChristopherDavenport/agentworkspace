@@ -50,6 +50,32 @@ func TestOfferRefusesABadList(t *testing.T) {
 			t.Errorf("%s: Offer took it", what)
 		}
 	}
+	if _, err := Offer(nil, nil); err == nil {
+		t.Error("Offer of a nil workspace took it")
+	}
+}
+
+// Offer copies the commands: a caller changing its slices afterwards
+// changes nothing a start runs.
+func TestOfferCopiesTheCommands(t *testing.T) {
+	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	args := []string{"sh", "-c", `echo "$MARK"; exec cat`}
+	env := []string{"MARK=offered"}
+	o, err := Offer(l, []OfferedServer{{Server: Server{Name: "s"}, Command: Command{Args: args, Env: env}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args[2], env[0] = "echo changed", "MARK=changed"
+	p, err := o.StartServer(context.Background(), "s", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	within(t, 10*time.Second, "the first line", func() {
+		if got, err := bufio.NewReader(p.Stdout()).ReadString('\n'); got != "offered\n" || err != nil {
+			t.Errorf("first line = %q, %v; want the command as offered", got, err)
+		}
+	})
 }
 
 // syncBuffer is a bytes.Buffer safe for the stream's writer and the

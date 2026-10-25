@@ -5,6 +5,20 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added: an offered server's `Secrets`, the variables of its
+  `Command.Env` whose values are secrets (each a variable's name its
+  Env sets exactly once; `Offer` refuses anything else and copies the
+  list), and `Offer`'s options (`OfferOption`), one of them
+  `WithOutputFilter`: an `OutputFilter` that the `Offering` reads such
+  a server's standard output and standard error through, told the
+  server's name and the secrets' values, its standard error written by
+  the time `Wait` or `Close` returns. Shaped for agentredact's
+  `secrets` module (`secrets.New(values).Reader(r, nil)`), which the
+  root does not import. A backstop, and nothing reads a server's output
+  without a filter (#8).
+
 ## v0.0.3 - 2026-10-25
 
 - Added: `ServerProvider`, a workspace that offers MCP servers of its

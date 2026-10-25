@@ -89,6 +89,28 @@ ws, err := agentworkspace.Offer(local, []agentworkspace.OfferedServer{
 })
 ```
 
+A server given a credential names it in `Secrets`, each a variable its
+`Command.Env` sets once, and `WithOutputFilter` has the `Offering` read
+that server's standard output and standard error through a filter told
+the values, so a server that quotes its own token (an env tool, an
+error message) does not hand it to the session. The root imports no
+redactor; agentredact's standard-library-only `secrets` module is the
+filter it is shaped for:
+
+```go
+ws, err := agentworkspace.Offer(local, []agentworkspace.OfferedServer{
+	{Server: agentworkspace.Server{Name: "github"},
+		Command: agentworkspace.Command{Args: []string{"github-mcp", "stdio"}, Env: []string{"GITHUB_TOKEN=" + tok}},
+		Secrets: []string{"GITHUB_TOKEN"}},
+}, agentworkspace.WithOutputFilter(func(_ string, values map[string]string, r io.Reader) io.Reader {
+	return secrets.New(values).Reader(r, nil) // github.com/ChristopherDavenport/agentredact/secrets
+}))
+```
+
+It is a backstop: a value the server encodes otherwise (base64, split
+across messages) passes through, and without a filter nothing reads a
+server's output, whatever it names.
+
 ## Over MCP: mcpworkspace
 
 `github.com/ChristopherDavenport/agentworkspace/mcpworkspace` is for a

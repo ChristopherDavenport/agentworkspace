@@ -64,7 +64,10 @@ them, and a new backend runs the same tables (`backends` in
 - So is offering MCP servers (`ServerProvider`): a server it starts
   keeps `Start`'s lifetime, its name is `ValidServerName`'s, and which
   servers a session uses is the program's to decide, never the
-  workspace's.
+  workspace's. A server's secrets are named on its offer and never
+  told to a client; redacting its output is an `OutputFilter`'s, and
+  the root imports no redactor (agentredact's `secrets` module is the
+  one it is shaped for).
 
 ## Siblings
 

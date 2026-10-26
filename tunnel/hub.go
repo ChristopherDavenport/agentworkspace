@@ -100,12 +100,13 @@ func WithMaxWorkspaces(n int) HubOption {
 //
 // An upgrade is answered only after the enrollment has named its
 // workspace: one carrying an Origin is refused (403) first, as no
-// browser is a client, then one the enrollment refuses, or every one
-// without an enrollment (401, with the application's challenge,
-// WithChallenge), then one past the bound of workspaces (503). A second connection for a name that is connected replaces the
-// first, which is closed: a host that restarted dials again before the
-// hub has noticed that its old connection is dead, and the newest is
-// the one that is alive. Requests in flight on the replaced connection
+// browser is a client, then one the enrollment refuses or names no
+// valid workspace for, or every one without an enrollment (401, with
+// the application's challenge, WithChallenge), then one past the bound
+// of workspaces (503). A second connection for a name that is
+// connected replaces the first, which is closed: a host that restarted
+// dials again before the hub has noticed that its old connection is
+// dead, and the newest is the one that is alive. Requests in flight on the replaced connection
 // fail. A new connection is taken only once it has answered a request
 // over HTTP/2, within HandshakeTimeout, so a host that upgrades and
 // never speaks HTTP/2 does not take the name from a working one.

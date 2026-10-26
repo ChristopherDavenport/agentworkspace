@@ -5,6 +5,43 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added: `remote` and `tunnel` carry a workspace's offered MCP servers
+  (an `agentworkspace.ServerProvider`, such as an `Offering`). A new
+  scope, `remote.ScopeServers` (`servers`), lists them
+  (`GET /v1/servers`, in the served order) and starts one by name
+  (`POST /v1/sessions/{s}/servers/{name}/start`, with a client-chosen
+  key, an optional standard error stream, and lost-reply cleanup by the
+  key, as a command's start has); the server is a process of the
+  session, served by the process routes, counted by `WithMaxProcesses`,
+  and ended by its lease, `Client.Close` and `Handler.Close`. The served
+  workspace's `StartServer` starts it, so an `Offering`'s `OutputFilter`
+  runs on the serving side and its secrets never cross the wire. `Dial`
+  returns a `*remote.ServerClient` (an `agentworkspace.ServerProvider`)
+  when the served workspace offers servers and the principal holds
+  `servers`, and a `*remote.StarterServerClient` when it may start
+  commands too; `*Client` and `*StarterClient` are as they were, and a
+  type assertion to `Starter` or `ServerProvider` tells the truth in
+  every combination. A name not offered is `agentworkspace.ErrNoServer`
+  on the client (the wire code `no_server`). `servers` and `exec` imply
+  neither the other, so read and servers alone grant a client the
+  servers and no command, the safe way to offer servers that hold
+  secrets. `tunnel.WithScopes` takes `remote.ScopeServers`; its stream
+  arithmetic is unchanged, a server being one of its session's
+  processes. `workspacetest.RunServerProvider` (`ServerProvider`) is
+  the conformance table every `ServerProvider` runs: the list, the
+  pipes, the workspace a server runs in, `ErrNoServer`, the lifetimes,
+  standard error, and secrets kept out of the output; an `Offering` over
+  `Local`, over `remote` and over `tunnel` run it.
+- Changed: `remote`'s session routes take `exec` or `servers`, either
+  one, where they took `exec`, and a process's routes take the scope it
+  was started under: a command's start is `exec`'s, a server's
+  `servers'`, and a principal holding the one is refused
+  (`ErrForbidden`) a process the other started. The info route says
+  whether servers are offered to a principal holding `servers`, and
+  `WithInsecureNoAuth`'s principal holds `servers` too.
+
 ## v0.0.6 - 2026-10-25
 
 - Added: package `workspacetest`, in the root module and on the

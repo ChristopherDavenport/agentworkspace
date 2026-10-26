@@ -16,7 +16,8 @@ interface.
 - Go 1.26 is the floor. The root module holds three packages:
   `agentworkspace`, at the root, `remote`, and `workspacetest`, the
   conformance tables every backend runs (`Run`, `RunStarter`,
-  `Confined`), exported so a nested module's backend runs them too.
+  `RunServerProvider`, `Confined`), exported so a nested module's
+  backend runs them too.
 - The root module imports the standard library alone. `make deps` and
   a test (`TestImportBoundary`, which names the root's packages)
   enforce it. Anything with a dependency is a nested module, and none
@@ -24,19 +25,23 @@ interface.
 - `remote` (`github.com/ChristopherDavenport/agentworkspace/remote`):
   the primitive cut, a whole `Workspace` over HTTP. `NewHandler`
   serves any workspace as an `http.Handler` the program mounts (TLS is
-  the program's); `Dial` returns a `*Client`, or a `*StarterClient`
-  when the served workspace is a `Starter` and the principal holds
-  `exec`, so a type assertion tells the truth. It ships no
+  the program's); `Dial` returns a `*Client`, a `*StarterClient` when
+  the served workspace is a `Starter` and the principal holds `exec`, a
+  `*ServerClient` when it is a `ServerProvider` and the principal holds
+  `servers`, or a `*StarterServerClient` when both hold, so both type
+  assertions tell the truth. It ships no
   authentication: every request is put to the program's
   `Authenticator`, which names its `Principal` and scopes (`read`,
-  `write`, `exec`), and the client's credentials are in the
+  `write`, `exec`, `servers`; `exec` and `servers` imply neither the
+  other, and a process's routes take the scope it was started under),
+  and the client's credentials are in the
   `http.Client` the program gives `WithHTTPClient` (no authenticator
   refuses everything unless `WithInsecureNoAuth`, which answers a
   loopback Host alone; every handler refuses a browser page's request:
   an Origin, a cross-site `Sec-Fetch-Site`, an untyped body). Started
-  processes live in a session the client opens at its first Start and
-  renews on a lease; a lapse, a lease unrenewed on the client's side,
-  or `Close` ends them.
+  processes, and started servers, live in a session the client opens
+  at its first start and renews on a lease; a lapse, a lease unrenewed
+  on the client's side, or `Close` ends them.
   Its bounds are exported constants and options, its wire is in its
   package doc, and it is not the tool-call cut dax's executor uses.
 - `mcpworkspace` (nested module
@@ -75,8 +80,10 @@ interface.
   tunnel at both ends. Its connection window is all its streams'
   windows, and its defaults for remote's bounds keep the streams the
   server can hold open under `MaxStreams` (the arithmetic is on that
-  constant), so no unread output starves a renewal; keep both true
-  when changing either. Offered MCP servers are not carried.
+  constant, and a started server is one of its session's processes),
+  so no unread output starves a renewal; keep both true when changing
+  either. Offered MCP servers cross as remote carries them
+  (`WithScopes` with `remote.ScopeServers`).
 - Planned, beside them: a container starter.
 - Releases are lockstep, as agenttool's: the root and every nested
   module at one version from one commit, a nested module requiring the
@@ -91,8 +98,9 @@ interface.
 
 Every backend, present and planned, holds to these; the tests check
 them, and a new backend runs the same tables: `workspacetest.Run` for
-a `Workspace` and `workspacetest.RunStarter` for a `Starter`, called
-from the backend's own tests, as the root's `confine_test.go` and
+a `Workspace`, `workspacetest.RunStarter` for a `Starter` and
+`workspacetest.RunServerProvider` for a `ServerProvider`, called from
+the backend's own tests, as the root's `confine_test.go` and
 `start_test.go`, remote's `conformance_test.go` and each nested
 module's do. A table belongs in `workspacetest` when every backend
 keeps its rule; one about Local alone stays in the root's tests.
@@ -121,7 +129,12 @@ keeps its rule; one about Local alone stays in the root's tests.
   embeds its `Starter`, so a workspace that also runs a client's
   commands as the same user exposes a server's environment; secret
   holders are offered from a workspace that runs nothing else for the
-  client.
+  client. A backend that carries a `ServerProvider` across a wire
+  (mcpworkspace's server methods, remote's `servers` routes) starts the
+  server on the serving side, so the filter runs there and no secret
+  crosses, and lets a host grant the servers apart from commands, as
+  remote's `servers` scope does without `exec` (mcpworkspace's
+  `NewProcesses` answers both, so there it is what the host serves).
 
 ## Siblings
 

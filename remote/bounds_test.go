@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -300,24 +301,36 @@ func TestNamesThatAreNotUTF8(t *testing.T) {
 	}
 }
 
-// The transfers served at once are bounded: a file whose content is
-// streaming holds one, one more is ErrLimit, and its Close frees it.
-// A session's routes are not counted.
+// The transfers served at once are bounded: an Exec that is running
+// holds one, one more is ErrLimit, and its end frees it. A session's
+// routes are not counted. (A file's content would hold one only while
+// the server is still writing it, which a small file over loopback is
+// not by the time the next request comes.)
 func TestTransfersAreBounded(t *testing.T) {
 	l, dir := newLocal(t, pathEnv())
-	os.WriteFile(filepath.Join(dir, "f"), bytes.Repeat([]byte("x"), 1<<20), 0o644)
+	os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644)
 	h, url := serve(t, l, WithInsecureNoAuth(), WithMaxTransfers(1))
 	if h.Lease() != DefaultLease {
 		t.Errorf("Lease = %v, want the default", h.Lease())
 	}
 	ctx := context.Background()
 	ws := dial(t, url)
-	f, err := ws.FS().Open("f")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Read(make([]byte, 1)); err != nil {
-		t.Fatal(err)
+	hold, release := context.WithCancel(ctx)
+	defer release()
+	// The held Exec says when it runs, through its stream: until then
+	// nothing else is sent, so nothing else can hold the one transfer.
+	ready := &firstWrite{c: make(chan struct{})}
+	held := make(chan error, 1)
+	go func() {
+		_, err := ws.Exec(hold, agentworkspace.Command{Args: []string{"sh", "-c", "echo ready; exec sleep 30"}, Stream: ready})
+		held <- err
+	}()
+	select {
+	case <-ready.c:
+	case err := <-held:
+		t.Fatalf("the held Exec ended first: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the held Exec never ran")
 	}
 	if _, err := fs.ReadFile(ws.FS(), "f"); !errors.Is(err, ErrLimit) {
 		t.Errorf("a read past the bound: %v", err)
@@ -334,8 +347,8 @@ func TestTransfersAreBounded(t *testing.T) {
 	}
 	within(t, 10*time.Second, "the process", func() { p.Wait() })
 	p.Close()
-	f.Close()
-	// The server sees the stream end when its next write fails.
+	release()
+	within(t, 10*time.Second, "the held Exec", func() { <-held })
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		_, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"true"}})
@@ -350,4 +363,15 @@ func TestTransfersAreBounded(t *testing.T) {
 	if _, err := NewHandler(l, WithInsecureNoAuth(), WithMaxTransfers(0)); err == nil {
 		t.Error("made a handler bounding no transfers")
 	}
+}
+
+// firstWrite closes c at its first write.
+type firstWrite struct {
+	once sync.Once
+	c    chan struct{}
+}
+
+func (w *firstWrite) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.c) })
+	return len(p), nil
 }

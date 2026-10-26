@@ -1,7 +1,6 @@
 package agentworkspace
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io/fs"
@@ -55,58 +54,6 @@ func TestANilEnvIsEmpty(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(out.Stdout)); got != "[]" {
 		t.Errorf("a process saw %q of this process's environment", got)
-	}
-}
-
-// Exec runs to completion on every backend: status, streams, Dir, Env,
-// Stdin, a timeout that kills what the command started, a stream, and
-// a cancel.
-func TestExec(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			dir := t.TempDir()
-			os.Mkdir(filepath.Join(dir, "sub"), 0o755)
-			ws := b.open(t, dir)
-			ctx := context.Background()
-			for _, tc := range []struct {
-				name string
-				cmd  Command
-				want Output
-			}{
-				{"exit status and both streams", Command{Args: []string{"sh", "-c", "echo out; echo err >&2; exit 3"}}, Output{Stdout: []byte("out\n"), Stderr: []byte("err\n"), ExitCode: 3}},
-				{"Dir below the root", Command{Args: []string{"pwd"}, Dir: "sub"}, Output{Stdout: []byte(filepath.Join(ws.Root(), "sub") + "\n")}},
-				{"Env added", Command{Args: []string{"sh", "-c", "echo $X"}, Env: []string{"X=y"}}, Output{Stdout: []byte("y\n")}},
-				{"Stdin", Command{Args: []string{"cat"}, Stdin: []byte("in")}, Output{Stdout: []byte("in")}},
-				{"Timeout kills what it started", Command{Args: []string{"sh", "-c", "sleep 30 & sleep 30"}, Timeout: 200 * time.Millisecond}, Output{ExitCode: -1, TimedOut: true}},
-			} {
-				t.Run(tc.name, func(t *testing.T) {
-					start := time.Now()
-					got, err := ws.Exec(ctx, tc.cmd)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if !bytes.Equal(got.Stdout, tc.want.Stdout) || !bytes.Equal(got.Stderr, tc.want.Stderr) || got.ExitCode != tc.want.ExitCode || got.TimedOut != tc.want.TimedOut {
-						t.Errorf("Exec = %+v (%q, %q), want %+v", got, got.Stdout, got.Stderr, tc.want)
-					}
-					if time.Since(start) > 10*time.Second {
-						t.Errorf("took %v", time.Since(start))
-					}
-				})
-			}
-			var stream bytes.Buffer
-			out, err := ws.Exec(ctx, Command{Args: []string{"sh", "-c", "echo a; echo b >&2"}, Stream: &stream})
-			if err != nil || stream.String() != "a\nb\n" || len(out.Stdout)+len(out.Stderr) != 0 {
-				t.Errorf("a stream got %q and the output kept %q %q (%v)", stream.String(), out.Stdout, out.Stderr, err)
-			}
-			if _, err := ws.Exec(ctx, Command{Args: []string{"pwd"}, Dir: "../"}); !errors.Is(err, ErrOutside) {
-				t.Errorf("a Dir out of the root: err = %v", err)
-			}
-			cctx, cancel := context.WithCancel(ctx)
-			cancel()
-			if _, err := ws.Exec(cctx, Command{Args: []string{"sleep", "5"}}); err == nil {
-				t.Error("a cancelled context ran the command to the end")
-			}
-		})
 	}
 }
 
@@ -164,53 +111,5 @@ func TestFilesStayInsideAndDoNotBlock(t *testing.T) {
 	}
 	if d := l.Descriptor(); d.Kind != KindLocal || d.Root != dir || d.Ref != "" {
 		t.Errorf("Descriptor = %+v", d)
-	}
-}
-
-// A name that is not fs.ValidPath is refused by every entry point, on
-// every backend: one that leaves is ErrOutside, any other
-// fs.ErrInvalid, and neither reaches the file system.
-func TestNamesThatAreNotValidPaths(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			dir := t.TempDir()
-			os.WriteFile(filepath.Join(dir, "b"), []byte("x"), 0o644)
-			ws := b.open(t, dir)
-			ctx := context.Background()
-			ops := map[string]func(name string) error{
-				"open":    func(n string) error { _, err := ws.FS().Open(n); return err },
-				"stat":    func(n string) error { _, err := fs.Stat(ws.FS(), n); return err },
-				"readdir": func(n string) error { _, err := fs.ReadDir(ws.FS(), n); return err },
-				"write":   func(n string) error { return ws.WriteFile(ctx, n, []byte("y"), 0o644) },
-				"remove":  func(n string) error { return ws.Remove(ctx, n) },
-			}
-			if b.links {
-				ops["lstat"] = func(n string) error { _, err := ws.FS().(fs.ReadLinkFS).Lstat(n); return err }
-				ops["readlink"] = func(n string) error { _, err := ws.FS().(fs.ReadLinkFS).ReadLink(n); return err }
-			}
-			for name, want := range map[string]error{
-				"/etc/passwd": ErrOutside,
-				"..":          ErrOutside,
-				"../b":        ErrOutside,
-				"a/../../b":   ErrOutside,
-				"a/../b":      fs.ErrInvalid,
-				"./b":         fs.ErrInvalid,
-				"b/":          fs.ErrInvalid,
-				"":            fs.ErrInvalid,
-			} {
-				for op, f := range ops {
-					if err := f(name); !errors.Is(err, want) {
-						t.Errorf("%s %q: err = %v, want %v", op, name, err, want)
-					}
-				}
-			}
-			if b, _ := os.ReadFile(filepath.Join(dir, "b")); string(b) != "x" {
-				t.Errorf("b was changed to %q", b)
-			}
-			// A command's directory must be one.
-			if _, err := ws.Exec(ctx, Command{Args: []string{"pwd"}, Dir: "b"}); err == nil {
-				t.Error("Exec ran in a file")
-			}
-		})
 	}
 }

@@ -30,8 +30,9 @@ network.
 ## Pull requests
 
 - Keep the change focused; unrelated cleanups belong in their own PR.
-- Add or update tests. Tests are table-driven and run offline; a
-  confinement rule is tested on every backend in `backends`.
+- Add or update tests. Tests are table-driven and run offline; a rule
+  every backend keeps is a table in `workspacetest`, which every
+  backend runs.
 - Run `make check` before pushing. CI runs the same steps on the minimum
   and current Go versions.
 - Note user-visible changes under *Unreleased* in `CHANGELOG.md`.

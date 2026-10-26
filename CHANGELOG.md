@@ -5,6 +5,18 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added: package `workspacetest`, in the root module and on the
+  standard library alone: the conformance tables every backend runs,
+  exported so a backend in a nested module runs them from its own
+  tests. `Run` takes `Backend`s (confinement, FIFOs, `Env`, `Exec`,
+  names that are not valid paths), `RunStarter` takes `Starter`s (the
+  pipes, the environment, the lifetimes, the refusals), and `Confined`
+  lays out a workspace beside a secret. The root's backends and
+  `remote` run them; the tables moved out of the root's tests
+  unchanged.
+
 ## v0.0.5 - 2026-10-25
 
 - Added: package `remote`, in the root module and on the standard

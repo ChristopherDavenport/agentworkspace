@@ -13,8 +13,10 @@ interface.
 ## Module
 
 - Module path: `github.com/ChristopherDavenport/agentworkspace`.
-- Go 1.26 is the floor. The root module holds two packages:
-  `agentworkspace`, at the root, and `remote`.
+- Go 1.26 is the floor. The root module holds three packages:
+  `agentworkspace`, at the root, `remote`, and `workspacetest`, the
+  conformance tables every backend runs (`Run`, `RunStarter`,
+  `Confined`), exported so a nested module's backend runs them too.
 - The root module imports the standard library alone. `make deps` and
   a test (`TestImportBoundary`, which names the root's packages)
   enforce it. Anything with a dependency is a nested module, and none
@@ -63,11 +65,12 @@ interface.
 ## Rules the interface keeps
 
 Every backend, present and planned, holds to these; the tests check
-them, and a new backend runs the same tables (`backends` in
-`confine_test.go`, `starters` in `start_test.go`). A backend in a
-package that imports the root (remote) joins them from package
-`agentworkspace_test` through `AddBackend` and `AddStarter`, as
-`remote_backend_test.go` does.
+them, and a new backend runs the same tables: `workspacetest.Run` for
+a `Workspace` and `workspacetest.RunStarter` for a `Starter`, called
+from the backend's own tests, as the root's `confine_test.go` and
+`start_test.go`, remote's `conformance_test.go` and each nested
+module's do. A table belongs in `workspacetest` when every backend
+keeps its rule; one about Local alone stays in the root's tests.
 
 - A name that leaves the workspace is `ErrOutside`, however it leaves:
   absolute, `..`, or a link out, read, written, removed or used as a

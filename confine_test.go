@@ -1,4 +1,8 @@
-package agentworkspace
+package agentworkspace_test
+
+// The root's backends in the conformance tables, workspacetest's, and
+// the confinement tests of Local's own. They are in the external test
+// package because workspacetest imports this one.
 
 import (
 	"bytes"
@@ -9,9 +13,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
-	"time"
+
+	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/workspacetest"
 )
 
 // mapped stands in for a container: its processes and its files see
@@ -20,7 +25,7 @@ import (
 // paths in its output mapped back, as a container's mount does. It is
 // not a Starter.
 type mapped struct {
-	backing *Local
+	backing *agentworkspace.Local
 	dir     string // the directory on this machine
 }
 
@@ -34,11 +39,11 @@ func (m *mapped) WriteFile(ctx context.Context, name string, data []byte, perm f
 	return m.backing.WriteFile(ctx, name, data, perm)
 }
 func (m *mapped) Remove(ctx context.Context, name string) error { return m.backing.Remove(ctx, name) }
-func (m *mapped) Descriptor() Descriptor {
-	return Descriptor{Kind: KindContainer, Ref: "sha256:test", Root: mappedRoot}
+func (m *mapped) Descriptor() agentworkspace.Descriptor {
+	return agentworkspace.Descriptor{Kind: agentworkspace.KindContainer, Ref: "sha256:test", Root: mappedRoot}
 }
 
-func (m *mapped) Exec(ctx context.Context, c Command) (*Output, error) {
+func (m *mapped) Exec(ctx context.Context, c agentworkspace.Command) (*agentworkspace.Output, error) {
 	in := func(s string) string { return strings.ReplaceAll(s, mappedRoot, m.dir) }
 	out := func(b []byte) []byte { return bytes.ReplaceAll(b, []byte(m.dir), []byte(mappedRoot)) }
 	args := make([]string, len(c.Args))
@@ -64,41 +69,13 @@ func (m *mapped) Exec(ctx context.Context, c Command) (*Output, error) {
 
 // noLinks is a workspace whose FS cannot tell a link from what it leads
 // to, as an FS over a plain file API may not.
-type noLinks struct{ *Local }
+type noLinks struct{ *agentworkspace.Local }
 
 func (n noLinks) FS() fs.FS { return struct{ fs.FS }{n.Local.FS()} }
 
-// backend is a workspace the tables run on, opened over dir with PATH
-// alone in its environment; links says its FS can read links.
-type backend struct {
-	name  string
-	open  func(t *testing.T, dir string) Workspace
-	links bool
-}
-
-// backends are the workspaces every confinement test runs on. A
-// backend in a package that imports this one (remote) is added by
-// AddBackend, from package agentworkspace_test.
-var backends = []backend{
-	{"local", func(t *testing.T, dir string) Workspace { return mustLocal(t, dir) }, true},
-	{"container stand-in", func(t *testing.T, dir string) Workspace {
-		l := mustLocal(t, dir)
-		return &mapped{backing: l, dir: l.Root()}
-	}, true},
-	{"no links", func(t *testing.T, dir string) Workspace { return noLinks{mustLocal(t, dir)} }, false},
-}
-
-// AddBackend adds a backend to the tables. It is for an init function
-// in package agentworkspace_test, which can import a backend's package
-// that imports this one; being in a test file, it is not the package's
-// API.
-func AddBackend(name string, links bool, open func(t *testing.T, dir string) Workspace) {
-	backends = append(backends, backend{name, open, links})
-}
-
-func mustLocal(t *testing.T, dir string) *Local {
+func mustLocal(t *testing.T, dir string) *agentworkspace.Local {
 	t.Helper()
-	l, err := NewLocal(dir, []string{"PATH=" + os.Getenv("PATH")})
+	l, err := agentworkspace.NewLocal(dir, []string{"PATH=" + os.Getenv("PATH")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,148 +83,29 @@ func mustLocal(t *testing.T, dir string) *Local {
 	return l
 }
 
-// confined lays out a workspace beside a directory that holds a secret,
-// with links in the workspace that lead out and one that stays in.
-func confined(t *testing.T) (dir, outside string) {
-	t.Helper()
-	base := t.TempDir()
-	dir, outside = filepath.Join(base, "work"), filepath.Join(base, "outside")
-	must := func(err error) {
-		t.Helper()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, d := range []string{dir, outside, filepath.Join(dir, "sub")} {
-		must(os.MkdirAll(d, 0o755))
-	}
-	must(os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("hunter2"), 0o644))
-	must(os.WriteFile(filepath.Join(dir, "inside.txt"), []byte("ok"), 0o644))
-	must(os.Symlink(outside, filepath.Join(dir, "linkdir")))                               // a directory, out
-	must(os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(dir, "linkfile"))) // a file, out
-	must(os.Symlink("../../outside", filepath.Join(dir, "sub", "up")))                     // relative, out
-	must(os.Symlink("inside.txt", filepath.Join(dir, "alias.txt")))                        // stays in
-	return dir, outside
-}
-
-// Every way out of the root is ErrOutside, on every backend, for reads,
-// writes, removes and a command's directory, and nothing outside is
-// read or changed.
-func TestEveryWayOutIsRefused(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			dir, outside := confined(t)
-			ws := b.open(t, dir)
-			ctx := context.Background()
-			secret := filepath.Join(outside, "secret.txt")
-			fsys := ws.FS()
-			read := func(name string) error {
-				b, err := fs.ReadFile(fsys, name)
-				if strings.Contains(string(b), "hunter2") {
-					t.Errorf("read %s leaked the secret", name)
-				}
-				return err
-			}
-			cases := map[string]error{}
-			for _, name := range []string{
-				secret,                         // absolute
-				"../outside/secret.txt",        // climbs
-				"sub/../../outside/secret.txt", // climbs after a name
-				"linkdir/secret.txt",           // through a link to a directory
-				"linkfile",                     // a link to a file
-				"sub/up/secret.txt",            // through a relative link
-			} {
-				cases["read "+name] = read(name)
-				cases["stat "+name] = func() error { _, err := fs.Stat(fsys, name); return err }()
-				cases["Read "+name] = func() error { _, err := Read(ws, name, 1<<20); return err }()
-			}
-			for _, name := range []string{outside, "..", "linkdir", "sub/up"} {
-				cases["readdir "+name] = func() error { _, err := fs.ReadDir(fsys, name); return err }()
-				cases["exec in "+name] = func() error { _, err := ws.Exec(ctx, Command{Args: []string{"pwd"}, Dir: name}); return err }()
-			}
-			for _, name := range []string{
-				filepath.Join(outside, "new.txt"),
-				"../outside/new.txt",
-				"linkdir/new.txt",
-				"linkdir/a/b.txt", // directories made through a link
-				"linkfile",        // over a link to a file
-				"sub/up/new.txt",
-			} {
-				cases["write "+name] = ws.WriteFile(ctx, name, []byte("x"), 0o644)
-			}
-			for _, name := range []string{secret, "../outside/secret.txt", "linkdir/secret.txt", "sub/up/secret.txt"} {
-				cases["remove "+name] = ws.Remove(ctx, name)
-			}
-			for what, err := range cases {
-				if !errors.Is(err, ErrOutside) {
-					t.Errorf("%s: err = %v, want ErrOutside", what, err)
-				}
-			}
-			entries, _ := os.ReadDir(outside)
-			if b, _ := os.ReadFile(secret); len(entries) != 1 || string(b) != "hunter2" {
-				t.Errorf("outside changed: %v, secret %q", entries, b)
-			}
-		})
-	}
-}
-
-// What stays inside works on every backend, a link that stays in
-// included, and a command's directory is the workspace's own name for
-// it.
-func TestInsideWorks(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			dir, outside := confined(t)
-			ws := b.open(t, dir)
-			ctx := context.Background()
-			for _, name := range []string{"inside.txt", "alias.txt"} {
-				if got, err := fs.ReadFile(ws.FS(), name); err != nil || string(got) != "ok" {
-					t.Errorf("read %s = %q, %v", name, got, err)
-				}
-			}
-			if err := ws.WriteFile(ctx, "new/dir/f.txt", []byte("made"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if got, _ := os.ReadFile(filepath.Join(dir, "new/dir/f.txt")); string(got) != "made" {
-				t.Errorf("write landed %q", got)
-			}
-			if err := ws.Remove(ctx, "new/dir/f.txt"); err != nil {
-				t.Errorf("remove: %v", err)
-			}
-			out, err := ws.Exec(ctx, Command{Args: []string{"pwd"}, Dir: "sub"})
-			if want := filepath.Join(ws.Root(), "sub") + "\n"; err != nil || string(out.Stdout) != want {
-				t.Errorf("pwd in sub = %q, %v; want %q", out.Stdout, err, want)
-			}
-			if d := ws.Descriptor(); d.Root != ws.Root() {
-				t.Errorf("Descriptor.Root = %q, Root = %q", d.Root, ws.Root())
-			}
-			// Where links lead is read through the workspace, or not at
-			// all: never followed on the host.
-			links, ok := ws.FS().(fs.ReadLinkFS)
-			if !b.links {
-				if ok {
-					t.Error("an FS that cannot read links offers ReadLinkFS")
-				}
-				return
-			}
-			if !ok {
-				t.Fatal("FS is not a ReadLinkFS")
-			}
-			if fi, err := links.Lstat("alias.txt"); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
-				t.Errorf("Lstat alias.txt = %v, %v", fi, err)
-			}
-			if target, err := links.ReadLink("linkdir"); err != nil || target != outside {
-				t.Errorf("ReadLink linkdir = %q, %v", target, err)
-			}
-		})
-	}
+// The root's backends run the confinement tables: Local, a container's
+// stand-in and an FS that cannot read links. remote runs them from its
+// own tests, and every nested module's backend from its.
+func TestConformance(t *testing.T) {
+	workspacetest.Run(t,
+		workspacetest.Backend{Name: "local", Links: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+			return mustLocal(t, dir)
+		}},
+		workspacetest.Backend{Name: "container stand-in", Links: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+			l := mustLocal(t, dir)
+			return &mapped{backing: l, dir: l.Root()}
+		}},
+		workspacetest.Backend{Name: "no links", Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+			return noLinks{mustLocal(t, dir)}
+		}},
+	)
 }
 
 // A link swapped between a directory inside and one outside while it is
 // read and written through never leads out: the root resolves each name
 // as it opens it, not before.
 func TestALinkSwappedMidOperationStaysIn(t *testing.T) {
-	dir, outside := confined(t)
+	dir, outside := workspacetest.Confined(t)
 	if err := os.Mkdir(filepath.Join(dir, "in"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +139,7 @@ func TestALinkSwappedMidOperationStaysIn(t *testing.T) {
 		if b, err := fs.ReadFile(ws.FS(), "flip/secret.txt"); err == nil && string(b) != "inside" {
 			t.Errorf("read through the swapped link got %q", b)
 			break
-		} else if err != nil && !errors.Is(err, ErrOutside) {
+		} else if err != nil && !errors.Is(err, agentworkspace.ErrOutside) {
 			t.Errorf("read through the swapped link: %v", err)
 			break
 		}
@@ -291,61 +149,5 @@ func TestALinkSwappedMidOperationStaysIn(t *testing.T) {
 	wg.Wait()
 	if _, err := os.Stat(filepath.Join(outside, "w.txt")); err == nil {
 		t.Error("a write through the swapped link landed outside")
-	}
-}
-
-// Nothing blocks on a FIFO, on any backend: it opens, or fails, at
-// once, what was opened says what it is, and it is not read as a file,
-// listed or written.
-func TestNothingBlocksOnAFIFO(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			dir := t.TempDir()
-			if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o644); err != nil {
-				t.Skipf("no FIFO here: %v", err)
-			}
-			ws := b.open(t, dir)
-			ctx := context.Background()
-			within(t, 10*time.Second, "the operations on a FIFO", func() {
-				if f, err := ws.FS().Open("pipe"); err == nil {
-					if fi, err := f.Stat(); err != nil || fi.Mode()&fs.ModeNamedPipe == 0 {
-						t.Errorf("Stat of the opened FIFO = %v, %v", fi, err)
-					}
-					f.Read(make([]byte, 1)) // returns, whatever it says
-					f.Close()
-				}
-				if fi, err := fs.Stat(ws.FS(), "pipe"); err != nil || fi.Mode()&fs.ModeNamedPipe == 0 {
-					t.Errorf("Stat of the FIFO = %v, %v", fi, err)
-				}
-				if _, err := Read(ws, "pipe", 1<<20); err == nil {
-					t.Error("Read read a FIFO")
-				}
-				if _, err := fs.ReadDir(ws.FS(), "pipe"); err == nil {
-					t.Error("a FIFO was listed")
-				}
-				if err := ws.WriteFile(ctx, "pipe", []byte("x"), 0o644); err == nil {
-					t.Error("a FIFO was written")
-				}
-			})
-		})
-	}
-}
-
-// Env is a copy on every backend: a caller that changes it changes
-// nothing the workspace gives next.
-func TestEnvIsACopyOnEveryBackend(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			ws := b.open(t, t.TempDir())
-			e := ws.Env()
-			if len(e) == 0 {
-				t.Fatal("no environment")
-			}
-			want := e[0]
-			e[0] = "CHANGED=1"
-			if got := ws.Env(); got[0] != want {
-				t.Errorf("Env after a caller changed its copy = %q", got)
-			}
-		})
 	}
 }

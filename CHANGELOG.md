@@ -11,8 +11,10 @@ versions may break the API.
   `Dial` returns: the scopes the server said, at `Dial`, the principal
   holds (the info route's `scopes`), a copy. A program can tell whether
   a grant may write before it asks, where it had to probe with a
-  `Remove`. `remote.Workspace` gains the method, so a type of a
-  program's own that implemented it must add it.
+  `Remove`. They are never empty: `Dial` now refuses a description
+  that names no scopes, which no `Handler` sends. `remote.Workspace`
+  gains the method, so a type of a program's own that implemented it
+  must add it.
 
 ## v0.0.7 - 2026-10-26
 

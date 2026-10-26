@@ -3,10 +3,12 @@ package remote
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -259,21 +261,30 @@ func TestAClientIsWhatItsScopesAllow(t *testing.T) {
 
 // A client's Scopes are the ones the server granted its principal at
 // Dial, in the server's order, and a copy: changing it changes no later
-// answer.
+// answer. A principal holding servers, without read or with it, is told
+// its scopes as any other is, its client a ServerProvider.
 func TestAClientSaysItsScopes(t *testing.T) {
 	l, _ := newLocal(t, pathEnv())
-	_, url := serve(t, l, WithAuthenticator(tokens()))
+	o, _ := offering(t, map[string][]string{"echo": {"cat"}})
 	for _, tc := range []struct {
-		name, tok string
-		want      []Scope
+		name string
+		ws   agentworkspace.Workspace
+		want []Scope
 	}{
-		{"read", tokRead, []Scope{ScopeRead}},
-		{"read and write", tokRW, []Scope{ScopeRead, ScopeWrite}},
-		{"read and exec", tokRE, []Scope{ScopeRead, ScopeExec}},
-		{"all", tokAll, allScopes()},
+		{"read", l, []Scope{ScopeRead}},
+		{"read and write", l, []Scope{ScopeRead, ScopeWrite}},
+		{"read and exec", l, []Scope{ScopeRead, ScopeExec}},
+		{"all", o, allScopes()},
+		{"servers alone", providerOnly{o, o}, []Scope{ScopeServers}},
+		{"servers and read", providerOnly{o, o}, []Scope{ScopeServers, ScopeRead}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ws := dial(t, url, withToken(tc.tok))
+			_, url := serve(t, tc.ws, WithAuthenticator(scoped("p", tc.want...)))
+			ws := dial(t, url)
+			_, provider := ws.(agentworkspace.ServerProvider)
+			if wantProvider := slices.Contains(tc.want, ScopeServers); provider != wantProvider {
+				t.Errorf("%T: a ServerProvider %v, want %v", ws, provider, wantProvider)
+			}
 			got := ws.Scopes()
 			if !slices.Equal(got, tc.want) {
 				t.Fatalf("Scopes = %q, want %q", got, tc.want)
@@ -283,6 +294,31 @@ func TestAClientSaysItsScopes(t *testing.T) {
 				t.Errorf("Scopes after changing a copy = %q, want %q", again, tc.want)
 			}
 		})
+	}
+}
+
+// Dial refuses a description that names no scopes: what the client
+// says it may do would be nothing the server said.
+func TestDialRefusesADescriptionWithNoScopes(t *testing.T) {
+	l, _ := newLocal(t, nil)
+	h, err := NewHandler(l, WithInsecureNoAuth())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		var info map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+			t.Error(err)
+		}
+		delete(info, "scopes")
+		writeJSON(w, info)
+	}))
+	defer srv.Close()
+	if _, err := Dial(context.Background(), srv.URL); err == nil || !strings.Contains(err.Error(), "no scopes") {
+		t.Errorf("Dial: %v, want a refusal of a description with no scopes", err)
 	}
 }
 

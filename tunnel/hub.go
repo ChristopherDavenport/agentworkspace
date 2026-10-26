@@ -335,9 +335,9 @@ func (h *Hub) wait(ctx context.Context, name string) (*tunnel, error) {
 // shorter than the lease. Requests in flight when a connection drops
 // fail, and are not sent again.
 //
-// The workspace is the first connection's: its Root, Env, bounds and
-// whether it is a Starter or a ServerProvider are what that host's info
-// said at the dial.
+// The workspace is the first connection's: its Root, Env, Scopes,
+// bounds and whether it is a Starter or a ServerProvider are what that
+// host's info said at the dial.
 // When another host takes the name (a second connection replaces the
 // first), requests go to the new host, but the workspace still
 // describes the first, and its session, if it has one, is lost there

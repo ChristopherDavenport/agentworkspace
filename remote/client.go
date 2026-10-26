@@ -34,6 +34,9 @@ type Workspace interface {
 	// Served is the served workspace's own Descriptor, as against
 	// Descriptor, which names this one: the remote at the base URL.
 	Served() agentworkspace.Descriptor
+	// Scopes are the scopes the server said, at Dial, the principal
+	// holds; never empty.
+	Scopes() []Scope
 }
 
 // Client is a workspace served by a Handler, reached over HTTP. Its
@@ -158,9 +161,9 @@ func Dial(ctx context.Context, baseURL string, opts ...DialOption) (Workspace, e
 		c.end()
 		return nil, err
 	}
-	if c.info.Root == "" || !c.info.Limits.valid() {
+	if c.info.Root == "" || !c.info.Limits.valid() || len(c.info.Scopes) == 0 {
 		c.end()
-		return nil, errors.New("remote: the server's description has no root or a bound that is not positive")
+		return nil, errors.New("remote: the server's description has no root, no scopes or a bound that is not positive")
 	}
 	start := c.info.Start && slices.Contains(c.info.Scopes, ScopeExec)
 	servers := c.info.Servers && slices.Contains(c.info.Scopes, ScopeServers)
@@ -294,6 +297,17 @@ func (c *Client) Descriptor() agentworkspace.Descriptor {
 // Served is the served workspace's own Descriptor, its Root as Root
 // gives it.
 func (c *Client) Served() agentworkspace.Descriptor { return c.info.Served.workspace() }
+
+// Scopes are the scopes the server said the principal holds when it
+// answered Dial, a copy, in the server's order: what the program's
+// Authenticator granted the credentials then. They are not asked
+// again, so a grant changed since is not in them, and the server
+// checks every request against the principal it resolves for it,
+// whatever they say. They are never empty: Dial refuses a description
+// that names none (a Handler's info route itself takes read or
+// servers). They tell a program what a refusal will be before it asks:
+// without ScopeWrite, WriteFile and Remove are ErrForbidden.
+func (c *Client) Scopes() []Scope { return slices.Clone(c.info.Scopes) }
 
 // Close ends every process the client started, as Process.Close does,
 // closes its session, which ends whatever it did not reach, and ends

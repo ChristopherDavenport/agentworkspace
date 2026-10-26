@@ -1,10 +1,12 @@
 package remote
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -144,40 +146,113 @@ func TestClosingTheClientEndsItsProcesses(t *testing.T) {
 	}
 }
 
-// The handler's Close ends every session's processes, and every Exec
-// in flight.
+// The handler's Close ends every session's processes, every Exec in
+// flight and every process being closed, and returns only once each
+// has ended: each group here is its leader alone, so it is gone the
+// moment its leader is reaped.
 func TestClosingTheHandlerEndsEverySession(t *testing.T) {
 	l, dir := newLocal(t, pathEnv())
 	h, url := serve(t, l, WithInsecureNoAuth())
-	_, a := groupLeader(t, dial(t, url), context.Background())
-	_, b := groupLeader(t, dial(t, url), context.Background())
+	ctx := context.Background()
+	_, a := alone(t, dial(t, url), ctx, "")
+	_, b := alone(t, dial(t, url), ctx, "")
+	// One that ignores its input's end and SIGTERM, whose close takes
+	// both graces, is being closed when the handler is.
+	closing, c := alone(t, dial(t, url), ctx, "trap '' TERM; ")
+	go closing.Close()
 	execed := make(chan error, 1)
 	go func() {
-		_, err := dial(t, url).Exec(context.Background(), agentworkspace.Command{Args: []string{"sh", "-c", "echo $$ > pgid; sleep 30"}})
+		_, err := dial(t, url).Exec(ctx, agentworkspace.Command{Args: []string{"sh", "-c", "echo $$ > pgid; exec sleep 30"}})
 		execed <- err
 	}()
-	var c int
-	within(t, 10*time.Second, "the pgid file", func() {
-		for {
-			b, _ := os.ReadFile(filepath.Join(dir, "pgid"))
-			if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && n > 0 {
-				c = n
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+	e := pgidFile(t, filepath.Join(dir, "pgid"))
+	time.Sleep(300 * time.Millisecond) // the close is under way
+	within(t, 15*time.Second, "the handler's close", func() { h.Close() })
+	for name, pgid := range map[string]int{"a session's": a, "another's": b, "a closing": c, "an Exec's": e} {
+		if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("%s process group runs on after the handler's Close: %v", name, err)
 		}
-	})
-	within(t, 10*time.Second, "the handler's close", func() { h.Close() })
-	groupGone(t, a)
-	groupGone(t, b)
-	groupGone(t, c)
+	}
 	within(t, 10*time.Second, "the Exec's end", func() {
 		if err := <-execed; err == nil {
 			t.Error("an Exec the handler's close ended succeeded")
 		}
 	})
-	if _, err := Dial(context.Background(), url); !errors.Is(err, os.ErrClosed) {
+	if _, err := Dial(ctx, url); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("Dial a closed handler: %v", err)
+	}
+}
+
+// alone starts a process that is its group's only member, running
+// prefix first, and returns it and the group's id, its first line.
+func alone(t *testing.T, ws Workspace, ctx context.Context, prefix string) (agentworkspace.Process, int) {
+	t.Helper()
+	p, err := agentworkspace.Start(ctx, ws, agentworkspace.Command{Args: []string{"sh", "-c", prefix + "echo $$; exec sleep 30"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	var line string
+	within(t, 10*time.Second, "the first line", func() {
+		line, err = bufio.NewReader(p.Stdout()).ReadString('\n')
+	})
+	pgid, perr := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil || perr != nil {
+		t.Fatalf("first line %q: %v %v", line, err, perr)
+	}
+	return p, pgid
+}
+
+// pgidFile waits for a process to write its group's id to name.
+func pgidFile(t *testing.T, name string) int {
+	t.Helper()
+	var pgid int
+	within(t, 10*time.Second, "the pgid file", func() {
+		for {
+			b, _ := os.ReadFile(name)
+			if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && n > 0 {
+				pgid = n
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	return pgid
+}
+
+// A client whose server goes away loses its session once a whole lease
+// passes unrenewed, by when the server has ended its processes: Wait
+// returns -1 and ErrNoSession, and the streams fail with it.
+func TestALostServerLosesTheSession(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	h, err := NewHandler(l, WithInsecureNoAuth(), WithLease(300*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { h.Close() })
+	ws := dial(t, srv.URL)
+	p, err := agentworkspace.Start(context.Background(), ws, agentworkspace.Command{Args: []string{"cat"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	srv.Listener.Close()
+	srv.CloseClientConnections()
+	within(t, 5*time.Second, "Wait on a lost server", func() {
+		if status, err := p.Wait(); status != -1 || !errors.Is(err, ErrNoSession) {
+			t.Errorf("Wait = %d, %v; want -1, ErrNoSession", status, err)
+		}
+	})
+	if _, err := p.Stdout().Read(make([]byte, 1)); !errors.Is(err, ErrNoSession) {
+		t.Errorf("Stdout after the loss: %v", err)
+	}
+	if _, err := p.Stdin().Write([]byte("x")); !errors.Is(err, ErrNoSession) {
+		t.Errorf("Stdin after the loss: %v", err)
+	}
+	if clientOf(ws).sessionRoute() != "" {
+		t.Error("the lost session is still the client's")
 	}
 }
 
@@ -197,8 +272,13 @@ func TestAnotherSessionCannotTouchAProcess(t *testing.T) {
 	defer p.Close()
 	route := p.(*process).route
 	pid := route[strings.LastIndex(route, "/")+1:]
-	other := clientOf(dial(t, url, WithBearerToken(tokAll)))
-	theirs := other.sessionRoute() + "/processes/" + pid
+	otherWS := dial(t, url, WithBearerToken(tokAll))
+	q, err := agentworkspace.Start(ctx, otherWS, agentworkspace.Command{Args: []string{"true"}}) // opens its session
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	theirs := clientOf(otherWS).sessionRoute() + "/processes/" + pid
 	for _, r := range []struct{ method, suffix string }{
 		{"GET", "/wait"},
 		{"GET", "/stdout"},

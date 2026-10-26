@@ -303,15 +303,22 @@ func TestStartRefuses(t *testing.T) {
 
 func testStartRefuses(t *testing.T, l Starter) {
 	ctx := context.Background()
-	for name, c := range map[string]Command{
-		"no command":     {},
-		"a Dir out":      {Args: []string{"true"}, Dir: ".."},
-		"a Dir via link": {Args: []string{"true"}, Dir: "linkdir"},
-		"Stdin bytes":    {Args: []string{"cat"}, Stdin: []byte("x")},
+	for name, c := range map[string]struct {
+		cmd  Command
+		want error // nil: any error
+	}{
+		"no command":     {Command{}, nil},
+		"a Dir out":      {Command{Args: []string{"true"}, Dir: ".."}, ErrOutside},
+		"a Dir via link": {Command{Args: []string{"true"}, Dir: "linkdir"}, ErrOutside},
+		"Stdin bytes":    {Command{Args: []string{"cat"}, Stdin: []byte("x")}, nil},
 	} {
-		if p, err := l.Start(ctx, c); err == nil {
+		p, err := l.Start(ctx, c.cmd)
+		switch {
+		case err == nil:
 			p.Close()
 			t.Errorf("%s: started", name)
+		case c.want != nil && !errors.Is(err, c.want):
+			t.Errorf("%s: %v, want %v", name, err, c.want)
 		}
 	}
 	cctx, cancel := context.WithCancel(ctx)

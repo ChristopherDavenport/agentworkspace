@@ -5,6 +5,7 @@ package remote
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -19,20 +20,26 @@ import (
 )
 
 // pumpWait is how long a process's end waits for the rest of its
-// standard error to reach Command.Stream.
+// standard error to reach Command.Stream, as Local's WaitDelay does: a
+// Stream that does not take it by then is left behind.
 const pumpWait = 5 * time.Second
 
-// Start starts cmd in the served workspace, in the client's session,
-// and returns at once. The process lives no longer than its owner:
-// Process.Close, the end of ctx, cmd.Timeout (sent, and kept by the
-// server), the client's Close and the session's lapse each end it and
-// everything it started. Its standard input is a stream sent as it is
-// written, opened on the first write or close; its standard output is
-// a stream opened on the first read; and its standard error, when
+// Start starts cmd in the served workspace, in the client's session
+// (opened now, if this is the first Start or the last session was
+// lost), and returns at once. The process lives no longer than its
+// owner: Process.Close, the end of ctx, cmd.Timeout (sent, and kept by
+// the server), the client's Close and the session's loss each end it
+// and everything it started. Its standard input is a stream sent as it
+// is written, opened on the first write or close; its standard output
+// is a stream opened on the first read; and its standard error, when
 // cmd.Stream is set, is streamed there in the background, StderrBytes
 // of it held by the server while the stream is behind and the rest
 // dropped. A stream cut short is not resumed. cmd.Stdin is refused;
 // write to the process's input instead.
+//
+// The start is sent with a key of the client's choosing, which names
+// the process: when its reply is lost, the client closes the process
+// by the key, so nothing runs that no one can name.
 func (s *StarterClient) Start(ctx context.Context, cmd agentworkspace.Command) (agentworkspace.Process, error) {
 	c := s.Client
 	switch {
@@ -44,69 +51,87 @@ func (s *StarterClient) Start(ctx context.Context, cmd agentworkspace.Command) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	closed, lost := c.closed, c.lost
-	c.mu.Unlock()
-	switch {
-	case closed:
-		return nil, fmt.Errorf("remote: start %s: %w", cmd.Args[0], fs.ErrClosed)
-	case lost:
-		return nil, fmt.Errorf("remote: start %s: %w", cmd.Args[0], ErrNoSession)
+	fail := func(err error) (agentworkspace.Process, error) {
+		return nil, fmt.Errorf("remote: start %s: %w", cmd.Args[0], err)
 	}
 	// Not under ctx: a start that ctx cut short might have started a
 	// process no one could name. The end of ctx is watched once the
 	// process has an id.
 	rctx, cancel := context.WithTimeout(c.ctx, c.timeout)
 	defer cancel()
-	var st startedReply
-	err := c.call(rctx, http.MethodPost, c.sessionRoute()+"/processes", nil, startRequest{
-		Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: millis(cmd.Timeout), Stderr: cmd.Stream != nil,
-	}, &st)
+	sid, err := c.openSession(rctx)
 	if err != nil {
-		return nil, fmt.Errorf("remote: start %s: %w", cmd.Args[0], err)
+		return fail(err)
 	}
-	if !validID(st.ID) {
-		return nil, fmt.Errorf("remote: start %s: the server named the process %q", cmd.Args[0], st.ID)
+	key := rand.Text()
+	route := routeSessions + "/" + sid + "/processes/" + key
+	var st startedReply
+	err = c.call(rctx, http.MethodPost, routeSessions+"/"+sid+"/processes", nil, startRequest{
+		Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: millis(cmd.Timeout), Stderr: cmd.Stream != nil, Key: key,
+	}, &st)
+	if err == nil && st.ID != key {
+		err = fmt.Errorf("the server named the process %q, not by its key", st.ID)
 	}
-	p := &process{c: c, route: c.sessionRoute() + "/processes/" + st.ID, stream: cmd.Stream, done: make(chan struct{})}
+	if err != nil {
+		var refused *remoteError
+		if !errors.As(err, &refused) {
+			// The reply was lost, or is not one: the process may be
+			// running, so it is closed by its key.
+			dctx, dcancel := context.WithTimeout(c.ctx, c.timeout)
+			c.call(dctx, http.MethodDelete, route, nil, nil, nil)
+			dcancel()
+		}
+		return fail(err)
+	}
+	p := &process{c: c, session: sid, route: route, stream: cmd.Stream, done: make(chan struct{})}
 	p.ctx, p.cancel = context.WithCancel(c.ctx)
 	p.stdin = &stdinPipe{p: p}
 	p.stdout = &stdoutPipe{p: p}
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		p.Close()
-		return nil, fmt.Errorf("remote: start %s: %w", cmd.Args[0], fs.ErrClosed)
-	}
-	c.procs[p] = struct{}{}
-	c.mu.Unlock()
 	if p.stream != nil {
 		p.pumped = make(chan struct{})
 		var pctx context.Context
 		pctx, p.unpump = context.WithCancel(p.ctx)
 		go p.pump(pctx)
 	}
+	// Watched before anyone else can reach it, so that a Close racing
+	// in stops the watch too.
 	p.mu.Lock()
 	p.unwatch = context.AfterFunc(ctx, func() { p.ended(ctx) })
 	p.mu.Unlock()
+	c.mu.Lock()
+	switch {
+	case c.closed:
+		c.mu.Unlock()
+		p.Close()
+		return fail(fs.ErrClosed)
+	case c.session != sid:
+		c.mu.Unlock()
+		err := fmt.Errorf("the session was lost: %w", ErrNoSession)
+		p.lose(err)
+		return fail(err)
+	}
+	c.procs[p] = struct{}{}
+	c.mu.Unlock()
 	go p.poll()
 	return p, nil
 }
 
 // process is a process the client started.
 type process struct {
-	c      *Client
-	route  string
-	ctx    context.Context // its requests'; ended by Close
-	cancel context.CancelFunc
-	stdin  *stdinPipe
-	stdout *stdoutPipe
-	stream io.Writer
-	pumped chan struct{} // closed when the stream of standard error ends; nil without one
-	unpump context.CancelFunc
+	c       *Client
+	session string // the id of the session it is in
+	route   string
+	ctx     context.Context // its requests'; ended by Close
+	cancel  context.CancelFunc
+	stdin   *stdinPipe
+	stdout  *stdoutPipe
+	stream  io.Writer
+	pumped  chan struct{} // closed when the stream of standard error ends; nil without one
+	unpump  context.CancelFunc
 
 	mu      sync.Mutex
 	ending  error // the start's context's error, once it began ending the process
+	lost    error // why the session was lost, once it was
 	closing bool
 	unwatch func() bool
 
@@ -179,6 +204,27 @@ func (p *process) Close() error {
 		p.closeErr = err
 	})
 	return p.closeErr
+}
+
+// lose finishes the process with err, its session lost, and ends its
+// requests: its streams fail with err from now on.
+func (p *process) lose(err error) {
+	p.mu.Lock()
+	p.lost = err
+	p.mu.Unlock()
+	p.cancel()
+	p.finish(exitReply{}, err)
+}
+
+// gone is the error of a stream the process's end cut: why its session
+// was lost, or os.ErrClosed after Close.
+func (p *process) gone() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.lost != nil {
+		return p.lost
+	}
+	return os.ErrClosed
 }
 
 // ended is the end of the start's context: the process is ended as the
@@ -259,8 +305,9 @@ func (p *process) finish(e exitReply, failed error) {
 			select {
 			case <-p.pumped:
 			case <-t.C:
+				// What is left goes nowhere; a Write that never returns
+				// keeps its goroutine, not Wait.
 				p.unpump()
-				<-p.pumped
 			}
 			t.Stop()
 		}
@@ -310,11 +357,14 @@ func (s *stdoutPipe) Read(b []byte) (int, error) {
 	body, err := s.body, s.err
 	s.mu.Unlock()
 	if err != nil {
+		if s.p.ctx.Err() != nil {
+			err = s.p.gone()
+		}
 		return 0, err
 	}
 	n, err := body.Read(b)
 	if err != nil && err != io.EOF && s.p.ctx.Err() != nil {
-		err = os.ErrClosed
+		err = s.p.gone()
 	}
 	return n, err
 }
@@ -379,7 +429,9 @@ func (s *stdinPipe) Write(b []byte) (int, error) {
 				err = s.err
 			}
 		case <-s.p.ctx.Done():
-			err = os.ErrClosed
+		}
+		if s.p.ctx.Err() != nil {
+			err = s.p.gone()
 		}
 	}
 	return n, err
@@ -402,8 +454,11 @@ func (s *stdinPipe) Close() error {
 	pw.Close()
 	select {
 	case <-done:
+		if s.err != nil && s.p.ctx.Err() != nil {
+			return s.p.gone()
+		}
 		return s.err
 	case <-s.p.ctx.Done():
-		return os.ErrClosed
+		return s.p.gone()
 	}
 }

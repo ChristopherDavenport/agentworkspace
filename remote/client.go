@@ -3,6 +3,7 @@ package remote
 // The client half: a workspace at the other end of a Handler.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -45,13 +46,13 @@ type Client struct {
 	ctx     context.Context // ends with Close, and every request with it
 	end     context.CancelFunc
 
-	session string        // "" when the client starts nothing
-	renewed chan struct{} // closed when the renewal ends
+	smu      sync.Mutex     // held while a session is opened
+	renewers sync.WaitGroup // the renewals, which Close waits for
 
-	mu     sync.Mutex
-	closed bool
-	lost   bool // the session lapsed
-	procs  map[*process]struct{}
+	mu      sync.Mutex
+	closed  bool
+	session string // "" until the first Start, and again once it is lost
+	procs   map[*process]struct{}
 }
 
 // StarterClient is a Client that may start processes: the served
@@ -84,19 +85,22 @@ func WithBearerToken(tok string) DialOption { return func(c *dialConfig) { c.tok
 func WithHTTPClient(hc *http.Client) DialOption { return func(c *dialConfig) { c.http = hc } }
 
 // WithTimeout bounds each request that takes no context and should be
-// answered at once (the file system's, a process's start, signal and
-// close, a session's renewal); the default is 30 seconds. A stream, a
-// wait and an Exec are bounded by their contexts alone.
+// answered at once (the file system's, a session's opening and
+// renewal, a process's start, signal and close); the default is 30
+// seconds. A stream, a wait and an Exec are bounded by their contexts
+// alone.
 func WithTimeout(d time.Duration) DialOption { return func(c *dialConfig) { c.timeout = d } }
 
 // Dial connects to the Handler at baseURL: it asks for the served
-// workspace's description and, when the workspace can start processes
-// and the principal holds exec, opens the session the processes live
-// in, which the client renews in the background until Close. ctx bounds
+// workspace's description, and takes nothing on the server. ctx bounds
 // the dial alone.
 //
-// The workspace returned is a *StarterClient in that case and a
-// *Client otherwise. Its Root is the served workspace's, its Descriptor
+// The workspace returned is a *StarterClient when the served workspace
+// can start processes and the principal holds exec, and a *Client
+// otherwise. A StarterClient opens the session its processes live in
+// at its first Start, and renews it in the background until Close; a
+// session lost (lapsed on the server, or a whole lease unrenewed) ends
+// its processes on this side too, and the next Start opens another. Its Root is the served workspace's, its Descriptor
 // is KindRemote with the base URL as its Ref, and Served is the served
 // workspace's own. A base URL with userinfo is refused (give a token
 // with WithBearerToken); its query and fragment are dropped.
@@ -141,27 +145,52 @@ func Dial(ctx context.Context, baseURL string, opts ...DialOption) (Workspace, e
 	if !c.info.Start || !slices.Contains(c.info.Scopes, ScopeExec) {
 		return c, nil
 	}
-	var s sessionReply
-	if err := c.call(ctx, http.MethodPost, routeSessions, nil, struct{}{}, &s); err != nil {
-		c.end()
-		return nil, err
-	}
-	if !validID(s.ID) || s.LeaseMs <= 0 {
-		c.end()
-		return nil, errors.New("remote: the server opened a session with no id or no lease")
-	}
-	c.session, c.renewed = s.ID, make(chan struct{})
-	go c.renew(time.Duration(s.LeaseMs) * time.Millisecond)
 	return &StarterClient{c}, nil
 }
 
-// renew renews the session every third of its lease until Close, and
-// marks it lost when the server says it lapsed.
-func (c *Client) renew(lease time.Duration) {
-	defer close(c.renewed)
+// openSession is the client's session, opened now if it has none.
+func (c *Client) openSession(ctx context.Context) (string, error) {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	c.mu.Lock()
+	id, closed := c.session, c.closed
+	c.mu.Unlock()
+	switch {
+	case closed:
+		return "", fs.ErrClosed
+	case id != "":
+		return id, nil
+	}
+	var s sessionReply
+	if err := c.call(ctx, http.MethodPost, routeSessions, nil, struct{}{}, &s); err != nil {
+		return "", err
+	}
+	if !validID(s.ID) || s.LeaseMs <= 0 {
+		return "", errors.New("remote: the server opened a session with no id or no lease")
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		c.call(ctx, http.MethodDelete, routeSessions+"/"+s.ID, nil, nil, nil)
+		return "", fs.ErrClosed
+	}
+	c.session = s.ID
+	c.renewers.Add(1)
+	c.mu.Unlock()
+	go c.renew(s.ID, time.Duration(s.LeaseMs)*time.Millisecond)
+	return s.ID, nil
+}
+
+// renew renews session id every third of its lease until Close, and
+// loses it when the server says it is gone or a whole lease passes
+// without a renewal that succeeded: by then the server has ended its
+// processes.
+func (c *Client) renew(id string, lease time.Duration) {
+	defer c.renewers.Done()
 	every := max(lease/3, time.Millisecond)
 	t := time.NewTicker(every)
 	defer t.Stop()
+	renewed := time.Now()
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -169,12 +198,18 @@ func (c *Client) renew(lease time.Duration) {
 		case <-t.C:
 		}
 		ctx, cancel := context.WithTimeout(c.ctx, min(every, c.timeout))
-		err := c.call(ctx, http.MethodPost, c.sessionRoute()+"/renew", nil, struct{}{}, nil)
+		err := c.call(ctx, http.MethodPost, routeSessions+"/"+id+"/renew", nil, struct{}{}, nil)
 		cancel()
-		if errors.Is(err, ErrNoSession) {
-			c.mu.Lock()
-			c.lost = true
-			c.mu.Unlock()
+		switch {
+		case c.ctx.Err() != nil:
+			return
+		case err == nil:
+			renewed = time.Now()
+		case errors.Is(err, ErrNoSession):
+			c.lose(id, fmt.Errorf("remote: the session ended on the server: %w", ErrNoSession))
+			return
+		case time.Since(renewed) >= lease:
+			c.lose(id, fmt.Errorf("remote: the session went its lease (%v) unrenewed: %w", lease, ErrNoSession))
 			return
 		}
 		// Anything else is tried again on the next tick: a lease is three
@@ -182,7 +217,38 @@ func (c *Client) renew(lease time.Duration) {
 	}
 }
 
-func (c *Client) sessionRoute() string { return routeSessions + "/" + c.session }
+// lose ends session id on this side: every process in it is finished
+// with err, its streams failing with it, and the next Start opens
+// another session.
+func (c *Client) lose(id string, err error) {
+	c.mu.Lock()
+	if c.session != id {
+		c.mu.Unlock()
+		return
+	}
+	c.session = ""
+	var lost []*process
+	for p := range c.procs {
+		if p.session == id {
+			lost = append(lost, p)
+			delete(c.procs, p)
+		}
+	}
+	c.mu.Unlock()
+	for _, p := range lost {
+		p.lose(err)
+	}
+}
+
+// sessionRoute is the route of the client's session, "" without one.
+func (c *Client) sessionRoute() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session == "" {
+		return ""
+	}
+	return routeSessions + "/" + c.session
+}
 
 // Root is the served workspace's Root.
 func (c *Client) Root() string { return c.info.Root }
@@ -221,18 +287,19 @@ func (c *Client) Close() error {
 	}
 	wg.Wait()
 	var err error
-	if c.session != "" {
+	// A Start opening a session now finds the client closed.
+	c.smu.Lock()
+	if route := c.sessionRoute(); route != "" {
 		ctx, cancel := context.WithTimeout(c.ctx, c.timeout)
-		err = c.call(ctx, http.MethodDelete, c.sessionRoute(), nil, nil, nil)
+		err = c.call(ctx, http.MethodDelete, route, nil, nil, nil)
 		cancel()
 		if errors.Is(err, ErrNoSession) {
 			err = nil // lapsed, and so ended, already
 		}
 	}
+	c.smu.Unlock()
 	c.end()
-	if c.renewed != nil {
-		<-c.renewed
-	}
+	c.renewers.Wait()
 	if c.owned {
 		c.http.CloseIdleConnections()
 	}
@@ -335,7 +402,8 @@ func (c *Client) WriteFile(ctx context.Context, name string, data []byte, perm f
 	}
 	ctx, done := c.with(ctx)
 	defer done()
-	q := url.Values{"path": {name}, "perm": {strconv.FormatUint(uint64(perm), 10)}}
+	// The permission bits alone, as the server takes them.
+	q := url.Values{"path": {name}, "perm": {strconv.FormatUint(uint64(perm&fs.ModePerm), 10)}}
 	resp, err := c.request(ctx, http.MethodPut, routeFile, q, bytes.NewReader(data), "application/octet-stream")
 	if err != nil {
 		return &fs.PathError{Op: "write", Path: name, Err: err}
@@ -402,11 +470,19 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 		return nil, ended(err)
 	}
 	defer resp.Body.Close()
-	dec := json.NewDecoder(resp.Body)
+	br := bufio.NewReader(resp.Body)
+	limit := frameLimit(c.info.Limits.MaxOutputBytes)
 	for {
-		var f execFrame
-		if err := dec.Decode(&f); err != nil {
+		line, err := readFrame(br, limit)
+		if errors.Is(err, ErrLimit) {
+			return nil, fmt.Errorf("remote: exec %s: %w", cmd.Args[0], err)
+		}
+		if err != nil {
 			return nil, ended(fmt.Errorf("the reply ended without an outcome: %w", err))
+		}
+		var f execFrame
+		if err := json.Unmarshal(line, &f); err != nil {
+			return nil, fmt.Errorf("remote: exec %s: a frame of the reply: %w", cmd.Args[0], err)
 		}
 		switch {
 		case f.Error != nil:
@@ -420,6 +496,29 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 			}
 		case len(f.Data) > 0:
 			return nil, fmt.Errorf("remote: exec %s: output sent for a stream not asked for", cmd.Args[0])
+		}
+	}
+}
+
+// readFrame reads one line of an NDJSON reply, at most limit bytes of
+// it: a longer one is ErrLimit, read no further.
+func readFrame(br *bufio.Reader, limit int64) ([]byte, error) {
+	var line []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if int64(len(line)+len(chunk)) > limit {
+			return nil, fmt.Errorf("%w: a frame over the %d bytes the server's bounds allow", ErrLimit, limit)
+		}
+		line = append(line, chunk...)
+		switch {
+		case err == nil:
+			return line, nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case err == io.EOF && len(line) > 0:
+			return nil, io.ErrUnexpectedEOF
+		default:
+			return nil, err
 		}
 	}
 }

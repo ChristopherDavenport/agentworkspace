@@ -50,9 +50,11 @@ func TestBounds(t *testing.T) {
 		}
 		t.Errorf("a process over the bound: %v", err)
 	}
-	if c, err := Dial(ctx, url); !errors.Is(err, ErrLimit) {
-		if c != nil {
-			c.Close()
+	// A dial takes no session; a second client's first Start would.
+	second := dial(t, url)
+	if q, err := agentworkspace.Start(ctx, second, agentworkspace.Command{Args: []string{"true"}}); !errors.Is(err, ErrLimit) {
+		if q != nil {
+			q.Close()
 		}
 		t.Errorf("a session over the bound: %v", err)
 	}

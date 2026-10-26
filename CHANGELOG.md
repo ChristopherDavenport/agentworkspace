@@ -34,7 +34,7 @@ versions may break the API.
   `fs.ErrClosed` cross the wire as codes, so `errors.Is` holds on the
   client; `ErrUnauthenticated`, `ErrForbidden`, `ErrNoSession` and
   `ErrNoProcess` are its own.
-- Added (remote, from review): every handler refuses a browser page's
+- Added: `remote` refuses, in every handler, a browser page's
   request: one carrying an `Origin`, or a `Sec-Fetch-Site` other than
   `same-origin` or `none`, and a body of another type than its route's
   (`application/json`, or `application/octet-stream` for a file's

@@ -76,7 +76,10 @@ interface.
   hub asks the application's `Enrollment` for an upgrade's workspace
   before the 101, and the workspace end's credentials are in the
   application's HTTP client or header (`WithHTTPClient`,
-  `WithHeader`). The scopes are the workspace end's (`WithScopes`,
+  `WithHeader`); proving the hub to the workspace end, where TLS does
+  not, is the application's too, through a hook at each end
+  (`WithProofHeader` on the 101, `WithHubProof` before anything is
+  served). The scopes are the workspace end's (`WithScopes`,
   required). One `remote.Handler` serves every reconnect, so sessions
   outlive a drop shorter than the lease; HTTP/2 pings notice a dead
   tunnel at both ends. Its connection window is all its streams'

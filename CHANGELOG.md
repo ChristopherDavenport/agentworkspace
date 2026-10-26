@@ -25,6 +25,23 @@ versions may break the API.
   `WWW-Authenticate: Bearer` by default; without `WithChallenge` it
   carries no challenge. A program that relied on the `Bearer` default
   passes `remote.WithChallenge("Bearer")`.
+- Added: hooks for the application to prove the hub to the workspace
+  end before anything is served, where TLS does not (a `ws://`
+  loopback URL behind an `ssh -R` forward, whose port any local user
+  may bind first). `tunnel.WithHubProof(f)` at the workspace end calls
+  `f(req, resp)` with the upgrade as sent and the hub's 101, after the
+  101 and before the connection serves a request; an error ends the
+  connection and is a refusal (`tunnel.ErrHubProof` wraps it), returned
+  from a first dial and tried again within the lease after one that
+  connected. `tunnel.WithProofHeader(f)` on the `Hub` adds the headers
+  `f(r, name)` returns to the 101, given the request the enrollment
+  named workspace `name` for; an error, or a header of the handshake's
+  own, refuses the upgrade (500). The package doc shows an HMAC over a
+  nonce as the proof (the package ships none), and what it does not
+  prove: it authenticates the hub at the handshake and does not bind
+  the connection, so it holds against an impostor that cannot reach the
+  hub (the `ssh -R` case); where one can, use `wss://`. Over `ws://`
+  the upgrade must carry no reusable credential.
 
 ## v0.0.7 - 2026-10-26
 

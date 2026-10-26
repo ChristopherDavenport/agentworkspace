@@ -271,6 +271,7 @@ func TestAnotherSessionCannotTouchAProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
+	go p.Wait() // the client's own wait
 	route := p.(*process).route
 	pid := route[strings.LastIndex(route, "/")+1:]
 	otherWS := dial(t, url, withToken(tokAll))
@@ -356,5 +357,89 @@ func TestClosingTheHandlerWaitsForALapse(t *testing.T) {
 	within(t, 15*time.Second, "the handler's close", func() { h.Close() })
 	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Errorf("a lapsing session's process runs on after the handler's Close: %v", err)
+	}
+}
+
+// A process being closed counts against WithMaxProcesses until it has
+// exited, and a session being closed against WithMaxSessions until it
+// has ended: until then they hold their streams, which the bounds
+// count. (sleep ignores its input's close, so its close takes a grace.)
+func TestAClosingProcessAndSessionCountUntilTheyEnd(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	_, url := serve(t, l, WithInsecureNoAuth(), WithMaxProcesses(1), WithMaxSessions(1))
+	ctx := context.Background()
+	ws := dial(t, url)
+	sleep := agentworkspace.Command{Args: []string{"sleep", "30"}}
+
+	p, err := agentworkspace.Start(ctx, ws, sleep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	go func() { defer close(closed); p.Close() }()
+	time.Sleep(300 * time.Millisecond)
+	if q, err := agentworkspace.Start(ctx, ws, sleep); !errors.Is(err, ErrLimit) {
+		if q != nil {
+			q.Close()
+		}
+		t.Errorf("a start while the only process closes: %v, want ErrLimit", err)
+	}
+	within(t, 10*time.Second, "the close", func() { <-closed })
+	if _, err := agentworkspace.Start(ctx, ws, sleep); err != nil {
+		t.Fatalf("a start once the close has ended: %v", err)
+	}
+
+	// The client's Close closes its session, which ends q a grace later.
+	ended := make(chan struct{})
+	go func() { defer close(ended); ws.Close() }()
+	time.Sleep(300 * time.Millisecond)
+	second := dial(t, url)
+	if r, err := agentworkspace.Start(ctx, second, sleep); !errors.Is(err, ErrLimit) {
+		if r != nil {
+			r.Close()
+		}
+		t.Errorf("a session opened while the only one ends: %v, want ErrLimit", err)
+	}
+	within(t, 10*time.Second, "the session's end", func() { <-ended })
+	r, err := agentworkspace.Start(ctx, second, sleep)
+	if err != nil {
+		t.Fatalf("a session opened once the other has ended: %v", err)
+	}
+	r.Close()
+}
+
+// One wait is in flight for a process at a time, as one stream is for
+// each pipe: another while one waits is refused, so a process holds at
+// most four streams whatever its clients send.
+func TestOneWaitAtATime(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	_, url := serve(t, l, WithInsecureNoAuth())
+	ws := dial(t, url)
+	p, err := agentworkspace.Start(context.Background(), ws, agentworkspace.Command{Args: []string{"sleep", "30"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	// wait asks for the process's wait for d, and says how it was refused,
+	// "" when it was not.
+	wait := func(d time.Duration) string {
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url+p.(*process).route+"/wait", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return ""
+		}
+		defer resp.Body.Close()
+		var r errorReply
+		decodeReply(resp, &r)
+		return r.Error.Code
+	}
+	// The client's own wait, or this one, holds the claim from here on:
+	// the client's until the process exits, this one for three seconds.
+	go wait(3 * time.Second)
+	time.Sleep(300 * time.Millisecond)
+	if code := wait(200 * time.Millisecond); code != codeInvalid {
+		t.Errorf("a second wait: %q, want %q", code, codeInvalid)
 	}
 }

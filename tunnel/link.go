@@ -38,11 +38,19 @@ const (
 // lets the server hold open stay well under MaxStreams: with Serve's
 // defaults for remote's bounds, DefaultSessions sessions of
 // DefaultProcesses processes, each holding at most four streams (its
-// input, its output, its standard error and the client's one wait), are
-// 4 × 32 × 4 = 512 streams, and DefaultTransfers Execs and file reads
-// and writes are 128 more: 640 of 1024, which leaves 384 for the
-// requests answered at once (renewals, starts, signals, closes, the
-// list of offered servers, the file system's). An offered MCP server
+// input, its output, its standard error and one wait), are 4 × 32 × 4
+// = 512 streams, and DefaultTransfers Execs and file reads and writes
+// are 128 more: 640 of 1024, which leaves 384 for the requests
+// answered at once (renewals, starts, signals, closes, the list of
+// offered servers, the file system's).
+//
+// Four a process holds whatever its client sends: remote serves one
+// stream of each of a process's pipes and one wait at a time. A close
+// takes the input's place, the input's stream cut as the close begins,
+// and the process's other streams are cut once it has exited; until
+// then it counts against the processes, and an ending session (whose
+// close is one stream more, for processes holding three) against the
+// sessions. An offered MCP server
 // started through the tunnel is one of its session's processes, with
 // the same four streams, so the arithmetic holds with servers in it.
 // Serve enforces it: it refuses remote bounds (WithHandlerOptions)

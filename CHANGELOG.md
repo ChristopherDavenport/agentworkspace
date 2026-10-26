@@ -47,15 +47,24 @@ versions may break the API.
   transfers, write, Exec output and listing bounds), beside `Lease`.
 - Added: `tunnel.ReservedStreams` (`MaxStreams / 4`), the streams a
   tunnel keeps for the requests answered at once.
-- Changed (breaking): `tunnel.Serve` enforces the stream arithmetic its guarantee
-  rests on (no unread output stops a renewal, a wait or a start): it
-  refuses remote bounds, given through `WithHandlerOptions`, that would
+- Changed (breaking): `tunnel.Serve` enforces the stream arithmetic
+  its guarantee rests on (no unread output stops a renewal, a wait or
+  a start): it refuses remote bounds, given through `WithHandlerOptions`, that would
   let the server hold more than `MaxStreams − ReservedStreams` streams
   open (the sessions its one principal may have × their processes × 4,
   plus the transfers), where before it served them and gave the
   guarantee up. One bound is raised by lowering another. `MaxStreams`
   and the windows are not raised to fit instead: the hub's windows are
   its own, and assume the workspace end allows `MaxStreams` streams.
+- Changed: `remote` keeps what a process and a session hold within its
+  bounds whatever the client sends. A process being closed counts
+  against `WithMaxProcesses` until it has exited, and a session being
+  closed or lapsed against `WithMaxSessions` and
+  `WithMaxSessionsPerPrincipal` until it has ended. A process's input
+  stream is cut as its close begins, and its output, standard error
+  streams once it has exited, read or not. One wait is served for a
+  process at a time: another while one waits is refused (`invalid`),
+  and a client asks again, as `remote.Client` does.
 
 ## v0.0.7 - 2026-10-26
 

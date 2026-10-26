@@ -3,9 +3,13 @@ package tunnel
 import (
 	"bufio"
 	"context"
+	"fmt"
+	"io"
 	"io/fs"
 	"math"
+	"net/http"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -137,5 +141,67 @@ func TestUnreadOutputStarvesNothing(t *testing.T) {
 	}
 	if err := victim.Signal(syscall.SIGCONT); err != nil {
 		t.Errorf("a Signal to the victim: %v", err)
+	}
+}
+
+// With the server holding every stream its bounds allow open, the
+// streams ReservedStreams keeps are spare: a session's renewals get
+// through for several leases, and so do a Signal and a Stat. The
+// bounds are one process and the transfers to the budget, each
+// transfer a write whose body never ends; transfers past the bound are
+// refused at once and hold nothing.
+func TestTheReservedStreamsAreSpare(t *testing.T) {
+	const (
+		lease = time.Second
+		extra = 20
+	)
+	transfers := MaxStreams - ReservedStreams - streamsPerProcess
+	r := newRig(t)
+	r.serve(t, local(t, t.TempDir(), pathEnv()), WithScopes(allScopes...), bearer(tokA), fast,
+		WithHandlerOptions(remote.WithLease(lease), remote.WithMaxSessions(1), remote.WithMaxProcesses(1), remote.WithMaxTransfers(transfers)))
+	ws := r.workspace(t, "a")
+	p, _, pid := pidOf(t, ws.(agentworkspace.Starter), "echo $$; exec sleep 60")
+
+	cc := r.current("a").cc
+	var refused atomic.Int32
+	var writers []*io.PipeWriter
+	defer func() {
+		for _, w := range writers {
+			w.Close()
+		}
+	}()
+	for i := range transfers + extra {
+		pr, pw := io.Pipe()
+		writers = append(writers, pw)
+		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://a.tunnel.invalid/v1/fs/file?path=f%d&perm=420", i), pr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+		go func() {
+			resp, err := cc.RoundTrip(req)
+			if err != nil {
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusRequestEntityTooLarge {
+				refused.Add(1)
+			}
+		}()
+	}
+	eventually(t, 20*time.Second, "the transfers past the bound refused", func() bool { return refused.Load() == extra })
+
+	time.Sleep(3 * lease)
+	if !alive(pid) {
+		t.Fatal("the session lapsed with the transfers held: a renewal did not get through")
+	}
+	if err := p.Signal(syscall.SIGCONT); err != nil {
+		t.Errorf("a Signal with the transfers held: %v", err)
+	}
+	if _, err := fs.Stat(ws.FS(), "."); err != nil {
+		t.Errorf("a Stat with the transfers held: %v", err)
+	}
+	if n := refused.Load(); n != extra {
+		t.Errorf("%d transfers refused, want %d", n, extra)
 	}
 }

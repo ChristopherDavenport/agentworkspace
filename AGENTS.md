@@ -90,8 +90,12 @@ interface.
   either. `Serve` enforces the second (`fits`, against
   `remote.Handler.Bounds`): bounds that would hold more than
   `MaxStreams − ReservedStreams` open are refused, not met by raising
-  `MaxStreams`, which the hub's windows assume. Offered MCP servers cross as remote carries them
-  (`WithScopes` with `remote.ScopeServers`).
+  `MaxStreams`, which the hub's windows assume. The four streams a
+  process counts for are remote's to keep (one of each pipe and one
+  wait at a time, streams cut at a close, a closing process or session
+  counted until it has ended), not a client's. Offered MCP servers
+  cross as remote carries them (`WithScopes` with
+  `remote.ScopeServers`).
 - Planned, beside them: a container starter.
 - Releases are lockstep, as agenttool's: the root and every nested
   module at one version from one commit, a nested module requiring the

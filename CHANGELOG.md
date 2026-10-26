@@ -5,6 +5,40 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added: package `remote`, in the root module and on the standard
+  library alone: a whole `Workspace` served over HTTP (`NewHandler`,
+  a `*Handler` the program mounts, with `Close`) and one at the other
+  end (`Dial`, which returns a `Workspace`: a `*Client`, or a
+  `*StarterClient` when the served workspace is a `Starter` and the
+  principal holds `exec`; `Served` is the served workspace's own
+  `Descriptor`, and `Descriptor` is `KindRemote` with the base URL as
+  its `Ref`). Its `FS` is an `fs.StatFS` and `fs.ReadDirFS`, and an
+  `fs.ReadLinkFS` when the served one is; `Open` never blocks, and a
+  regular file's content is streamed. `Exec` streams `Command.Stream`
+  as NDJSON frames under the request's context; a started process's
+  pipes are streams, its wait a long poll, its signals sent by name.
+  Authentication fails closed: `Scope` (`read`, `write`, `exec`, never
+  implied), `Principal`, `Authenticator`, `BearerTokens` (constant
+  time), `WithAuthenticator`, `WithInsecureNoAuth`, `WithBearerToken`,
+  `WithHTTPClient`, `WithTimeout`, and `PrincipalFrom`. Processes live
+  in a session the client opens at `Dial` and renews on a lease
+  (`WithLease`); its lapse, `Client.Close` and `Handler.Close` end
+  them. The bounds: `MaxRequestBytes`, `MaxErrorBytes`, `StderrBytes`,
+  `MaxReplyBytes`, and `DefaultLease`, `DefaultMaxSessions`,
+  `DefaultMaxProcesses`, `DefaultMaxWriteBytes` and
+  `DefaultMaxDirEntries` with their options; over one is `ErrLimit`.
+  `ErrOutside`, `fs.ErrNotExist`, `fs.ErrExist`, `fs.ErrPermission`,
+  `fs.ErrInvalid`, `errors.ErrUnsupported`, `os.ErrProcessDone` and
+  `fs.ErrClosed` cross the wire as codes, so `errors.Is` holds on the
+  client; `ErrUnauthenticated`, `ErrForbidden`, `ErrNoSession` and
+  `ErrNoProcess` are its own.
+- Added (tests): the confinement, FIFO, `Exec`, name and `Start`
+  tables run on every backend, `remote` over `Local` among them,
+  which joins from package `agentworkspace_test` (`AddBackend`,
+  `AddStarter`).
+
 ## v0.0.4 - 2026-10-25
 
 - Added: an offered server's `Secrets`, the variables of its

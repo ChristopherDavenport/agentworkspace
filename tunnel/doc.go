@@ -182,7 +182,8 @@
 // under MaxStreams with room to spare, so no output left unread and no
 // number of open streams the handler allows keeps a renewal, a Wait, a
 // Signal, a Close or a Start from getting through; MaxStreams' doc has
-// the arithmetic. An upgrade, and the wait for HTTP/2 to start on it,
+// the arithmetic, and Serve refuses remote bounds (WithHandlerOptions)
+// that would break it. An upgrade, and the wait for HTTP/2 to start on it,
 // take at most HandshakeTimeout. Serve's ctx ending closes the
 // connection and the handler, which ends every process the server
 // started; Hub.Close closes every connection.

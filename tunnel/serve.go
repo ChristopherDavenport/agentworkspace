@@ -38,7 +38,8 @@ const stable = 10 * time.Second
 
 // Serve's defaults for remote's bounds, which keep the streams the
 // server can hold open on one tunnel well under MaxStreams (see the
-// arithmetic there). WithHandlerOptions may change them.
+// arithmetic there). WithHandlerOptions may change them within that
+// arithmetic, which Serve enforces.
 const (
 	// DefaultSessions bounds the sessions the server may hold open
 	// (remote.WithMaxSessions and remote.WithMaxSessionsPerPrincipal:
@@ -143,10 +144,13 @@ func WithHubProof(f func(req *http.Request, resp *http.Response) error) Option {
 // WithHandlerOptions passes opts to the remote.Handler the workspace is
 // served by: its lease and its bounds. They are applied after the
 // tunnel's own defaults for remote's bounds (DefaultSessions,
-// DefaultProcesses, DefaultTransfers), which they may change; raising
-// those past MaxStreams' arithmetic lets open streams starve a
-// renewal. An authenticator among them is replaced by the tunnel's,
-// and WithInsecureNoAuth is refused.
+// DefaultProcesses, DefaultTransfers), which they may change within
+// MaxStreams' arithmetic: Serve refuses bounds that would let the
+// server hold more than MaxStreams − ReservedStreams streams open, so
+// that open streams never starve a renewal. One bound is raised by
+// lowering another (twice the processes in half the sessions). An
+// authenticator among them is replaced by the tunnel's, and
+// WithInsecureNoAuth is refused.
 func WithHandlerOptions(opts ...remote.Option) Option {
 	return serveOption(func(c *serveConfig) { c.handler = append(c.handler, opts...) })
 }
@@ -244,8 +248,31 @@ func Serve(ctx context.Context, serverURL string, ws agentworkspace.Workspace, o
 		return err
 	}
 	defer h.Close()
+	if err := fits(h.Bounds()); err != nil {
+		return err
+	}
 	s := &server{cfg: cfg, url: u.String(), host: u.Host, h: h}
 	return s.run(ctx)
+}
+
+// streamsPerProcess are the streams one process holds open at most:
+// its input, its output, its standard error and the client's wait.
+const streamsPerProcess = 4
+
+// fits says whether remote bounds b keep the streams the server can
+// hold open within MaxStreams − ReservedStreams: the sessions the
+// tunnel's one principal may have, each with its processes' streams,
+// and the transfers. Bounds of any size are checked without
+// overflowing.
+func fits(b remote.Bounds) error {
+	budget := MaxStreams - ReservedStreams
+	sessions := min(b.MaxSessions, b.MaxSessionsPerPrincipal)
+	if b.MaxTransfers <= budget && sessions <= budget &&
+		b.MaxProcesses <= (budget-b.MaxTransfers)/(streamsPerProcess*sessions) {
+		return nil
+	}
+	return fmt.Errorf("tunnel: remote's bounds let the server hold %d sessions × %d processes × %d streams + %d transfers open, over the %d of MaxStreams − ReservedStreams; lower one (WithHandlerOptions)",
+		sessions, b.MaxProcesses, streamsPerProcess, b.MaxTransfers, budget)
 }
 
 // dialURL is serverURL checked: wss, or ws to a loopback host, and no

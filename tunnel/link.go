@@ -38,19 +38,42 @@ const (
 // lets the server hold open stay well under MaxStreams: with Serve's
 // defaults for remote's bounds, DefaultSessions sessions of
 // DefaultProcesses processes, each holding at most four streams (its
-// input, its output, its standard error and the client's one wait), are
-// 4 × 32 × 4 = 512 streams, and DefaultTransfers Execs and file reads
-// and writes are 128 more: 640 of 1024, which leaves 384 for the
-// requests answered at once (renewals, starts, signals, closes, the
-// list of offered servers, the file system's). An offered MCP server
+// input, its output, its standard error and one wait), are 4 × 32 × 4
+// = 512 streams, and DefaultTransfers Execs and file reads and writes
+// are 128 more: 640 of 1024, which leaves 384 for the requests
+// answered at once (renewals, starts, signals, closes, the list of
+// offered servers, the file system's).
+//
+// Four a process holds whatever its client sends: remote serves one
+// stream of each of a process's pipes and one wait at a time. A close
+// takes the input's place, the input's stream cut as the close begins,
+// and the process's other streams are cut once it has exited; until
+// then it counts against the processes, and an ending session (whose
+// close is one stream more, for processes holding three) against the
+// sessions. An offered MCP server
 // started through the tunnel is one of its session's processes, with
-// the same four streams, so the arithmetic holds with servers in it. Raising remote's bounds through WithHandlerOptions
-// past that arithmetic gives the guarantee up.
+// the same four streams, so the arithmetic holds with servers in it.
+// Serve enforces it: it refuses remote bounds (WithHandlerOptions)
+// that would let the server hold more than MaxStreams −
+// ReservedStreams open, the sessions it may have (the lesser of
+// remote's two bounds of them, the tunnel being one principal) × their
+// processes × 4, and the transfers.
+//
+// MaxStreams and the windows are not raised to fit larger bounds
+// instead: the hub is another program, whose windows are its own and
+// assume the workspace end allows MaxStreams streams, so a workspace
+// end that allowed more would let the streams' windows outgrow the
+// hub's connection window, and one stream's unread output stall the
+// rest again.
 const (
 	// MaxStreams bounds the requests open at once on one tunnel: every
 	// stream, wait and Exec of remote's is one while it lasts. Past it, a
 	// request waits for one to end.
 	MaxStreams = 1024
+	// ReservedStreams are the streams of MaxStreams kept for the
+	// requests answered at once: remote's bounds may let the server
+	// hold the rest open, and no more (Serve refuses them).
+	ReservedStreams = MaxStreams / 4
 	// StreamWindow is how much of one request's or reply's body either
 	// end holds that its reader has not taken; a reader that takes no
 	// more stalls that stream alone.

@@ -61,9 +61,13 @@ type Handler struct {
 	stop          context.CancelFunc
 	inflight      sync.WaitGroup // the Execs and process closes Close waits for
 
-	mu        sync.Mutex
-	closed    bool
-	sessions  map[string]*session
+	mu       sync.Mutex
+	closed   bool
+	sessions map[string]*session
+	// ending are the sessions out of the table that have not ended yet:
+	// their processes hold streams until they have exited, so they
+	// count against the bounds of sessions until then.
+	ending    map[*session]struct{}
 	transfers int // the transfers being served
 }
 
@@ -118,8 +122,9 @@ func WithMaxSessionsPerPrincipal(n int) Option { return func(h *Handler) { h.max
 // that output is its own (Local's is not bounded).
 func WithMaxExecOutputBytes(n int64) Option { return func(h *Handler) { h.maxOutput = n } }
 
-// WithMaxProcesses bounds the processes open at once in one session;
-// the default is DefaultMaxProcesses.
+// WithMaxProcesses bounds the processes open at once in one session, a
+// closed one counted until it has exited; the default is
+// DefaultMaxProcesses.
 func WithMaxProcesses(n int) Option { return func(h *Handler) { h.maxProcesses = n } }
 
 // WithMaxWriteBytes bounds a WriteFile's data and an Exec's stdin; the
@@ -140,6 +145,13 @@ func WithMaxTransfers(n int) Option { return func(h *Handler) { h.maxTransfers =
 
 // NewHandler serves ws. It refuses a nil workspace, a bound that is not
 // positive, and both an authenticator and WithInsecureNoAuth.
+//
+// A program that wraps the handler's http.ResponseWriter (middleware
+// that logs or measures) gives the wrapper an Unwrap method returning
+// the server's, as http.ResponseController asks: through it the
+// handler flushes a stream, and cuts a closed process's streams by
+// their deadlines, which keeps what a process holds within its bounds
+// whatever its client does.
 func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 	if ws == nil {
 		return nil, errors.New("remote: no workspace to serve")
@@ -155,6 +167,7 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 		maxDirEntries: DefaultMaxDirEntries,
 		maxTransfers:  DefaultMaxTransfers,
 		sessions:      map[string]*session{},
+		ending:        map[*session]struct{}{},
 	}
 	for _, o := range opts {
 		if o != nil {
@@ -342,6 +355,35 @@ func (h *Handler) isClosed() bool {
 // Lease is how long a session lives without a renewal: WithLease's, or
 // DefaultLease.
 func (h *Handler) Lease() time.Duration { return h.lease }
+
+// Bounds are a Handler's bounds, each its option's or its default: what
+// a program that serves the handler over a wire of its own checks that
+// wire's limits against (tunnel does, against its streams). The lease
+// is Lease's, and the bounds no option changes (MaxRequestBytes,
+// StderrBytes, MaxReplyBytes, MaxErrorBytes) are constants, not
+// repeated here.
+type Bounds struct {
+	MaxSessions             int   // WithMaxSessions
+	MaxSessionsPerPrincipal int   // WithMaxSessionsPerPrincipal
+	MaxProcesses            int   // WithMaxProcesses, in one session
+	MaxTransfers            int   // WithMaxTransfers
+	MaxWriteBytes           int64 // WithMaxWriteBytes
+	MaxExecOutputBytes      int64 // WithMaxExecOutputBytes
+	MaxDirEntries           int   // WithMaxDirEntries
+}
+
+// Bounds are the bounds h was made with.
+func (h *Handler) Bounds() Bounds {
+	return Bounds{
+		MaxSessions:             h.maxSessions,
+		MaxSessionsPerPrincipal: h.maxPerOwner,
+		MaxProcesses:            h.maxProcesses,
+		MaxTransfers:            h.maxTransfers,
+		MaxWriteBytes:           h.maxWrite,
+		MaxExecOutputBytes:      h.maxOutput,
+		MaxDirEntries:           h.maxDirEntries,
+	}
+}
 
 // transfer serves f as one of the transfers WithMaxTransfers bounds,
 // refusing (and answering) one past the bound.

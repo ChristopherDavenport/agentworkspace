@@ -301,6 +301,39 @@ func TestNamesThatAreNotUTF8(t *testing.T) {
 	}
 }
 
+// A handler's Bounds are its options', or the defaults without them.
+func TestAHandlerSaysItsBounds(t *testing.T) {
+	l, _ := newLocal(t, nil)
+	for _, c := range []struct {
+		name string
+		opts []Option
+		want Bounds
+	}{
+		{"defaults", nil, Bounds{
+			MaxSessions: DefaultMaxSessions, MaxSessionsPerPrincipal: DefaultMaxSessionsPerPrincipal,
+			MaxProcesses: DefaultMaxProcesses, MaxTransfers: DefaultMaxTransfers,
+			MaxWriteBytes: DefaultMaxWriteBytes, MaxExecOutputBytes: DefaultMaxExecOutputBytes,
+			MaxDirEntries: DefaultMaxDirEntries,
+		}},
+		{"options", []Option{
+			WithMaxSessions(3), WithMaxSessionsPerPrincipal(2), WithMaxProcesses(5), WithMaxTransfers(7),
+			WithMaxWriteBytes(11), WithMaxExecOutputBytes(13), WithMaxDirEntries(17),
+		}, Bounds{
+			MaxSessions: 3, MaxSessionsPerPrincipal: 2, MaxProcesses: 5, MaxTransfers: 7,
+			MaxWriteBytes: 11, MaxExecOutputBytes: 13, MaxDirEntries: 17,
+		}},
+	} {
+		h, err := NewHandler(l, append(c.opts, WithInsecureNoAuth())...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := h.Bounds(); got != c.want {
+			t.Errorf("%s: Bounds = %+v, want %+v", c.name, got, c.want)
+		}
+		h.Close()
+	}
+}
+
 // The transfers served at once are bounded: an Exec that is running
 // holds one, one more is ErrLimit, and its end frees it. A session's
 // routes are not counted. (A file's content would hold one only while

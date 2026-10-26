@@ -87,8 +87,15 @@ interface.
   server can hold open under `MaxStreams` (the arithmetic is on that
   constant, and a started server is one of its session's processes),
   so no unread output starves a renewal; keep both true when changing
-  either. Offered MCP servers cross as remote carries them
-  (`WithScopes` with `remote.ScopeServers`).
+  either. `Serve` enforces the second (`fits`, against
+  `remote.Handler.Bounds`): bounds that would hold more than
+  `MaxStreams − ReservedStreams` open are refused, not met by raising
+  `MaxStreams`, which the hub's windows assume. The four streams a
+  process counts for are remote's to keep (one of each pipe and one
+  wait at a time, streams cut at a close, a closing process or session
+  counted until it has ended), not a client's. Offered MCP servers
+  cross as remote carries them (`WithScopes` with
+  `remote.ScopeServers`).
 - Planned, beside them: a container starter.
 - Releases are lockstep, as agenttool's: the root and every nested
   module at one version from one commit, a nested module requiring the

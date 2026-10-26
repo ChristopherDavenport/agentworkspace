@@ -23,6 +23,9 @@ const (
 	// DefaultMaxSessions bounds the sessions open at once on one
 	// Handler (WithMaxSessions).
 	DefaultMaxSessions = 64
+	// DefaultMaxSessionsPerPrincipal bounds the sessions one principal
+	// has open at once (WithMaxSessionsPerPrincipal).
+	DefaultMaxSessionsPerPrincipal = 8
 	// DefaultMaxProcesses bounds the processes open at once in one
 	// session (WithMaxProcesses).
 	DefaultMaxProcesses = 32
@@ -31,6 +34,10 @@ const (
 	DefaultMaxWriteBytes = 32 << 20
 	// DefaultMaxDirEntries bounds one listing (WithMaxDirEntries).
 	DefaultMaxDirEntries = 10000
+	// DefaultMaxExecOutputBytes bounds each of the standard output and
+	// the standard error an Exec without a Stream sends back
+	// (WithMaxExecOutputBytes).
+	DefaultMaxExecOutputBytes = 16 << 20
 )
 
 // The bounds that are not options.
@@ -47,10 +54,23 @@ const (
 	// is dropped, so that the process never waits on a slow client's
 	// Command.Stream.
 	StderrBytes = 256 << 10
-	// MaxReplyBytes bounds a JSON reply a client reads: everything but
-	// Exec's frames, whose size is the served workspace's output.
+	// MaxReplyBytes bounds a JSON reply a client reads but Exec's
+	// frames, each of which the client bounds by what the server says
+	// it sends: a data frame at most a chunk, the Output twice the
+	// base64 of the server's output bound.
 	MaxReplyBytes = 16 << 20
 )
+
+// frameChunk bounds the data one of Exec's data frames carries.
+const frameChunk = 32 << 10
+
+// b64 is the length of n bytes in base64.
+func b64(n int64) int64 { return (n + 2) / 3 * 4 }
+
+// frameLimit bounds one of Exec's frames, for a server whose output
+// bound is maxOutput: the Output frame's two streams, base64, and room
+// for the rest of a frame.
+func frameLimit(maxOutput int64) int64 { return 2*b64(maxOutput) + 64<<10 }
 
 // The routes, under the base URL. A name is the query's path, a
 // session's id and a process's are path elements.
@@ -83,14 +103,15 @@ func (d descriptor) workspace() agentworkspace.Descriptor {
 // limits are the bounds a server keeps, as the info route says them,
 // so that a client sends no more.
 type limits struct {
-	LeaseMs       int64 `json:"leaseMs"`
-	MaxProcesses  int   `json:"maxProcesses"`
-	MaxWriteBytes int64 `json:"maxWriteBytes"`
-	MaxDirEntries int   `json:"maxDirEntries"`
+	LeaseMs        int64 `json:"leaseMs"`
+	MaxProcesses   int   `json:"maxProcesses"`
+	MaxWriteBytes  int64 `json:"maxWriteBytes"`
+	MaxOutputBytes int64 `json:"maxOutputBytes"`
+	MaxDirEntries  int   `json:"maxDirEntries"`
 }
 
 func (l limits) valid() bool {
-	return l.LeaseMs > 0 && l.MaxProcesses > 0 && l.MaxWriteBytes > 0 && l.MaxDirEntries > 0
+	return l.LeaseMs > 0 && l.MaxProcesses > 0 && l.MaxWriteBytes > 0 && l.MaxOutputBytes > 0 && l.MaxDirEntries > 0
 }
 
 // infoReply is the info route's: the served workspace and what it, and
@@ -194,7 +215,16 @@ type startRequest struct {
 	// Stderr asks for standard error, on the stderr route; without it,
 	// it is discarded.
 	Stderr bool `json:"stderr,omitempty"`
+	// Key is the client's name for the start, which becomes the
+	// process's id: a start repeated with the same key is answered
+	// with the same process, and a client whose reply was lost closes
+	// the process by it.
+	Key string `json:"key,omitempty"`
 }
+
+// validKey reports whether key can name a start: an id, long enough
+// that the client chose it at random.
+func validKey(key string) bool { return len(key) >= 16 && validID(key) }
 
 type startedReply struct {
 	ID string `json:"id"`

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"syscall"
 
@@ -49,6 +50,7 @@ const (
 	codeLimit           = "limit"
 	codeNoSession       = "no_session"
 	codeNoProcess       = "no_process"
+	codeMediaType       = "media_type"
 	codeOther           = "other"
 )
 
@@ -73,6 +75,9 @@ var codes = []struct {
 	{codeLimit, ErrLimit, http.StatusRequestEntityTooLarge},
 	{codeNoSession, ErrNoSession, http.StatusNotFound},
 	{codeNoProcess, ErrNoProcess, http.StatusNotFound},
+	// A body of another type than the route's: the client's mistake,
+	// as an invalid name is.
+	{codeMediaType, fs.ErrInvalid, http.StatusUnsupportedMediaType},
 }
 
 // wireError is an error on the wire: its code and the server's words.
@@ -96,13 +101,15 @@ func statusOf(code string) int {
 	return http.StatusInternalServerError
 }
 
-// errorOf is err, a served workspace's, as the wire carries it. A
-// mapped error's message is the system's words for it (an errno's
-// text) or the sentinel's, never the error's own text, which may name
-// a path on the server's machine; the request's name is the client's
-// to add. Any other error's message is its text, bounded: the served
-// workspace's words, such as "x is not a regular file".
-func errorOf(err error) wireError {
+// errorOf is err, a served workspace's whose Root is root, as the wire
+// carries it. A mapped error's message is the system's words for it (an
+// errno's text) or the sentinel's, never the error's own text, which
+// may name a path on the server's machine; the request's name is the
+// client's to add. So is an unmapped errno's (ENOSPC, ENOTDIR, EIO):
+// its text alone. Any other error's message is its text, scrubbed and
+// bounded: the served workspace's words, such as "x is not a regular
+// file", with root cut from it.
+func errorOf(root string, err error) wireError {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return wireError{Code: codeOther, Message: "the request ended"}
 	}
@@ -117,7 +124,34 @@ func errorOf(err error) wireError {
 		}
 		return wireError{Code: c.code, Message: bounded(msg)}
 	}
-	return wireError{Code: codeOther, Message: bounded(err.Error())}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return wireError{Code: codeOther, Message: errno.Error()}
+	}
+	return wireError{Code: codeOther, Message: bounded(scrub(root, err.Error()))}
+}
+
+// scrub is msg with the served root cut from it, a name under it left
+// relative to it and the root itself ".", and every other word that is
+// an absolute path cut to its last element ("/usr/bin/tool" is
+// ".../tool"). What remains is the served workspace's words and the
+// last element of any path in them.
+func scrub(root, msg string) string {
+	if root != "" && root != "/" {
+		msg = strings.ReplaceAll(msg, root+"/", "")
+	}
+	words := strings.Split(msg, " ")
+	for i, w := range words {
+		lead := len(w) - len(strings.TrimLeft(w, `"'(`))
+		core := strings.TrimRight(w[lead:], `"'):,;`)
+		switch {
+		case core == root && root != "":
+			words[i] = w[:lead] + "." + w[lead+len(core):]
+		case len(core) > 1 && core[0] == '/':
+			words[i] = w[:lead] + ".../" + path.Base(core) + w[lead+len(core):]
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // bounded is s cut to MaxErrorBytes and made valid UTF-8.

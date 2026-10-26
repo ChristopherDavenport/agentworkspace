@@ -34,9 +34,10 @@ type session struct {
 	deadline time.Time
 	gone     bool // out of the table
 
-	mu    sync.Mutex
-	ended bool
-	procs map[string]*proc
+	mu     sync.Mutex
+	ended  bool
+	procs  map[string]*proc
+	closed keyRing // the keys of the processes closed, the latest
 
 	endOnce sync.Once
 }
@@ -78,8 +79,9 @@ func (sp *proc) close() {
 	sp.cancel()
 }
 
-// exit is how the process ended, once it has.
-func (sp *proc) exit() exitReply {
+// exit is how the process ended, once it has, its error's words as
+// errorOf gives them for root.
+func (sp *proc) exit(root string) exitReply {
 	r := exitReply{Status: sp.status}
 	switch {
 	case errors.Is(sp.err, context.DeadlineExceeded):
@@ -87,19 +89,51 @@ func (sp *proc) exit() exitReply {
 	case errors.Is(sp.err, context.Canceled):
 		r.Ended = endedCanceled
 	case sp.err != nil:
-		r.Error = bounded(sp.err.Error())
+		r.Error = errorOf(root, sp.err).Message
 	}
 	return r
 }
 
+// keyRing is the latest keys of a session's closed processes, so a
+// start repeated after its process closed starts nothing: at most
+// closedKeys of them.
+type keyRing struct {
+	set   map[string]bool
+	order []string
+}
+
+const closedKeys = 1024
+
+func (k *keyRing) add(key string) {
+	if k.set == nil {
+		k.set = map[string]bool{}
+	}
+	if len(k.order) == closedKeys {
+		delete(k.set, k.order[0])
+		k.order = k.order[1:]
+	}
+	k.set[key] = true
+	k.order = append(k.order, key)
+}
+
 func (h *Handler) openSession(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.ws.(agentworkspace.Starter); !ok {
-		fail(w, fmt.Errorf("a %s workspace cannot start a process: %w", h.ws.Descriptor().Kind, errors.ErrUnsupported))
+		h.fail(w, fmt.Errorf("a %s workspace cannot start a process: %w", h.ws.Descriptor().Kind, errors.ErrUnsupported))
+		return
+	}
+	var req struct{}
+	if !decode(w, r, MaxRequestBytes, &req) {
 		return
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	s := &session{id: rand.Text(), owner: principalOf(r).Name, ctx: ctx, stop: stop, procs: map[string]*proc{}}
 	h.mu.Lock()
+	owned := 0
+	for _, o := range h.sessions {
+		if o.owner == s.owner {
+			owned++
+		}
+	}
 	switch {
 	case h.closed:
 		h.mu.Unlock()
@@ -110,6 +144,11 @@ func (h *Handler) openSession(w http.ResponseWriter, r *http.Request) {
 		h.mu.Unlock()
 		stop()
 		writeError(w, wireError{Code: codeLimit, Message: fmt.Sprintf("%d sessions are open, the most there may be", h.maxSessions)})
+		return
+	case owned >= h.maxPerOwner:
+		h.mu.Unlock()
+		stop()
+		writeError(w, wireError{Code: codeLimit, Message: fmt.Sprintf("the principal has %d sessions open, the most one may have", h.maxPerOwner)})
 		return
 	}
 	s.deadline = time.Now().Add(h.lease)
@@ -207,11 +246,11 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req startRequest
-	if !decode(w, r, MaxRequestBytes, &req) {
+	if !decode(w, r, MaxRequestBytes, &req) || !validTimeout(w, req.TimeoutMs) {
 		return
 	}
-	if req.TimeoutMs < 0 {
-		writeError(w, wireError{Code: codeInvalid, Message: "a negative timeout"})
+	if req.Key != "" && !validKey(req.Key) {
+		writeError(w, wireError{Code: codeInvalid, Message: "a start key is 16 to 64 letters and digits"})
 		return
 	}
 	cmd := agentworkspace.Command{Args: req.Args, Dir: req.Dir, Env: req.Env, Timeout: time.Duration(req.TimeoutMs) * time.Millisecond}
@@ -228,6 +267,13 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 	case s.ended:
 		writeError(w, wireError{Code: codeNoSession, Message: ErrNoSession.Error()})
 		return
+	case s.procs[req.Key] != nil:
+		// The same start again: its reply was lost.
+		writeJSON(w, startedReply{ID: req.Key})
+		return
+	case s.closed.set[req.Key]:
+		writeError(w, wireError{Code: codeNoProcess, Message: "the process this key started is closed"})
+		return
 	case len(s.procs) >= h.maxProcesses:
 		writeError(w, wireError{Code: codeLimit, Message: fmt.Sprintf("%d processes are open in this session, the most there may be; close one first", h.maxProcesses)})
 		return
@@ -236,7 +282,7 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 	p, err := agentworkspace.Start(ctx, h.ws, cmd)
 	if err != nil {
 		cancel()
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	sp.p, sp.cancel = p, cancel
@@ -249,7 +295,10 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 		}
 		close(sp.exited)
 	}()
-	id := rand.Text()
+	id := req.Key
+	if id == "" {
+		id = rand.Text()
+	}
 	s.procs[id] = sp
 	writeJSON(w, startedReply{ID: id})
 }
@@ -278,7 +327,7 @@ func (h *Handler) stdin(w http.ResponseWriter, r *http.Request) {
 		err = cerr
 	}
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -356,7 +405,7 @@ func (h *Handler) wait(w http.ResponseWriter, r *http.Request) {
 	}
 	select {
 	case <-sp.exited:
-		writeJSON(w, sp.exit())
+		writeJSON(w, sp.exit(h.ws.Root()))
 	case <-r.Context().Done():
 	}
 }
@@ -376,7 +425,7 @@ func (h *Handler) signal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := sp.p.Signal(sig); err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -389,27 +438,42 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 	if sp == nil {
 		return
 	}
+	var req struct{}
+	if !decode(w, r, MaxRequestBytes, &req) {
+		return
+	}
 	sp.cancel()
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // closeProcess ends the process, as Process.Close does, and answers
-// how it ended.
+// how it ended. The handler's Close waits for it, as it is out of the
+// session's table while it ends.
 func (h *Handler) closeProcess(w http.ResponseWriter, r *http.Request) {
 	s := h.sessionOf(w, r)
 	if s == nil {
 		return
 	}
+	done, ok := h.track()
+	if !ok {
+		writeError(w, wireError{Code: codeClosed, Message: "the server is closed"})
+		return
+	}
+	defer done()
+	pid := r.PathValue("pid")
 	s.mu.Lock()
-	sp := s.procs[r.PathValue("pid")]
-	delete(s.procs, r.PathValue("pid"))
+	sp := s.procs[pid]
+	if sp != nil {
+		delete(s.procs, pid)
+		s.closed.add(pid)
+	}
 	s.mu.Unlock()
 	if sp == nil {
 		writeError(w, wireError{Code: codeNoProcess, Message: ErrNoProcess.Error()})
 		return
 	}
 	sp.close()
-	writeJSON(w, sp.exit())
+	writeJSON(w, sp.exit(h.ws.Root()))
 }
 
 // stderrBuffer is what a process wrote to its standard error that the

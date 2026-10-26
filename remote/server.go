@@ -9,9 +9,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
+	"mime"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -27,20 +32,30 @@ import (
 //
 // Every request is authenticated first, whatever its route, and
 // refused without an authenticator unless the handler was made with
-// WithInsecureNoAuth: it fails closed. Closing the handler ends every
-// session's processes; the served workspace is the program's to close.
+// WithInsecureNoAuth: it fails closed. Before that, a request that
+// looks like a browser page's is refused in every mode (it carries an
+// Origin, or a Sec-Fetch-Site other than same-origin or none: this API
+// has no browser clients), and a route that takes a body takes only
+// its own type (application/json, or application/octet-stream for a
+// file's content and a process's input), which a page cannot send
+// without a preflight. Closing the handler ends every session's
+// processes and every Exec; the served workspace is the program's to
+// close.
 type Handler struct {
 	ws            agentworkspace.Workspace
 	auth          Authenticator
 	insecure      bool
 	lease         time.Duration
 	maxSessions   int
+	maxPerOwner   int
 	maxProcesses  int
 	maxWrite      int64
+	maxOutput     int64
 	maxDirEntries int
 	mux           *http.ServeMux
 	ctx           context.Context // ends with Close, and every Exec with it
 	stop          context.CancelFunc
+	inflight      sync.WaitGroup // the Execs and process closes Close waits for
 
 	mu       sync.Mutex
 	closed   bool
@@ -58,7 +73,12 @@ func WithAuthenticator(a Authenticator) Option { return func(h *Handler) { h.aut
 // WithInsecureNoAuth serves every request, unauthenticated, as a
 // principal named "insecure" that holds every scope. For tests, and for
 // a program that has decided nothing reaches the handler but itself
-// (a loopback listener it alone dials), explicitly.
+// (a loopback listener it alone dials), explicitly. Such a handler
+// answers only a request whose Host is a loopback name or address
+// (localhost, 127.0.0.0/8, ::1, with any port), so a page that rebinds
+// a name of its own to 127.0.0.1 is refused; the browser checks every
+// handler makes (no Origin, no cross-site Sec-Fetch-Site, typed bodies)
+// keep a page from sending it a request at all.
 func WithInsecureNoAuth() Option { return func(h *Handler) { h.insecure = true } }
 
 // WithLease is how long a session lives without a renewal; the default
@@ -68,6 +88,19 @@ func WithLease(d time.Duration) Option { return func(h *Handler) { h.lease = d }
 // WithMaxSessions bounds the sessions open at once; the default is
 // DefaultMaxSessions.
 func WithMaxSessions(n int) Option { return func(h *Handler) { h.maxSessions = n } }
+
+// WithMaxSessionsPerPrincipal bounds the sessions one principal (by
+// Name) has open at once, so that one cannot take every slot; the
+// default is DefaultMaxSessionsPerPrincipal.
+func WithMaxSessionsPerPrincipal(n int) Option { return func(h *Handler) { h.maxPerOwner = n } }
+
+// WithMaxExecOutputBytes bounds each of the standard output and the
+// standard error an Exec without a Command.Stream sends back; the
+// default is DefaultMaxExecOutputBytes. Past it the command has run,
+// and its Exec is ErrLimit, its output not sent: one whose output may
+// be larger gives a Stream. The served workspace's own buffering of
+// that output is its own (Local's is not bounded).
+func WithMaxExecOutputBytes(n int64) Option { return func(h *Handler) { h.maxOutput = n } }
 
 // WithMaxProcesses bounds the processes open at once in one session;
 // the default is DefaultMaxProcesses.
@@ -91,8 +124,10 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 		ws:            ws,
 		lease:         DefaultLease,
 		maxSessions:   DefaultMaxSessions,
+		maxPerOwner:   DefaultMaxSessionsPerPrincipal,
 		maxProcesses:  DefaultMaxProcesses,
 		maxWrite:      DefaultMaxWriteBytes,
+		maxOutput:     DefaultMaxExecOutputBytes,
 		maxDirEntries: DefaultMaxDirEntries,
 		sessions:      map[string]*session{},
 	}
@@ -106,7 +141,7 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 		return nil, errors.New("remote: an authenticator and WithInsecureNoAuth; choose one")
 	case h.lease < time.Millisecond:
 		return nil, fmt.Errorf("remote: a lease of %v; at least a millisecond", h.lease)
-	case h.maxSessions <= 0 || h.maxProcesses <= 0 || h.maxWrite <= 0 || h.maxDirEntries <= 0:
+	case h.maxSessions <= 0 || h.maxPerOwner <= 0 || h.maxProcesses <= 0 || h.maxWrite <= 0 || h.maxOutput <= 0 || h.maxDirEntries <= 0:
 		return nil, errors.New("remote: a bound that is not positive")
 	}
 	m := http.NewServeMux()
@@ -116,19 +151,19 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 	m.HandleFunc("GET "+routeReadLink, h.need(ScopeRead, h.readLink))
 	m.HandleFunc("GET "+routeReadDir, h.need(ScopeRead, h.readDir))
 	m.HandleFunc("GET "+routeFile, h.need(ScopeRead, h.read))
-	m.HandleFunc("PUT "+routeFile, h.need(ScopeWrite, h.write))
+	m.HandleFunc("PUT "+routeFile, h.need(ScopeWrite, typed(rawType, h.write)))
 	m.HandleFunc("DELETE "+routeFile, h.need(ScopeWrite, h.remove))
-	m.HandleFunc("POST "+routeExec, h.need(ScopeExec, h.exec))
-	m.HandleFunc("POST "+routeSessions, h.need(ScopeExec, h.openSession))
-	m.HandleFunc("POST "+routeSessions+"/{sid}/renew", h.need(ScopeExec, h.renewSession))
+	m.HandleFunc("POST "+routeExec, h.need(ScopeExec, typed(jsonType, h.exec)))
+	m.HandleFunc("POST "+routeSessions, h.need(ScopeExec, typed(jsonType, h.openSession)))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/renew", h.need(ScopeExec, typed(jsonType, h.renewSession)))
 	m.HandleFunc("DELETE "+routeSessions+"/{sid}", h.need(ScopeExec, h.closeSession))
-	m.HandleFunc("POST "+routeSessions+"/{sid}/processes", h.need(ScopeExec, h.start))
-	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/stdin", h.need(ScopeExec, h.stdin))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/processes", h.need(ScopeExec, typed(jsonType, h.start)))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/stdin", h.need(ScopeExec, typed(rawType, h.stdin)))
 	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/stdout", h.need(ScopeExec, h.stdout))
 	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/stderr", h.need(ScopeExec, h.stderr))
 	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/wait", h.need(ScopeExec, h.wait))
-	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/signal", h.need(ScopeExec, h.signal))
-	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/cancel", h.need(ScopeExec, h.cancel))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/signal", h.need(ScopeExec, typed(jsonType, h.signal)))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/cancel", h.need(ScopeExec, typed(jsonType, h.cancel)))
 	m.HandleFunc("DELETE "+routeSessions+"/{sid}/processes/{pid}", h.need(ScopeExec, h.closeProcess))
 	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, wireError{Code: codeNotExist, Message: "no such route"})
@@ -138,8 +173,13 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 	return h, nil
 }
 
-// ServeHTTP authenticates r, whatever its route, and serves it.
+// ServeHTTP refuses r if it looks like a browser page's, authenticates
+// it, whatever its route, and serves it.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if why := h.fromBrowser(r); why != "" {
+		writeError(w, wireError{Code: codeForbidden, Message: "remote: " + why})
+		return
+	}
 	var p Principal
 	switch {
 	case h.insecure:
@@ -153,8 +193,65 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			unauthenticated(w, "unauthenticated")
 			return
 		}
+		if p.Name == "" {
+			// The name is what keeps one principal's sessions from
+			// another's.
+			unauthenticated(w, "the authenticator named no principal")
+			return
+		}
 	}
 	h.mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
+}
+
+// fromBrowser says why r looks like a browser page's request, or "".
+// Nothing but a program is a client of this API, and a program sends no
+// Origin; a page's request carries one, or a Sec-Fetch-Site naming
+// another site. An insecure handler answers a loopback Host alone, so
+// that a name rebound to 127.0.0.1 is refused too.
+func (h *Handler) fromBrowser(r *http.Request) string {
+	if len(r.Header.Values("Origin")) > 0 {
+		return "a request with an Origin is refused: this API has no browser clients"
+	}
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		return "a cross-site request is refused"
+	}
+	if h.insecure && !loopback(r.Host) {
+		return "a handler without authentication answers only a loopback Host"
+	}
+	return ""
+}
+
+// loopback reports whether host, with or without a port, is localhost
+// or a loopback address.
+func loopback(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// The types of the bodies the routes take.
+const (
+	jsonType = "application/json"
+	rawType  = "application/octet-stream"
+)
+
+// typed serves f a request whose body is of type want, its parameters
+// aside, and refuses any other: a browser page cannot send either type
+// without a preflight, which nothing here answers.
+func typed(want string, f http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if t, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || t != want {
+			writeError(w, wireError{Code: codeMediaType, Message: "the body must be " + want})
+			return
+		}
+		f(w, r)
+	}
 }
 
 func unauthenticated(w http.ResponseWriter, msg string) {
@@ -163,9 +260,9 @@ func unauthenticated(w http.ResponseWriter, msg string) {
 }
 
 // Close ends every session, and every process each started, and every
-// Exec in flight, and refuses every request after; it returns once the
-// sessions' processes have ended. It does not close the served
-// workspace.
+// Exec in flight, and refuses every request after; it returns once they
+// have all ended, with everything they started. It does not close the
+// served workspace.
 func (h *Handler) Close() error {
 	h.stop()
 	h.mu.Lock()
@@ -183,7 +280,20 @@ func (h *Handler) Close() error {
 		wg.Go(s.end)
 	}
 	wg.Wait()
+	h.inflight.Wait()
 	return nil
+}
+
+// track counts a request Close waits for, and refuses one once Close
+// has begun: done ends it.
+func (h *Handler) track() (done func(), ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil, false
+	}
+	h.inflight.Add(1)
+	return h.inflight.Done, true
 }
 
 func (h *Handler) isClosed() bool {
@@ -219,7 +329,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // fail answers err, the served workspace's, as the wire carries it.
-func fail(w http.ResponseWriter, err error) { writeError(w, errorOf(err)) }
+func (h *Handler) fail(w http.ResponseWriter, err error) { writeError(w, errorOf(h.ws.Root(), err)) }
 
 // decode reads r's JSON body into v, at most max bytes, and answers the
 // refusal itself when it cannot.
@@ -248,10 +358,11 @@ func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 		Links:  links,
 		Scopes: p.Scopes,
 		Limits: limits{
-			LeaseMs:       h.lease.Milliseconds(),
-			MaxProcesses:  h.maxProcesses,
-			MaxWriteBytes: h.maxWrite,
-			MaxDirEntries: h.maxDirEntries,
+			LeaseMs:        h.lease.Milliseconds(),
+			MaxProcesses:   h.maxProcesses,
+			MaxWriteBytes:  h.maxWrite,
+			MaxOutputBytes: h.maxOutput,
+			MaxDirEntries:  h.maxDirEntries,
 		},
 	}
 	if p.Has(ScopeExec) {
@@ -269,7 +380,7 @@ func name(w http.ResponseWriter, r *http.Request, op string) (string, bool) {
 		return "", false
 	}
 	if err := valid(op, names[0]); err != nil {
-		fail(w, err)
+		writeError(w, errorOf("", err))
 		return "", false
 	}
 	return names[0], true
@@ -282,7 +393,7 @@ func (h *Handler) stat(w http.ResponseWriter, r *http.Request) {
 	}
 	fi, err := fs.Stat(h.ws.FS(), n)
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	writeJSON(w, infoOf(fi))
@@ -293,7 +404,7 @@ func (h *Handler) stat(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) links(w http.ResponseWriter) (fs.ReadLinkFS, bool) {
 	l, ok := h.ws.FS().(fs.ReadLinkFS)
 	if !ok {
-		fail(w, fmt.Errorf("the workspace's file system cannot read links: %w", errors.ErrUnsupported))
+		h.fail(w, fmt.Errorf("the workspace's file system cannot read links: %w", errors.ErrUnsupported))
 	}
 	return l, ok
 }
@@ -309,7 +420,7 @@ func (h *Handler) lstat(w http.ResponseWriter, r *http.Request) {
 	}
 	fi, err := l.Lstat(n)
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	writeJSON(w, infoOf(fi))
@@ -326,7 +437,7 @@ func (h *Handler) readLink(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := l.ReadLink(n)
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	reply := linkReply{Target: t}
@@ -341,9 +452,9 @@ func (h *Handler) readDir(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	es, err := fs.ReadDir(h.ws.FS(), n)
+	es, err := h.list(n)
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	if len(es) > h.maxDirEntries {
@@ -357,12 +468,40 @@ func (h *Handler) readDir(w http.ResponseWriter, r *http.Request) {
 			continue // removed since the listing
 		}
 		if err != nil {
-			fail(w, err)
+			h.fail(w, err)
 			return
 		}
 		reply.Entries = append(reply.Entries, infoOf(fi))
 	}
 	writeJSON(w, reply)
+}
+
+// list reads at most one entry past the bound of name's, so a huge
+// directory costs no more than the bound to refuse. What is not a
+// directory is refused before it is opened, as Local's ReadDir does.
+func (h *Handler) list(name string) ([]fs.DirEntry, error) {
+	fsys := h.ws.FS()
+	fi, err := fs.Stat(fsys, name)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: syscall.ENOTDIR}
+	}
+	f, err := fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	d, ok := f.(fs.ReadDirFile)
+	if !ok {
+		return fs.ReadDir(fsys, name)
+	}
+	es, err := d.ReadDir(h.maxDirEntries + 1)
+	if err == io.EOF {
+		err = nil
+	}
+	return es, err
 }
 
 // read streams a regular file's content. What is opened is checked, so
@@ -375,17 +514,17 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := h.ws.FS().Open(n)
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	if !fi.Mode().IsRegular() {
-		fail(w, fmt.Errorf("%s is not a regular file", n))
+		h.fail(w, fmt.Errorf("%s is not a regular file", n))
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -396,9 +535,6 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 }
-
-// fileModes are the bits of a WriteFile's perm passed on.
-const fileModes = fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
 
 func (h *Handler) write(w http.ResponseWriter, r *http.Request) {
 	n, ok := name(w, r, "write")
@@ -420,8 +556,10 @@ func (h *Handler) write(w http.ResponseWriter, r *http.Request) {
 		writeError(w, wireError{Code: codeOther, Message: "the body could not be read"})
 		return
 	}
-	if err := h.ws.WriteFile(r.Context(), n, data, fs.FileMode(perm)&fileModes); err != nil {
-		fail(w, err)
+	// The permission bits alone: setuid, setgid and sticky would let a
+	// principal that may write but not run hand out privilege.
+	if err := h.ws.WriteFile(r.Context(), n, data, fs.FileMode(perm)&fs.ModePerm); err != nil {
+		h.fail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -433,7 +571,7 @@ func (h *Handler) remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.ws.Remove(r.Context(), n); err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -444,16 +582,21 @@ func (h *Handler) remove(w http.ResponseWriter, r *http.Request) {
 // and answers in NDJSON frames: Command.Stream's output as it arrives,
 // when the client asked for it, then the Output or the error.
 func (h *Handler) exec(w http.ResponseWriter, r *http.Request) {
-	var req execRequest
-	if !decode(w, r, (h.maxWrite+2)/3*4+MaxRequestBytes, &req) {
+	done, ok := h.track()
+	if !ok {
+		writeError(w, wireError{Code: codeClosed, Message: "the server is closed"})
 		return
 	}
-	switch {
-	case int64(len(req.Stdin)) > h.maxWrite:
+	defer done()
+	var req execRequest
+	if !decode(w, r, b64(h.maxWrite)+MaxRequestBytes, &req) {
+		return
+	}
+	if int64(len(req.Stdin)) > h.maxWrite {
 		writeError(w, wireError{Code: codeLimit, Message: fmt.Sprintf("stdin over the %d-byte bound", h.maxWrite)})
 		return
-	case req.TimeoutMs < 0:
-		writeError(w, wireError{Code: codeInvalid, Message: "a negative timeout"})
+	}
+	if !validTimeout(w, req.TimeoutMs) {
 		return
 	}
 	cmd := agentworkspace.Command{
@@ -473,8 +616,14 @@ func (h *Handler) exec(w http.ResponseWriter, r *http.Request) {
 	defer context.AfterFunc(h.ctx, cancel)()
 	out, err := h.ws.Exec(ctx, cmd)
 	if err != nil {
-		e := errorOf(err)
+		e := errorOf(h.ws.Root(), err)
 		fr.send(execFrame{Error: &e})
+		return
+	}
+	if n := int64(max(len(out.Stdout), len(out.Stderr))); n > h.maxOutput {
+		fr.send(execFrame{Error: &wireError{Code: codeLimit, Message: fmt.Sprintf(
+			"the command exited with status %d, but its output is %d bytes, over the %d an Exec without a Stream gives back; give it a Stream",
+			out.ExitCode, n, h.maxOutput)}})
 		return
 	}
 	fr.send(execFrame{Output: &execOutput{Stdout: out.Stdout, Stderr: out.Stderr, ExitCode: out.ExitCode, TimedOut: out.TimedOut}})
@@ -501,12 +650,26 @@ func (f *frames) send(fr execFrame) error {
 	return f.err
 }
 
+// Write sends p in frames of at most frameChunk bytes, so that a
+// client can bound a frame whatever size the served workspace writes.
 func (f *frames) Write(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
+	n := 0
+	for len(p) > 0 {
+		k := min(len(p), frameChunk)
+		if err := f.send(execFrame{Data: p[:k]}); err != nil {
+			return n, err
+		}
+		n, p = n+k, p[k:]
 	}
-	if err := f.send(execFrame{Data: p}); err != nil {
-		return 0, err
+	return n, nil
+}
+
+// validTimeout refuses (and answers) a timeout a time.Duration cannot
+// hold, or a negative one.
+func validTimeout(w http.ResponseWriter, ms int64) bool {
+	if ms < 0 || ms > math.MaxInt64/int64(time.Millisecond) {
+		writeError(w, wireError{Code: codeInvalid, Message: "a timeout below zero or past what a duration holds"})
+		return false
 	}
-	return len(p), nil
+	return true
 }

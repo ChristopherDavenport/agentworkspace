@@ -124,6 +124,14 @@ func raw(t *testing.T, method, url, token string, body io.Reader) (int, string) 
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	if body != nil {
+		// Each route's own type: raw bytes for a file and a process's
+		// input, JSON for the rest.
+		req.Header.Set("Content-Type", jsonType)
+		if method == "PUT" || strings.HasSuffix(req.URL.Path, "/stdin") {
+			req.Header.Set("Content-Type", rawType)
+		}
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -139,3 +147,5 @@ func raw(t *testing.T, method, url, token string, body io.Reader) (int, string) 
 	io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode, code
 }
+
+func decodeReply(resp *http.Response, v any) error { return json.NewDecoder(resp.Body).Decode(v) }

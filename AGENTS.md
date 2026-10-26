@@ -26,9 +26,12 @@ interface.
   serves any workspace as an `http.Handler` the program mounts (TLS is
   the program's); `Dial` returns a `*Client`, or a `*StarterClient`
   when the served workspace is a `Starter` and the principal holds
-  `exec`, so a type assertion tells the truth. Every request is
-  authenticated (`Authenticator`, `BearerTokens`, scopes `read`,
-  `write`, `exec`; no authenticator refuses everything unless
+  `exec`, so a type assertion tells the truth. It ships no
+  authentication: every request is put to the program's
+  `Authenticator`, which names its `Principal` and scopes (`read`,
+  `write`, `exec`), and the client's credentials are in the
+  `http.Client` the program gives `WithHTTPClient` (no authenticator
+  refuses everything unless
   `WithInsecureNoAuth`, which answers a loopback Host alone; every
   handler refuses a browser page's request: an Origin, a cross-site
   `Sec-Fetch-Site`, an untyped body). Started processes live in a

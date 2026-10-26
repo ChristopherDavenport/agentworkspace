@@ -63,18 +63,24 @@
 //
 // # Scopes
 //
-// Every request is authenticated, whatever its route, by the
-// Authenticator given with WithAuthenticator (BearerTokens over static
-// tokens); without one, and without WithInsecureNoAuth, every request
-// is refused. A principal's Name is what keeps its sessions from
-// another's, and one with an empty Name is refused as unauthenticated. read covers the info route and the file system's reads;
-// write, WriteFile and Remove; exec, Exec, the sessions and the
-// processes, and the environment, which the info route gives a
-// principal without exec none of: such a client's Env is empty and it
-// is no Starter. exec is never implied by read or write. A client
-// sends its token as a bearer token, and puts it in no URL, error or
-// Descriptor. TLS, issuing tokens and deciding by path are the
-// program's: the handler is a plain http.Handler it mounts.
+// This package ships no authentication: it is the capability layer,
+// and who a request is from is the program's to decide. Every request
+// is put to the Authenticator given with WithAuthenticator, the
+// program's hook, whatever its route, which answers with the
+// Principal it is from and the scopes it holds; without one, and
+// without WithInsecureNoAuth, every request is refused. A principal's
+// Name is what keeps its sessions from another's, and one with an
+// empty Name is refused as unauthenticated. read covers the info route
+// and the file system's reads; write, WriteFile and Remove; exec,
+// Exec, the sessions and the processes, and the environment, which the
+// info route gives a principal without exec none of: such a client's
+// Env is empty and it is no Starter. exec is never implied by read or
+// write. The client sends no credentials of its own: the program's go
+// in the http.Client it gives WithHTTPClient (a Transport that sets
+// the Authorization header, a client certificate), and nothing of them
+// is put in a URL, an error or a Descriptor. TLS, issuing and checking
+// credentials and deciding by path are the program's: the handler is
+// a plain http.Handler it mounts.
 //
 // This API has no browser clients, and a page the user opens must not
 // reach it: every handler refuses a request carrying an Origin, or a

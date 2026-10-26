@@ -17,6 +17,15 @@ versions may break the API.
   `remote` run them; the tables moved out of the root's tests
   unchanged.
 
+- Removed: `remote.BearerTokens` and `remote.WithBearerToken`. The
+  library ships no authentication: it is the capability layer, and the
+  application supplies authentication through the hook
+  (`WithAuthenticator`, which names a request's `Principal` and its
+  scopes) and its own HTTP client (`WithHTTPClient`, which carries the
+  credentials). `Scope`, `Principal`, `WithInsecureNoAuth`, failing
+  closed without an authenticator and the browser checks are kept. A
+  base URL with userinfo is still refused.
+
 ## v0.0.5 - 2026-10-25
 
 - Added: package `remote`, in the root module and on the standard

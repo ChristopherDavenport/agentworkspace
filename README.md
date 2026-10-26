@@ -204,37 +204,47 @@ client's side (the primitive cut; a sandbox that should run the tools
 themselves is cut at the tool calls instead, as dax's executor is).
 
 ```go
-// The server: a plain http.Handler; TLS and the listener are the program's.
-h, err := remote.NewHandler(ws, remote.WithAuthenticator(remote.BearerTokens(map[string]remote.Principal{
-	token: {Name: "agent", Scopes: []remote.Scope{remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec}},
-})))
+// The server: a plain http.Handler; TLS, the listener and the
+// authentication are the program's. authenticate is the program's own:
+// it says who a request is from and what that principal may do.
+h, err := remote.NewHandler(ws, remote.WithAuthenticator(func(r *http.Request) (remote.Principal, error) {
+	name, err := authenticate(r) // the program's check of its credentials
+	if err != nil {
+		return remote.Principal{}, err
+	}
+	return remote.Principal{Name: name, Scopes: []remote.Scope{remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec}}, nil
+}))
 defer h.Close() // ends every session's processes
 http.Handle("/", h)
 
 // The client: a Workspace, and a Starter when the server can start and
-// the principal holds exec.
-ws, err := remote.Dial(ctx, "https://host/", remote.WithBearerToken(token))
+// the principal holds exec. Its credentials are in the program's HTTP
+// client (a Transport that sets the Authorization header, or a client
+// certificate).
+ws, err := remote.Dial(ctx, "https://host/", remote.WithHTTPClient(hc))
 defer ws.Close()
 ```
 
-Every request is authenticated, whatever its route; with no
+The package ships no authentication: it asks the program's
+`Authenticator` who each request is from and grants that principal's
+scopes, and the client sends whatever the program's `http.Client` sends.
+Every request is put to the authenticator, whatever its route; with no
 authenticator every request is refused, unless the handler was made
-`WithInsecureNoAuth`, and such a handler answers only a loopback Host.
-A request that looks like a browser page's (an Origin, a cross-site
-`Sec-Fetch-Site`, a body of another type than its route's) is refused
-in every mode. `read` covers the files' reads, `write` writes and
-removes, and `exec` runs anything: `Exec`, the processes and the
-environment, which a client without it is not told. `exec` is never
-implied by `read` or `write`. A client's processes live in a session it
-opens at its first `Start` and renews on a lease (`DefaultLease`); when
-the lease lapses, or the client closes, the server ends every process
-the session started, and a process is reached only through its own
-session, by the principal that opened it. `Exec` streams its output as
-NDJSON frames, and its process ends with the request. Errors keep
-their sentinels across the wire (`ErrOutside`, `fs.ErrNotExist` and the
-rest), and every bound (body sizes, sessions, processes per session, a
-listing) is an exported constant or option. The routes are in the
-package doc.
+`WithInsecureNoAuth`, and such a handler answers only a loopback Host. A
+request that looks like a browser page's (an Origin, a cross-site
+`Sec-Fetch-Site`, a body of another type than its route's) is refused in
+every mode. `read` covers the files' reads, `write` writes and removes,
+and `exec` runs anything: `Exec`, the processes and the environment,
+which a client without it is not told. `exec` is never implied by `read`
+or `write`. A client's processes live in a session it opens at its first
+`Start` and renews on a lease (`DefaultLease`); when the lease lapses,
+or the client closes, the server ends every process the session started,
+and a process is reached only through its own session, by the principal
+that opened it. `Exec` streams its output as NDJSON frames, and its
+process ends with the request. Errors keep their sentinels across the
+wire (`ErrOutside`, `fs.ErrNotExist` and the rest), and every bound
+(body sizes, sessions, processes per session, a listing) is an exported
+constant or option. The routes are in the package doc.
 
 ## Planned
 

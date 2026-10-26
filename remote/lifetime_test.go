@@ -264,7 +264,7 @@ func TestAnotherSessionCannotTouchAProcess(t *testing.T) {
 	l, _ := newLocal(t, pathEnv())
 	_, url := serve(t, l, WithAuthenticator(tokens()))
 	ctx := context.Background()
-	mine := dial(t, url, WithBearerToken(tokAll))
+	mine := dial(t, url, withToken(tokAll))
 	p, err := agentworkspace.Start(ctx, mine, agentworkspace.Command{Args: []string{"sleep", "30"}})
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +272,7 @@ func TestAnotherSessionCannotTouchAProcess(t *testing.T) {
 	defer p.Close()
 	route := p.(*process).route
 	pid := route[strings.LastIndex(route, "/")+1:]
-	otherWS := dial(t, url, WithBearerToken(tokAll))
+	otherWS := dial(t, url, withToken(tokAll))
 	q, err := agentworkspace.Start(ctx, otherWS, agentworkspace.Command{Args: []string{"true"}}) // opens its session
 	if err != nil {
 		t.Fatal(err)

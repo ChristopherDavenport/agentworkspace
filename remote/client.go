@@ -40,7 +40,6 @@ type Client struct {
 	base    url.URL // scheme, host and path; no userinfo, query or fragment
 	http    *http.Client
 	owned   bool // http is the client's own, whose idle connections Close closes
-	token   string
 	timeout time.Duration
 	info    infoReply
 	ctx     context.Context // ends with Close, and every request with it
@@ -68,20 +67,20 @@ var (
 type DialOption func(*dialConfig)
 
 type dialConfig struct {
-	token   string
 	http    *http.Client
 	timeout time.Duration
 }
 
-// WithBearerToken sends tok on every request, as "Authorization: Bearer
-// tok". The token is never put in a URL, an error or a Descriptor.
-func WithBearerToken(tok string) DialOption { return func(c *dialConfig) { c.token = tok } }
-
-// WithHTTPClient sends every request through hc. It must set no
-// Timeout, which would cut Exec's frames and a process's streams short;
-// the client bounds the requests that should be answered at once
-// itself (WithTimeout). The default is a client of its own over
-// http.DefaultTransport that follows no redirect.
+// WithHTTPClient sends every request through hc, which is where the
+// program's credentials go: a Transport that sets a request's
+// Authorization header, or a TLS config with a client certificate.
+// This package sends none of its own, and puts nothing of hc's in a
+// URL, an error or a Descriptor. hc must set no Timeout, which would
+// cut Exec's frames and a process's streams short; the client bounds
+// the requests that should be answered at once itself (WithTimeout),
+// and should follow no redirect, which would send the credentials on.
+// The default is a client of its own over http.DefaultTransport that
+// follows no redirect and sends no credentials.
 func WithHTTPClient(hc *http.Client) DialOption { return func(c *dialConfig) { c.http = hc } }
 
 // WithTimeout bounds each request that takes no context and should be
@@ -102,8 +101,9 @@ func WithTimeout(d time.Duration) DialOption { return func(c *dialConfig) { c.ti
 // session lost (lapsed on the server, or a whole lease unrenewed) ends
 // its processes on this side too, and the next Start opens another. Its Root is the served workspace's, its Descriptor
 // is KindRemote with the base URL as its Ref, and Served is the served
-// workspace's own. A base URL with userinfo is refused (give a token
-// with WithBearerToken); its query and fragment are dropped.
+// workspace's own. A base URL with userinfo is refused (credentials go
+// in the HTTP client, WithHTTPClient); its query and fragment are
+// dropped.
 func Dial(ctx context.Context, baseURL string, opts ...DialOption) (Workspace, error) {
 	u, err := url.Parse(baseURL)
 	switch {
@@ -111,7 +111,7 @@ func Dial(ctx context.Context, baseURL string, opts ...DialOption) (Workspace, e
 		// url's error quotes the URL, which may hold a credential.
 		return nil, errors.New("remote: the base URL does not parse")
 	case u.User != nil:
-		return nil, errors.New("remote: a base URL with userinfo; give a token with WithBearerToken")
+		return nil, errors.New("remote: a base URL with userinfo; credentials go in the HTTP client (WithHTTPClient)")
 	case u.Scheme != "http" && u.Scheme != "https":
 		return nil, fmt.Errorf("remote: a base URL of scheme %q; want http or https", u.Scheme)
 	case u.Host == "":
@@ -125,7 +125,7 @@ func Dial(ctx context.Context, baseURL string, opts ...DialOption) (Workspace, e
 			o(&cfg)
 		}
 	}
-	c := &Client{base: *u, http: cfg.http, token: cfg.token, timeout: cfg.timeout, procs: map[*process]struct{}{}}
+	c := &Client{base: *u, http: cfg.http, timeout: cfg.timeout, procs: map[*process]struct{}{}}
 	if c.http == nil {
 		c.http = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		c.owned = true
@@ -336,9 +336,6 @@ func (c *Client) request(ctx context.Context, method, route string, q url.Values
 	}
 	if ctype != "" {
 		req.Header.Set("Content-Type", ctype)
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

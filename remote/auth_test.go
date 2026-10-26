@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"slices"
@@ -25,8 +26,10 @@ const (
 	tokRE    = "tok-re-0123456789"
 )
 
+// tokens is the tests' authentication, which the package does not
+// ship: a request's bearer token names its principal.
 func tokens() Authenticator {
-	return BearerTokens(map[string]Principal{
+	return grant(map[string]Principal{
 		tokRead:  {Name: "reader", Scopes: []Scope{ScopeRead}},
 		tokWrite: {Name: "writer", Scopes: []Scope{ScopeWrite}},
 		tokExec:  {Name: "execer", Scopes: []Scope{ScopeExec}},
@@ -81,7 +84,7 @@ func TestNoAuthenticatorRefusesEverything(t *testing.T) {
 			}
 		}
 	}
-	if _, err := Dial(context.Background(), url, WithBearerToken(tokAll)); !errors.Is(err, ErrUnauthenticated) {
+	if _, err := Dial(context.Background(), url, withToken(tokAll)); !errors.Is(err, ErrUnauthenticated) {
 		t.Errorf("Dial: %v, want ErrUnauthenticated", err)
 	}
 }
@@ -110,34 +113,31 @@ func TestNewHandlerRefuses(t *testing.T) {
 	}
 }
 
-// No token, a token not given, and a token in another scheme are each
-// unauthenticated.
-func TestAnUnknownTokenIsRefused(t *testing.T) {
+// An authenticator's refusal, and a principal with no name, are each
+// unauthenticated, and the refusal's text is not sent.
+func TestAnAuthenticatorsRefusalIsUnauthenticated(t *testing.T) {
 	l, _ := newLocal(t, nil)
-	_, url := serve(t, l, WithAuthenticator(tokens()))
-	for name, header := range map[string]string{
-		"none":         "",
-		"wrong":        "Bearer not-a-token",
-		"empty":        "Bearer ",
-		"basic":        "Basic " + tokAll,
-		"a prefix":     "Bearer " + tokAll[:len(tokAll)-1],
-		"a longer one": "Bearer " + tokAll + "x",
+	for name, auth := range map[string]Authenticator{
+		"refused": func(*http.Request) (Principal, error) {
+			return Principal{}, errors.New("the reason hunter2")
+		},
+		"no name": func(*http.Request) (Principal, error) {
+			return Principal{Scopes: allScopes()}, nil
+		},
 	} {
-		req, _ := http.NewRequest("GET", url+"/v1/info", nil)
-		if header != "" {
-			req.Header.Set("Authorization", header)
-		}
-		resp, err := http.DefaultClient.Do(req)
+		_, url := serve(t, l, WithAuthenticator(auth))
+		resp, err := http.Get(url + "/v1/info")
 		if err != nil {
 			t.Fatal(err)
 		}
+		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("%s: %s", name, resp.Status)
+		if resp.StatusCode != http.StatusUnauthorized || strings.Contains(string(body), "hunter2") {
+			t.Errorf("%s: %s %q", name, resp.Status, body)
 		}
-	}
-	if _, err := Dial(context.Background(), url, WithBearerToken("not-a-token")); !errors.Is(err, ErrUnauthenticated) {
-		t.Errorf("Dial with a wrong token: %v", err)
+		if _, err := Dial(context.Background(), url); !errors.Is(err, ErrUnauthenticated) {
+			t.Errorf("%s: Dial: %v, want ErrUnauthenticated", name, err)
+		}
 	}
 }
 
@@ -173,7 +173,7 @@ func TestAClientIsWhatItsScopesAllow(t *testing.T) {
 	_, url := serve(t, l, WithAuthenticator(tokens()))
 	ctx := context.Background()
 
-	reader := dial(t, url, WithBearerToken(tokRead))
+	reader := dial(t, url, withToken(tokRead))
 	if _, ok := reader.(agentworkspace.Starter); ok {
 		t.Error("a reader is a Starter")
 	}
@@ -201,7 +201,7 @@ func TestAClientIsWhatItsScopesAllow(t *testing.T) {
 		}
 	}
 
-	rw := dial(t, url, WithBearerToken(tokRW))
+	rw := dial(t, url, withToken(tokRW))
 	if _, ok := rw.(agentworkspace.Starter); ok {
 		t.Error("read and write is a Starter")
 	}
@@ -215,11 +215,11 @@ func TestAClientIsWhatItsScopesAllow(t *testing.T) {
 		t.Errorf("read and write ran a command: %v", err)
 	}
 
-	if _, err := Dial(ctx, url, WithBearerToken(tokWrite)); !errors.Is(err, ErrForbidden) {
+	if _, err := Dial(ctx, url, withToken(tokWrite)); !errors.Is(err, ErrForbidden) {
 		t.Errorf("Dial without read: %v, want ErrForbidden", err)
 	}
 
-	all := dial(t, url, WithBearerToken(tokAll))
+	all := dial(t, url, withToken(tokAll))
 	if _, ok := all.(agentworkspace.Starter); !ok {
 		t.Error("exec over a Starter is no Starter")
 	}
@@ -231,21 +231,22 @@ func TestAClientIsWhatItsScopesAllow(t *testing.T) {
 	}
 }
 
-// The token is in no error, whatever fails, nor in the Descriptor.
+// The token the program gives its HTTP client is in no error, whatever
+// fails, nor in the Descriptor.
 func TestTheTokenIsInNoError(t *testing.T) {
 	l, _ := newLocal(t, pathEnv())
 	_, url := serve(t, l, WithAuthenticator(tokens()))
 	ctx := context.Background()
 	var errs []error
-	_, err := Dial(ctx, url, WithBearerToken(tokAll+"-wrong"))
+	_, err := Dial(ctx, url, withToken(tokAll+"-wrong"))
 	errs = append(errs, err)
 	_, err = Dial(ctx, strings.Replace(url, "://", "://user:"+tokAll+"@", 1))
 	errs = append(errs, err)
-	_, err = Dial(ctx, "http://user:"+tokAll+"@[::1:bad", WithBearerToken(tokAll))
+	_, err = Dial(ctx, "http://user:"+tokAll+"@[::1:bad", withToken(tokAll))
 	errs = append(errs, err)
-	_, err = Dial(ctx, url, WithBearerToken(tokWrite))
+	_, err = Dial(ctx, url, withToken(tokWrite))
 	errs = append(errs, err)
-	reader := dial(t, url, WithBearerToken(tokRead))
+	reader := dial(t, url, withToken(tokRead))
 	errs = append(errs,
 		reader.WriteFile(ctx, "x", nil, 0o644),
 		reader.Remove(ctx, "x"),
@@ -253,7 +254,7 @@ func TestTheTokenIsInNoError(t *testing.T) {
 		func() error { _, err := fs.Stat(reader.FS(), "missing"); return err }(),
 		func() error { _, err := fs.ReadFile(reader.FS(), "../out"); return err }(),
 	)
-	all := dial(t, url, WithBearerToken(tokAll))
+	all := dial(t, url, withToken(tokAll))
 	errs = append(errs, func() error {
 		_, err := all.Exec(ctx, agentworkspace.Command{Args: []string{"no-such-command-here"}})
 		return err

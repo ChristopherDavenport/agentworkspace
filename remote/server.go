@@ -67,7 +67,8 @@ var _ http.Handler = (*Handler)(nil)
 // An Option configures NewHandler.
 type Option func(*Handler)
 
-// WithAuthenticator resolves each request's principal with a.
+// WithAuthenticator resolves each request's principal with a, the
+// program's authentication.
 func WithAuthenticator(a Authenticator) Option { return func(h *Handler) { h.auth = a } }
 
 // WithInsecureNoAuth serves every request, unauthenticated, as a

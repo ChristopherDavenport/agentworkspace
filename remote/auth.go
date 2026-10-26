@@ -2,11 +2,8 @@ package remote
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"net/http"
 	"slices"
-	"strings"
 )
 
 // Scope is what a principal may do through a Handler.
@@ -39,48 +36,12 @@ type Principal struct {
 // Has reports whether p holds s.
 func (p Principal) Has(s Scope) bool { return slices.Contains(p.Scopes, s) }
 
-// Authenticator resolves the principal a request is from. An error
-// refuses the request as ErrUnauthenticated; its text is not sent.
+// Authenticator resolves the principal a request is from, and so what
+// it may do: it is the program's authentication, which this package
+// does not implement (no tokens, no certificates, no sessions of a
+// login), only asks for. An error refuses the request as
+// ErrUnauthenticated; its text is not sent.
 type Authenticator func(r *http.Request) (Principal, error)
-
-// BearerTokens is an Authenticator over static bearer tokens: a request
-// whose Authorization header is "Bearer <token>" for a token in tokens
-// is that token's principal. Tokens are compared in constant time,
-// through their SHA-256, so neither their contents nor their lengths
-// leak through timing. An empty token is never matched.
-func BearerTokens(tokens map[string]Principal) Authenticator {
-	type entry struct {
-		sum [sha256.Size]byte
-		p   Principal
-	}
-	entries := make([]entry, 0, len(tokens))
-	for tok, p := range tokens {
-		if tok == "" {
-			continue
-		}
-		p.Scopes = slices.Clone(p.Scopes)
-		entries = append(entries, entry{sha256.Sum256([]byte(tok)), p})
-	}
-	return func(r *http.Request) (Principal, error) {
-		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || tok == "" {
-			return Principal{}, ErrUnauthenticated
-		}
-		sum := sha256.Sum256([]byte(tok))
-		var found Principal
-		matched := 0
-		for _, e := range entries {
-			if subtle.ConstantTimeCompare(sum[:], e.sum[:]) == 1 {
-				found, matched = e.p, 1
-			}
-		}
-		if matched == 0 {
-			return Principal{}, ErrUnauthenticated
-		}
-		found.Scopes = slices.Clone(found.Scopes)
-		return found, nil
-	}
-}
 
 type principalKey struct{}
 

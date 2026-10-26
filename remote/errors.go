@@ -17,7 +17,7 @@ import (
 // and a served workspace's error is never mapped to.
 var (
 	// ErrUnauthenticated is a request no principal was resolved for: no
-	// authenticator, no token, or one the authenticator refused.
+	// authenticator, or one the authenticator refused.
 	ErrUnauthenticated = errors.New("remote: unauthenticated")
 	// ErrForbidden is a request whose principal lacks the scope its
 	// route needs.

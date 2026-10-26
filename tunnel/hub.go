@@ -324,8 +324,10 @@ func (h *Hub) wait(ctx context.Context, name string) (*tunnel, error) {
 // Workspace is the workspace name, over its tunnel: remote.Dial's
 // result, with opts, through an HTTP client whose every request goes to
 // name's connection. It waits for name to connect, as long as ctx
-// allows (ErrNotConnected). The workspace is a *remote.StarterClient
-// when the workspace end granted exec and serves a Starter.
+// allows (ErrNotConnected). As remote.Dial's, the workspace is an
+// agentworkspace.Starter when the workspace end granted exec and serves
+// a Starter, and an agentworkspace.ServerProvider when it granted
+// servers and serves one.
 //
 // It keeps working across reconnects: a request made while name is not
 // connected waits, bounded by its own context, for the next
@@ -334,7 +336,8 @@ func (h *Hub) wait(ctx context.Context, name string) (*tunnel, error) {
 // fail, and are not sent again.
 //
 // The workspace is the first connection's: its Root, Env, bounds and
-// whether it is a Starter are what that host's info said at the dial.
+// whether it is a Starter or a ServerProvider are what that host's info
+// said at the dial.
 // When another host takes the name (a second connection replaces the
 // first), requests go to the new host, but the workspace still
 // describes the first, and its session, if it has one, is lost there

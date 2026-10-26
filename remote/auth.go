@@ -15,19 +15,43 @@ const (
 	ScopeRead Scope = "read"
 	// ScopeWrite writes and removes files.
 	ScopeWrite Scope = "write"
-	// ScopeExec runs anything: Exec, every session and process route,
-	// and the workspace's environment, which the info route gives only
-	// to a principal holding it. It is never implied by read or write.
+	// ScopeExec runs anything: Exec, a process's start, the sessions,
+	// the routes of the processes it started, and the workspace's
+	// environment, which the info route gives only to a principal
+	// holding it. It is never implied by read, write or servers.
 	ScopeExec Scope = "exec"
+	// ScopeServers starts the MCP servers the workspace offers (an
+	// agentworkspace.ServerProvider): it lists them, starts one by name,
+	// opens and renews the sessions they run in, uses the routes of the
+	// processes it started so, and reads the info route, and nothing
+	// else. It runs no command of the client's: no Exec, no process's
+	// start, no route of a process exec started, and no environment;
+	// without read it reads no file. It does not imply exec, nor exec
+	// it, and needs no read to dial.
+	//
+	// Granted alone, it is how a host gives a client the servers it
+	// offers and nothing else, and a secret-holding server is offered
+	// safely only to a principal holding servers alone. With exec, the
+	// client runs commands as the servers' user and reads a running
+	// server's environment from /proc (see agentworkspace.Offer). With
+	// write, it can change the server's code, config or PATH wherever
+	// they lie in the workspace, and have the server print its secret in
+	// an encoding no OutputFilter looks for. With read, it reads
+	// whatever a server keeps in the workspace.
+	ScopeServers Scope = "servers"
 )
 
 // allScopes are every scope a Handler checks, the insecure principal's.
-func allScopes() []Scope { return []Scope{ScopeRead, ScopeWrite, ScopeExec} }
+func allScopes() []Scope { return []Scope{ScopeRead, ScopeWrite, ScopeExec, ScopeServers} }
 
 // Principal is who a request is from, as an Authenticator resolved it,
 // and what they may do. A session, and every process started in it,
 // belongs to the principal's Name: another principal's request names
-// no such session.
+// no such session. The Name is the session's owner, so a Name should
+// carry one set of Scopes: an Authenticator that gives one Name several
+// sets (two tokens, say, one holding exec and one servers) lets each
+// renew and close the sessions the Name opens, and a close ends every
+// process in the session, whichever scope started it.
 type Principal struct {
 	Name   string
 	Scopes []Scope

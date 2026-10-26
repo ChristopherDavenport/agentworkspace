@@ -5,9 +5,11 @@ package tunnel
 
 import (
 	"io/fs"
+	"slices"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/remote"
 	"github.com/ChristopherDavenport/agentworkspace/workspacetest"
 )
 
@@ -34,6 +36,35 @@ func TestConformance(t *testing.T) {
 		workspacetest.Backend{Name: "tunnel, no links", Open: func(t *testing.T, dir string) agentworkspace.Workspace {
 			return tunnelled(t, noLinks{local(t, dir, pathEnv())})
 		}},
+	)
+}
+
+// The server tables run on an Offering over Local through a tunnel:
+// with every scope, and with servers alone, whose workspace at the hub
+// is a ServerProvider and no Starter.
+func TestServerProviderConformance(t *testing.T) {
+	open := func(scopes ...remote.Scope) func(*testing.T, string, []string, []agentworkspace.OfferedServer, ...agentworkspace.OfferOption) agentworkspace.ServerProvider {
+		return func(t *testing.T, dir string, env []string, servers []agentworkspace.OfferedServer, opts ...agentworkspace.OfferOption) agentworkspace.ServerProvider {
+			o, err := agentworkspace.Offer(local(t, dir, env), servers, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := newRig(t)
+			r.serve(t, o, WithScopes(scopes...), bearer(tokA), fast)
+			ws := r.workspace(t, "a")
+			sp, ok := ws.(agentworkspace.ServerProvider)
+			if !ok {
+				t.Fatalf("a tunnel over an Offering, with %v, is not a ServerProvider", scopes)
+			}
+			if _, starter := ws.(agentworkspace.Starter); starter != slices.Contains(scopes, remote.ScopeExec) {
+				t.Fatalf("a tunnel over an Offering, with %v: a Starter is %v", scopes, starter)
+			}
+			return sp
+		}
+	}
+	workspacetest.RunServerProvider(t,
+		workspacetest.ServerProvider{Name: "tunnel", Open: open(allScopes...)},
+		workspacetest.ServerProvider{Name: "tunnel, servers alone", Open: open(remote.ScopeServers)},
 	)
 }
 

@@ -41,18 +41,36 @@ const pumpWait = 5 * time.Second
 // the process: when its reply is lost, the client closes the process
 // by the key, so nothing runs that no one can name.
 func (s *StarterClient) Start(ctx context.Context, cmd agentworkspace.Command) (agentworkspace.Process, error) {
-	c := s.Client
+	return s.Client.start(ctx, cmd)
+}
+
+// start is Start, for each client type that may start processes.
+func (c *Client) start(ctx context.Context, cmd agentworkspace.Command) (agentworkspace.Process, error) {
 	switch {
 	case cmd.Stdin != nil:
 		return nil, errors.New("remote: Start takes no Command.Stdin; write to Process.Stdin")
 	case len(cmd.Args) == 0:
 		return nil, errors.New("remote: no command")
 	}
+	return c.launch(ctx, "start "+cmd.Args[0], "/processes", cmd.Stream, func(key string) any {
+		return startRequest{
+			Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: millis(cmd.Timeout), Stderr: cmd.Stream != nil, Key: key,
+		}
+	})
+}
+
+// launch starts a process in the client's session, opened now if it
+// has none, by a POST to route under the session with the body request
+// makes of the start's key, and returns it at once, watching ctx; what
+// names the start in an error, and stream, when set, is where its
+// standard error goes. A reply that is lost, or is not one, has the
+// process closed by its key, so nothing runs that no one can name.
+func (c *Client) launch(ctx context.Context, what, route string, stream io.Writer, request func(key string) any) (agentworkspace.Process, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	fail := func(err error) (agentworkspace.Process, error) {
-		return nil, fmt.Errorf("remote: start %s: %w", cmd.Args[0], err)
+		return nil, fmt.Errorf("remote: %s: %w", what, err)
 	}
 	// Not under ctx: a start that ctx cut short might have started a
 	// process no one could name. The end of ctx is watched once the
@@ -64,11 +82,9 @@ func (s *StarterClient) Start(ctx context.Context, cmd agentworkspace.Command) (
 		return fail(err)
 	}
 	key := rand.Text()
-	route := routeSessions + "/" + sid + "/processes/" + key
+	proute := routeSessions + "/" + sid + "/processes/" + key
 	var st startedReply
-	err = c.call(rctx, http.MethodPost, routeSessions+"/"+sid+"/processes", nil, startRequest{
-		Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: millis(cmd.Timeout), Stderr: cmd.Stream != nil, Key: key,
-	}, &st)
+	err = c.call(rctx, http.MethodPost, routeSessions+"/"+sid+route, nil, request(key), &st)
 	if err == nil && st.ID != key {
 		err = fmt.Errorf("the server named the process %q, not by its key", st.ID)
 	}
@@ -78,12 +94,12 @@ func (s *StarterClient) Start(ctx context.Context, cmd agentworkspace.Command) (
 			// The reply was lost, or is not one: the process may be
 			// running, so it is closed by its key.
 			dctx, dcancel := context.WithTimeout(c.ctx, c.timeout)
-			c.call(dctx, http.MethodDelete, route, nil, nil, nil)
+			c.call(dctx, http.MethodDelete, proute, nil, nil, nil)
 			dcancel()
 		}
 		return fail(err)
 	}
-	p := &process{c: c, session: sid, route: route, stream: cmd.Stream, done: make(chan struct{})}
+	p := &process{c: c, session: sid, route: proute, stream: stream, done: make(chan struct{})}
 	p.ctx, p.cancel = context.WithCancel(c.ctx)
 	p.stdin = &stdinPipe{p: p}
 	p.stdout = &stdoutPipe{p: p}

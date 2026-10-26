@@ -24,9 +24,11 @@ import (
 
 // Workspace is what Dial returns: an agentworkspace.Workspace at the
 // other end of the wire, which also tells the served workspace's own
-// descriptor. It is a *Client, or, when the client may start
-// processes, a *StarterClient, so that a type assertion to
-// agentworkspace.Starter tells the truth.
+// descriptor. It is a *Client; a *StarterClient when the client may
+// start processes; a *ServerClient when it may start the servers the
+// served workspace offers; or a *StarterServerClient when it may do
+// both: so that a type assertion to agentworkspace.Starter, and one to
+// agentworkspace.ServerProvider, each tells the truth.
 type Workspace interface {
 	agentworkspace.Workspace
 	// Served is the served workspace's own Descriptor, as against
@@ -58,9 +60,24 @@ type Client struct {
 // workspace is an agentworkspace.Starter and the principal holds exec.
 type StarterClient struct{ *Client }
 
+// ServerClient is a Client that may start the MCP servers the served
+// workspace offers and no process of its own: the served workspace is
+// an agentworkspace.ServerProvider and the principal holds servers,
+// and either the served workspace is no Starter or the principal lacks
+// exec.
+type ServerClient struct{ *Client }
+
+// StarterServerClient is a Client that may do both: start processes,
+// as a StarterClient, and the servers the served workspace offers, as
+// a ServerClient.
+type StarterServerClient struct{ *Client }
+
 var (
-	_ Workspace              = (*Client)(nil)
-	_ agentworkspace.Starter = (*StarterClient)(nil)
+	_ Workspace                     = (*Client)(nil)
+	_ agentworkspace.Starter        = (*StarterClient)(nil)
+	_ agentworkspace.ServerProvider = (*ServerClient)(nil)
+	_ agentworkspace.Starter        = (*StarterServerClient)(nil)
+	_ agentworkspace.ServerProvider = (*StarterServerClient)(nil)
 )
 
 // A DialOption configures Dial.
@@ -94,12 +111,15 @@ func WithTimeout(d time.Duration) DialOption { return func(c *dialConfig) { c.ti
 // workspace's description, and takes nothing on the server. ctx bounds
 // the dial alone.
 //
-// The workspace returned is a *StarterClient when the served workspace
-// can start processes and the principal holds exec, and a *Client
-// otherwise. A StarterClient opens the session its processes live in
-// at its first Start, and renews it in the background until Close; a
-// session lost (lapsed on the server, or a whole lease unrenewed) ends
-// its processes on this side too, and the next Start opens another. Its Root is the served workspace's, its Descriptor
+// The workspace returned is an agentworkspace.Starter (a *StarterClient)
+// when the served workspace can start processes and the principal holds
+// exec; an agentworkspace.ServerProvider (a *ServerClient) when the
+// served workspace offers MCP servers and the principal holds servers; a
+// *StarterServerClient, both, when both hold; and a *Client otherwise.
+// Each opens the session its processes live in at its first Start or
+// StartServer, and renews it in the background until Close; a session
+// lost (lapsed on the server, or a whole lease unrenewed) ends its
+// processes on this side too, and the next start opens another. Its Root is the served workspace's, its Descriptor
 // is KindRemote with the base URL as its Ref, and Served is the served
 // workspace's own. A base URL with userinfo is refused (credentials go
 // in the HTTP client, WithHTTPClient); its query and fragment are
@@ -142,10 +162,17 @@ func Dial(ctx context.Context, baseURL string, opts ...DialOption) (Workspace, e
 		c.end()
 		return nil, errors.New("remote: the server's description has no root or a bound that is not positive")
 	}
-	if !c.info.Start || !slices.Contains(c.info.Scopes, ScopeExec) {
-		return c, nil
+	start := c.info.Start && slices.Contains(c.info.Scopes, ScopeExec)
+	servers := c.info.Servers && slices.Contains(c.info.Scopes, ScopeServers)
+	switch {
+	case start && servers:
+		return &StarterServerClient{c}, nil
+	case start:
+		return &StarterClient{c}, nil
+	case servers:
+		return &ServerClient{c}, nil
 	}
-	return &StarterClient{c}, nil
+	return c, nil
 }
 
 // openSession is the client's session, opened now if it has none.
@@ -250,7 +277,8 @@ func (c *Client) sessionRoute() string {
 	return routeSessions + "/" + c.session
 }
 
-// Root is the served workspace's Root.
+// Root is the served workspace's Root; for a principal without read,
+// whom the server does not tell its path, its last element alone.
 func (c *Client) Root() string { return c.info.Root }
 
 // Env is the served workspace's Env, a copy, as it was at Dial; empty
@@ -263,7 +291,8 @@ func (c *Client) Descriptor() agentworkspace.Descriptor {
 	return agentworkspace.Descriptor{Kind: agentworkspace.KindRemote, Ref: c.base.String(), Root: c.info.Root}
 }
 
-// Served is the served workspace's own Descriptor.
+// Served is the served workspace's own Descriptor, its Root as Root
+// gives it.
 func (c *Client) Served() agentworkspace.Descriptor { return c.info.Served.workspace() }
 
 // Close ends every process the client started, as Process.Close does,

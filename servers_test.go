@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"strings"
@@ -139,62 +138,4 @@ func TestAnOfferedServerStartsByName(t *testing.T) {
 	if !strings.Contains(stderr.String(), "started") {
 		t.Errorf("standard error = %q, want the server's", stderr.String())
 	}
-}
-
-func TestAServerNotOfferedIsErrNoServer(t *testing.T) {
-	l, _ := local(t, nil)
-	o, err := Offer(l, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p, err := o.StartServer(context.Background(), "nope", nil); !errors.Is(err, ErrNoServer) {
-		if p != nil {
-			p.Close()
-		}
-		t.Fatalf("StartServer = %v, want ErrNoServer", err)
-	}
-	if list, err := o.Servers(context.Background()); err != nil || len(list) != 0 {
-		t.Errorf("Servers = %+v, %v; want none", list, err)
-	}
-}
-
-// An offered server lives as long as a started process does: the end
-// of its context, and the workspace's Close, end it.
-func TestAnOfferedServerEndsWithItsOwner(t *testing.T) {
-	sleep := Command{Args: []string{"sleep", "1000"}}
-	t.Run("context", func(t *testing.T) {
-		l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
-		o, err := Offer(l, []OfferedServer{{Server: Server{Name: "s"}, Command: sleep}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		p, err := o.StartServer(ctx, "s", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer p.Close()
-		cancel()
-		within(t, 10*time.Second, "the end of the context", func() {
-			if _, err := p.Wait(); !errors.Is(err, context.Canceled) {
-				t.Errorf("Wait = %v, want context.Canceled", err)
-			}
-		})
-	})
-	t.Run("workspace", func(t *testing.T) {
-		l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
-		o, err := Offer(l, []OfferedServer{{Server: Server{Name: "s"}, Command: sleep}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		p, err := o.StartServer(context.Background(), "s", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer p.Close()
-		within(t, 10*time.Second, "the workspace's close", func() {
-			o.Close()
-			p.Wait()
-		})
-	})
 }

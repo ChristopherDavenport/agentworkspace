@@ -41,32 +41,42 @@ func tokens() Authenticator {
 	})
 }
 
-// routes is one request on every route, its ids made up: what is
-// checked is the scope, before anything else.
-var routes = []struct {
+// route is one request on a route, its ids made up, and the scopes
+// any one of which it takes: what is checked is the scope, before
+// anything else.
+type route struct {
 	method, path string
-	scope        Scope
-}{
-	{"GET", "/v1/info", ScopeRead},
-	{"GET", "/v1/fs/stat?path=a", ScopeRead},
-	{"GET", "/v1/fs/lstat?path=a", ScopeRead},
-	{"GET", "/v1/fs/readlink?path=a", ScopeRead},
-	{"GET", "/v1/fs/readdir?path=.", ScopeRead},
-	{"GET", "/v1/fs/file?path=a", ScopeRead},
-	{"PUT", "/v1/fs/file?path=a&perm=420", ScopeWrite},
-	{"DELETE", "/v1/fs/file?path=a", ScopeWrite},
-	{"POST", "/v1/exec", ScopeExec},
-	{"POST", "/v1/sessions", ScopeExec},
-	{"POST", "/v1/sessions/S/renew", ScopeExec},
-	{"DELETE", "/v1/sessions/S", ScopeExec},
-	{"POST", "/v1/sessions/S/processes", ScopeExec},
-	{"POST", "/v1/sessions/S/processes/P/stdin", ScopeExec},
-	{"GET", "/v1/sessions/S/processes/P/stdout", ScopeExec},
-	{"GET", "/v1/sessions/S/processes/P/stderr", ScopeExec},
-	{"GET", "/v1/sessions/S/processes/P/wait", ScopeExec},
-	{"POST", "/v1/sessions/S/processes/P/signal", ScopeExec},
-	{"POST", "/v1/sessions/S/processes/P/cancel", ScopeExec},
-	{"DELETE", "/v1/sessions/S/processes/P", ScopeExec},
+	scopes       []Scope
+}
+
+// either is a session's routes' scopes, and a process's: exec or
+// servers, the process's own then checked.
+var either = []Scope{ScopeExec, ScopeServers}
+
+// routes is one request on every route.
+var routes = []route{
+	{"GET", "/v1/info", []Scope{ScopeRead, ScopeServers}},
+	{"GET", "/v1/fs/stat?path=a", []Scope{ScopeRead}},
+	{"GET", "/v1/fs/lstat?path=a", []Scope{ScopeRead}},
+	{"GET", "/v1/fs/readlink?path=a", []Scope{ScopeRead}},
+	{"GET", "/v1/fs/readdir?path=.", []Scope{ScopeRead}},
+	{"GET", "/v1/fs/file?path=a", []Scope{ScopeRead}},
+	{"PUT", "/v1/fs/file?path=a&perm=420", []Scope{ScopeWrite}},
+	{"DELETE", "/v1/fs/file?path=a", []Scope{ScopeWrite}},
+	{"POST", "/v1/exec", []Scope{ScopeExec}},
+	{"GET", "/v1/servers", []Scope{ScopeServers}},
+	{"POST", "/v1/sessions", either},
+	{"POST", "/v1/sessions/S/renew", either},
+	{"DELETE", "/v1/sessions/S", either},
+	{"POST", "/v1/sessions/S/processes", []Scope{ScopeExec}},
+	{"POST", "/v1/sessions/S/servers/echo/start", []Scope{ScopeServers}},
+	{"POST", "/v1/sessions/S/processes/P/stdin", either},
+	{"GET", "/v1/sessions/S/processes/P/stdout", either},
+	{"GET", "/v1/sessions/S/processes/P/stderr", either},
+	{"GET", "/v1/sessions/S/processes/P/wait", either},
+	{"POST", "/v1/sessions/S/processes/P/signal", either},
+	{"POST", "/v1/sessions/S/processes/P/cancel", either},
+	{"DELETE", "/v1/sessions/S/processes/P", either},
 }
 
 // A handler with no authenticator refuses every request, on a route or
@@ -74,10 +84,7 @@ var routes = []struct {
 func TestNoAuthenticatorRefusesEverything(t *testing.T) {
 	l, _ := newLocal(t, pathEnv())
 	_, url := serve(t, l)
-	for _, r := range append(routes, struct {
-		method, path string
-		scope        Scope
-	}{"GET", "/no/such/route", ""}) {
+	for _, r := range append(routes, route{"GET", "/no/such/route", nil}) {
 		for _, tok := range []string{"", tokAll} {
 			if status, code := raw(t, r.method, url+r.path, tok, nil); status != http.StatusUnauthorized || code != codeUnauthenticated {
 				t.Errorf("%s %s: %d %q, want 401 unauthenticated", r.method, r.path, status, code)
@@ -142,23 +149,42 @@ func TestAnAuthenticatorsRefusalIsUnauthenticated(t *testing.T) {
 }
 
 // Every route needs its scope: a principal holding every other scope
-// is refused it, and one holding it is not.
+// is refused it, and one holding it alone is not. A session's routes,
+// and a process's, take exec or servers, either alone.
 func TestEachRouteNeedsItsScope(t *testing.T) {
 	l, _ := newLocal(t, pathEnv())
-	_, url := serve(t, l, WithAuthenticator(tokens()))
-	without := map[Scope]string{
-		ScopeRead:  tokWE,
-		ScopeWrite: tokRE,
-		ScopeExec:  tokRW,
+	o, err := agentworkspace.Offer(l, []agentworkspace.OfferedServer{{Server: agentworkspace.Server{Name: "echo"}, Command: agentworkspace.Command{Args: []string{"cat"}}}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	with := map[Scope]string{ScopeRead: tokRead, ScopeWrite: tokWrite, ScopeExec: tokExec}
+	// A request's token is its scopes, by name, comma-separated.
+	_, url := serve(t, o, WithAuthenticator(func(r *http.Request) (Principal, error) {
+		tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer scopes:")
+		var scopes []Scope
+		for _, s := range strings.Split(tok, ",") {
+			if s != "" {
+				scopes = append(scopes, Scope(s))
+			}
+		}
+		return Principal{Name: "p", Scopes: scopes}, nil
+	}))
+	token := func(scopes []Scope) string {
+		names := make([]string, len(scopes))
+		for i, s := range scopes {
+			names[i] = string(s)
+		}
+		return "scopes:" + strings.Join(names, ",")
+	}
 	for _, r := range routes {
 		body := func() *bytes.Reader { return bytes.NewReader([]byte("{}")) }
-		if status, code := raw(t, r.method, url+r.path, without[r.scope], body()); status != http.StatusForbidden || code != codeForbidden {
-			t.Errorf("%s %s without %s: %d %q, want 403 forbidden", r.method, r.path, r.scope, status, code)
+		others := slices.DeleteFunc(allScopes(), func(s Scope) bool { return slices.Contains(r.scopes, s) })
+		if status, code := raw(t, r.method, url+r.path, token(others), body()); status != http.StatusForbidden || code != codeForbidden {
+			t.Errorf("%s %s with %v: %d %q, want 403 forbidden", r.method, r.path, others, status, code)
 		}
-		if status, code := raw(t, r.method, url+r.path, with[r.scope], body()); status == http.StatusUnauthorized || code == codeForbidden {
-			t.Errorf("%s %s with %s: %d %q", r.method, r.path, r.scope, status, code)
+		for _, s := range r.scopes {
+			if status, code := raw(t, r.method, url+r.path, token([]Scope{s}), body()); status == http.StatusUnauthorized || code == codeForbidden {
+				t.Errorf("%s %s with %s: %d %q", r.method, r.path, s, status, code)
+			}
 		}
 	}
 }

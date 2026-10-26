@@ -39,7 +39,16 @@
 // required, and every request that comes through the tunnel is from
 // one principal, named after the server's host, that holds those scopes
 // and no others. A workspace served with read and write alone is no
-// Starter at the server, and its Exec is remote.ErrForbidden.
+// Starter at the server, and its Exec is remote.ErrForbidden. A
+// workspace that offers MCP servers (an agentworkspace.ServerProvider,
+// such as an agentworkspace.Offering) is one at the server when the
+// scopes hold servers (remote.ScopeServers); served with servers alone
+// it is a ServerProvider and no Starter, so the server may start the
+// offered servers and do nothing else (no file, no command), which is
+// how a host offers servers that hold secrets (see
+// agentworkspace.Offer). A
+// server's output is read through its Offering's OutputFilter at the
+// workspace end, before it enters the tunnel.
 //
 // # Reconnecting
 //
@@ -79,8 +88,8 @@
 // hosts that both dial as one name take the name from each other at
 // every redial, so an enrollment names each host apart. A Workspace
 // keeps the info of the host it was dialled to (its Root, Env, bounds
-// and whether it is a Starter); after another host takes the name, a
-// program dials again.
+// and whether it is a Starter or a ServerProvider); after another host
+// takes the name, a program dials again.
 //
 // # Liveness and bounds
 //
@@ -105,11 +114,10 @@
 // connection and the handler, which ends every process the server
 // started; Hub.Close closes every connection.
 //
-// # Not carried
+// # As remote
 //
-// What remote does not carry, the tunnel does not: the MCP servers a
-// workspace offers (agentworkspace.ServerProvider) are not served.
-// Everything remote does carry, it carries as it is: its routes,
-// scopes, sessions, bounds, error codes and browser checks hold inside
-// the tunnel as they do over HTTP.
+// What remote does not carry, the tunnel does not. Everything remote
+// does carry, it carries as it is: its routes, scopes, sessions,
+// bounds, error codes and browser checks hold inside the tunnel as they
+// do over HTTP, the offered servers among them.
 package tunnel

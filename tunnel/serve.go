@@ -45,7 +45,9 @@ const (
 	// the tunnel is one principal).
 	DefaultSessions = 4
 	// DefaultProcesses bounds the processes open in one session
-	// (remote.WithMaxProcesses).
+	// (remote.WithMaxProcesses): the commands started and the offered
+	// servers started together, a server being a process of its
+	// session.
 	DefaultProcesses = 32
 	// DefaultTransfers bounds the Execs and file reads and writes served
 	// at once (remote.WithMaxTransfers).
@@ -75,7 +77,14 @@ func (o serveOption) applyServe(c *serveConfig) { o(c) }
 // request that comes through the tunnel is from one principal, named
 // after the server's host, holding these scopes and no others. It is
 // required: Serve refuses to serve without it, and refuses an empty
-// list. exec is implied by neither read nor write, as in remote.
+// list. exec is implied by neither read nor write, as in remote, and
+// servers (the MCP servers a workspace that is an
+// agentworkspace.ServerProvider offers) neither implies exec nor is
+// implied by it: servers alone grants the servers and nothing else, no
+// file and no command. A server that holds secrets is offered safely
+// only with servers alone: exec exposes its environment through /proc,
+// and write lets the server's code, config or PATH in the workspace be
+// changed to print its secret past any filter.
 func WithScopes(scopes ...remote.Scope) Option {
 	return serveOption(func(c *serveConfig) { c.scopes, c.scoped = slices.Clone(scopes), true })
 }
@@ -171,7 +180,7 @@ func Serve(ctx context.Context, serverURL string, ws agentworkspace.Workspace, o
 		return errors.New("tunnel: a redial wait that is not positive, or a max below the min")
 	}
 	for _, s := range cfg.scopes {
-		if s != remote.ScopeRead && s != remote.ScopeWrite && s != remote.ScopeExec {
+		if s != remote.ScopeRead && s != remote.ScopeWrite && s != remote.ScopeExec && s != remote.ScopeServers {
 			return fmt.Errorf("tunnel: no scope %q", s)
 		}
 	}

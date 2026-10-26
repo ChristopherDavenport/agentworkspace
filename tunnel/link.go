@@ -42,7 +42,9 @@ const (
 // 4 × 32 × 4 = 512 streams, and DefaultTransfers Execs and file reads
 // and writes are 128 more: 640 of 1024, which leaves 384 for the
 // requests answered at once (renewals, starts, signals, closes, the
-// file system's). Raising remote's bounds through WithHandlerOptions
+// list of offered servers, the file system's). An offered MCP server
+// started through the tunnel is one of its session's processes, with
+// the same four streams, so the arithmetic holds with servers in it. Raising remote's bounds through WithHandlerOptions
 // past that arithmetic gives the guarantee up.
 const (
 	// MaxStreams bounds the requests open at once on one tunnel: every

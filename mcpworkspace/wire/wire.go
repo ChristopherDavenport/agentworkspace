@@ -39,9 +39,10 @@
 // A started server is a process like any other: its id takes the
 // process methods, its standard input and output carry the MCP stream,
 // and it counts toward MaxProcesses in its session. A name the
-// workspace does not offer is refused with CodeNoServer. An MCP server whose workspace
-// offers none need not answer the methods, and a client takes a method
-// not found as no servers.
+// workspace does not offer, agentworkspace.ValidServerName's refusals
+// among them, is refused with CodeNoServer. An MCP server whose
+// workspace offers none need not answer the methods, and a client takes
+// a method not found as no servers.
 //
 // # Files
 //
@@ -112,7 +113,8 @@ type ServerInfo struct {
 }
 
 // CodeNoServer is the JSON-RPC error code of a servers.start refused
-// because the workspace offers no server by that name, in the range
+// because the workspace offers no server by that name (and none can be
+// called a name agentworkspace.ValidServerName refuses), in the range
 // JSON-RPC leaves to an implementation's server errors.
 const CodeNoServer = -32010
 

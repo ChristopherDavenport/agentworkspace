@@ -1,9 +1,12 @@
 // Package workspacetest is the conformance tables every
 // agentworkspace backend runs: Run, the rules every Workspace keeps
 // (confinement, nothing blocking on a FIFO, Env a copy, Exec, names
-// that are not valid paths), and
+// that are not valid paths),
 // RunStarter, the rules every Starter keeps (the pipes, the
-// environment, the lifetimes, the refusals). The root's own backends,
+// environment, the lifetimes, the refusals), and RunServerProvider,
+// the rules every ServerProvider keeps (the list, the pipes,
+// ErrNoServer, the lifetimes, standard error, secrets kept out of the
+// output). The root's own backends,
 // remote and every nested module's backend run the same tables from
 // their own tests, so a backend in a module of its own is held to
 // what Local is. It imports the standard library and the root alone.

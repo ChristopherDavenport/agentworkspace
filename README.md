@@ -133,10 +133,16 @@ output and nothing else: an `Offering` embeds its `Starter`, so its
 `Start` and `Exec` run anything unfiltered, as the same user, and a
 client of a workspace that runs its commands (one served through
 `mcpworkspace.NewProcesses` answers `process.start` as well as
-`servers.start`) can read a running server's environment from
-`/proc/<pid>/environ`. Offer secret-holding servers from a workspace
-that runs nothing else for the client, as dax's box host does, each
-server a unit in its own container.
+`servers.start`, and `remote` with `exec` runs `Exec` and `Start`) can
+read a running server's environment from `/proc/<pid>/environ`, and a
+client that may write the workspace can change a server's code, config
+or `PATH` there and have it print its secret in an encoding no filter
+looks for. A secret-holding server is offered safely only from a
+workspace the client can neither run commands in nor write, as dax's
+box host does, each server a unit in its own container, or through
+`remote` (or `tunnel`) to a principal holding the `servers` scope
+alone: `exec` exposes the environment through `/proc`, `write` defeats
+any filter.
 
 ## Over MCP: mcpworkspace
 
@@ -219,10 +225,11 @@ h, err := remote.NewHandler(ws, remote.WithAuthenticator(func(r *http.Request) (
 defer h.Close() // ends every session's processes
 http.Handle("/", h)
 
-// The client: a Workspace, and a Starter when the server can start and
-// the principal holds exec. Its credentials are in the program's HTTP
-// client (a Transport that sets the Authorization header, or a client
-// certificate).
+// The client: a Workspace, a Starter when the server can start and
+// the principal holds exec, and a ServerProvider when the server offers
+// MCP servers and the principal holds servers. Its credentials are in
+// the program's HTTP client (a Transport that sets the Authorization
+// header, or a client certificate).
 ws, err := remote.Dial(ctx, "https://host/", remote.WithHTTPClient(hc))
 defer ws.Close()
 ```
@@ -238,8 +245,23 @@ request that looks like a browser page's (an Origin, a cross-site
 every mode. `read` covers the files' reads, `write` writes and removes,
 and `exec` runs anything: `Exec`, the processes and the environment,
 which a client without it is not told. `exec` is never implied by `read`
-or `write`. A client's processes live in a session it opens at its first
-`Start` and renews on a lease (`DefaultLease`); when the lease lapses,
+or `write`. A served `ServerProvider`'s MCP servers take a scope of
+their own, `servers`: the client lists them and starts one by name
+(`Servers`, `StartServer`), each a process of its session, and runs no
+command; `servers` and `exec` imply neither the other, `servers` needs
+no `read` to dial (a client holding it alone reads no file: its
+`FS`, `WriteFile` and `Remove` are `ErrForbidden`), and a process's
+routes take the scope it was started under. A session is its
+principal's, so its close ends every process in it, whichever scope
+started it. The server starts it, so an
+`Offering`'s `OutputFilter` reads its output before a byte is sent, and
+its secrets never cross the wire. `Dial`'s client is a `Starter` exactly
+when the server can start and the principal holds `exec`, and a
+`ServerProvider` exactly when the server offers servers and the
+principal holds `servers` (`*Client`, `*StarterClient`, `*ServerClient`,
+`*StarterServerClient`). A client's processes live in a session it
+opens at its first `Start` or `StartServer` and renews on a lease
+(`DefaultLease`); when the lease lapses,
 or the client closes, the server ends every process the session started,
 and a process is reached only through its own session, by the principal
 that opened it. `Exec` streams its output as NDJSON frames, and its
@@ -286,7 +308,11 @@ process's open pipes included, fails and is not sent again. A drop past
 the lease ends the processes, as over HTTP. A second connection for a
 connected name replaces the first. HTTP/2 pings notice a dead tunnel at
 both ends; a WebSocket message, the workspaces a hub holds and the
-streams a tunnel carries are bounded. The package doc has the details.
+streams a tunnel carries are bounded. A workspace's offered MCP servers
+cross as they do over HTTP: `WithScopes(remote.ScopeServers)` grants
+the server the servers alone, no file and no command, its `Workspace`
+a `ServerProvider` and no `Starter`. The package doc has the
+details.
 
 ## Planned
 

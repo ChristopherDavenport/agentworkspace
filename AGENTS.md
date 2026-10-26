@@ -129,9 +129,11 @@ keeps its rule; one about Local alone stays in the root's tests.
   in a call or a read, or holds standard error back does not crash or
   hold up the host (a goroutine of the filter's own is the filter's). The filter covers the server's own output only: an `Offering`
   embeds its `Starter`, so a workspace that also runs a client's
-  commands as the same user exposes a server's environment; secret
-  holders are offered from a workspace that runs nothing else for the
-  client. A backend that carries a `ServerProvider` across a wire
+  commands as the same user exposes a server's environment, and one
+  that lets a client write can have a server's code, config or `PATH`
+  changed to print its secret in an encoding no filter knows; secret
+  holders are offered only to a client holding `servers` alone (remote,
+  tunnel) or from a workspace that runs and writes nothing for it. A backend that carries a `ServerProvider` across a wire
   (mcpworkspace's server methods, remote's `servers` routes) starts the
   server on the serving side, so the filter runs there and no secret
   crosses, and lets a host grant the servers apart from commands and

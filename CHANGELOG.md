@@ -21,15 +21,18 @@ versions may break the API.
   returns a `*remote.ServerClient` (an `agentworkspace.ServerProvider`)
   when the served workspace offers servers and the principal holds
   `servers`, and a `*remote.StarterServerClient` when it may start
-  commands too; `*Client` and `*StarterClient` are as they were, and a
-  type assertion to `Starter` or `ServerProvider` tells the truth in
-  every combination. A name not offered is `agentworkspace.ErrNoServer`
+  commands too; a type assertion to `Starter` or `ServerProvider` tells
+  the truth in every combination. A name not offered is `agentworkspace.ErrNoServer`
   on the client (the wire code `no_server`). `servers` and `exec` imply
   neither the other, and `servers` needs no `read`: the info route
   answers it, so a principal holding `servers` alone dials, and its
-  client lists and starts the servers and reads no file (its `FS`,
-  `WriteFile` and `Remove` are `ErrForbidden`) and runs no command, the
-  way to offer servers that hold secrets. `tunnel.WithScopes` takes `remote.ScopeServers`; its stream
+  client lists and starts the servers, reads no file (its `FS`,
+  `WriteFile` and `Remove` are `ErrForbidden`), runs no command, and is
+  told the root's last element alone, not the host's path. A server
+  that holds secrets is offered safely only to a principal holding
+  `servers` alone: `exec` exposes its environment through `/proc`, and
+  `write` can change its code, config or `PATH` in the workspace to
+  print the secret past any filter. `tunnel.WithScopes` takes `remote.ScopeServers`; its stream
   arithmetic is unchanged, a server being one of its session's
   processes. `workspacetest.RunServerProvider` (`ServerProvider`) is
   the conformance table every `ServerProvider` runs: the list, the
@@ -37,8 +40,13 @@ versions may break the API.
   standard error, and secrets kept out of the output; an `Offering` over
   `Local`, over `mcpworkspace`'s connection, over `remote` and over
   `tunnel` run it. A test in `mcpworkspace` holds one MCP server to one
-  interface (the same `initialize`, `tools/list` and `tools/call`),
-  offered and as a command, here, over `mcpworkspace` and over `remote`.
+  interface (the same whole `initialize` result, `tools/list` and
+  `tools/call`), offered and as a command, here, over `mcpworkspace` and
+  over `remote`.
+- Added: `agentworkspace.ErrOutputFilter`, which every `OutputFilter`
+  failure wraps (no reader, a panic in the call or a read). `remote`
+  and `mcpworkspace` send its words alone for a server's start that
+  failed so, never the panic's value, which may hold a secret.
 - Changed: `remote`'s session routes take `exec` or `servers`, either
   one, where they took `exec`, and a process's routes take the scope it
   was started under: a command's start is `exec`'s, a server's
@@ -48,7 +56,16 @@ versions may break the API.
   whichever scope started each. The info route answers `read` or
   `servers`, and its `start` and `servers` flags each say what the asking
   principal may start: `start` is now false for a principal without
-  `exec`. `WithInsecureNoAuth`'s principal holds `servers` too.
+  `exec`. A principal's Name owns its sessions and should carry one set
+  of scopes: given several, any of them renews and closes the Name's
+  sessions.
+- Changed: `WithInsecureNoAuth`'s principal now holds `servers` too,
+  and a principal holding `exec` and `servers` over a served
+  `ServerProvider` (an `Offering`, say) gets a
+  `*remote.StarterServerClient` from `Dial`, where v0.0.6 gave a
+  `*remote.StarterClient`. Assert the interfaces
+  (`agentworkspace.Starter`, `agentworkspace.ServerProvider`), not the
+  concrete types.
 - Changed: `mcpworkspace.StartServer` refuses a name
   `agentworkspace.ValidServerName` refuses with an error that is
   `agentworkspace.ErrNoServer`, as `Offering` and `remote` do, and

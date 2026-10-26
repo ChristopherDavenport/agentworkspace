@@ -134,11 +134,15 @@ output and nothing else: an `Offering` embeds its `Starter`, so its
 client of a workspace that runs its commands (one served through
 `mcpworkspace.NewProcesses` answers `process.start` as well as
 `servers.start`, and `remote` with `exec` runs `Exec` and `Start`) can
-read a running server's environment from `/proc/<pid>/environ`. Offer
-secret-holding servers from a workspace that runs nothing else for the
-client, as dax's box host does, each server a unit in its own
-container, or serve the `Offering` through `remote` (or `tunnel`) with
-the `servers` scope alone.
+read a running server's environment from `/proc/<pid>/environ`, and a
+client that may write the workspace can change a server's code, config
+or `PATH` there and have it print its secret in an encoding no filter
+looks for. A secret-holding server is offered safely only from a
+workspace the client can neither run commands in nor write, as dax's
+box host does, each server a unit in its own container, or through
+`remote` (or `tunnel`) to a principal holding the `servers` scope
+alone: `exec` exposes the environment through `/proc`, `write` defeats
+any filter.
 
 ## Over MCP: mcpworkspace
 

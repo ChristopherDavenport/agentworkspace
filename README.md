@@ -301,6 +301,13 @@ ws, err := hub.Workspace(ctx, "build-1") // waits for it to connect, bounded by 
 defer ws.Close()
 ```
 
+Over `wss://`, TLS proves the hub to the host. Over a `ws://` loopback
+URL, as behind an `ssh -R` forward, whoever binds the port first gets
+the upgrade, so the application proves the hub itself: the `Hub` adds
+its headers to the 101 (`WithProofHeader`), and `Serve` checks them
+(`WithHubProof`) before it serves anything. The package doc shows an
+HMAC over a nonce as such a proof.
+
 One `remote.Handler` serves every connection, so a session and its
 processes outlive a drop shorter than the lease, and the server's
 client renews through the next connection; what was in flight, a

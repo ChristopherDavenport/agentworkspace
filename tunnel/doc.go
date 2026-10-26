@@ -52,6 +52,65 @@
 // server's output is read through its Offering's OutputFilter at the
 // workspace end, before it enters the tunnel.
 //
+// # Proving the hub
+//
+// The workspace end sends its credential to whatever answers the
+// server URL, and serves it the scopes it was given. Over wss:// the
+// hub is proved by TLS. Over a ws:// loopback URL, as behind an ssh -R
+// forward, it is not: any local user who binds the port first
+// receives the credential, and is served a shell. The proof is the
+// application's, as its authentication is, and the package has a hook
+// at each end for it: the Hub adds the application's headers to the
+// 101 (WithProofHeader), made for the request its enrollment named,
+// and the workspace end checks them (WithHubProof) after the 101 and
+// before it serves anything; a hub that fails is a refusal
+// (ErrHubProof), and nothing has been served to it.
+//
+// An HMAC over a nonce, keyed by a secret both ends hold, is one such
+// proof. The key itself is never sent, since the upgrade reaches an
+// impostor before the proof is checked: the workspace end sends a fresh
+// nonce and its own MAC under the key, which the enrollment checks, and
+// the hub answers with its MAC of the same nonce. The two MACs are of
+// different labels, so an impostor cannot answer with the one it was
+// sent; and the enrollment refuses a nonce it has seen, or one too old
+// (a time in it), so the workspace's MAC that reached an impostor
+// cannot be replayed to the hub.
+//
+//	// mac is the hex HMAC-SHA256, under key, of label and nonce.
+//	mac := func(key []byte, label, nonce string) string {
+//		m := hmac.New(sha256.New, key)
+//		m.Write([]byte(label + "\x00" + nonce))
+//		return hex.EncodeToString(m.Sum(nil))
+//	}
+//
+//	// The workspace end: a nonce for each upgrade, and the hub's
+//	// answer checked before anything is served.
+//	err := tunnel.Serve(ctx, "ws://127.0.0.1:7000/tunnel", ws,
+//		tunnel.WithScopes(remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec),
+//		tunnel.WithHeader(func(context.Context) (http.Header, error) {
+//			nonce := strconv.FormatInt(time.Now().Unix(), 10) + "." + rand.Text()
+//			return http.Header{
+//				"X-Workspace": {id},
+//				"X-Nonce":     {nonce},
+//				"X-Proof":     {mac(key, "workspace", nonce)},
+//			}, nil
+//		}),
+//		tunnel.WithHubProof(func(req *http.Request, resp *http.Response) error {
+//			want := mac(key, "hub", req.Header.Get("X-Nonce"))
+//			if !hmac.Equal([]byte(resp.Header.Get("X-Hub-Proof")), []byte(want)) {
+//				return errors.New("the hub's proof does not match")
+//			}
+//			return nil
+//		}))
+//
+//	// The hub: the enrollment checks the workspace's MAC (and refuses
+//	// a stale or replayed nonce), and the proof answers with the hub's.
+//	hub, err := tunnel.NewHub(
+//		tunnel.WithEnrollment(enroll),
+//		tunnel.WithProofHeader(func(r *http.Request, name string) (http.Header, error) {
+//			return http.Header{"X-Hub-Proof": {mac(keyOf(name), "hub", r.Header.Get("X-Nonce"))}}, nil
+//		}))
+//
 // # Reconnecting
 //
 // Serve dials again when the connection drops, after a jittered wait

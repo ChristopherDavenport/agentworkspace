@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/ChristopherDavenport/agentworkspace/remote"
@@ -63,6 +64,7 @@ type hubConfig struct {
 	link          linkConfig
 	enroll        Enrollment
 	challenge     string // the WWW-Authenticate of a 401, "" for none
+	proof         func(*http.Request, string) (http.Header, error)
 	maxWorkspaces int
 }
 
@@ -86,6 +88,18 @@ func WithChallenge(value string) HubOption {
 	return hubOption(func(c *hubConfig) { c.challenge = value })
 }
 
+// WithProofHeader adds the header f returns to each upgrade's 101, f
+// called once for each with the request the enrollment named workspace
+// name for, after the enrollment and before the 101: the hub's half of
+// the application's proof that it is the hub the workspace end's
+// credential was issued for, which the workspace end checks with
+// WithHubProof. An error from f, or a header of the handshake's own
+// (Connection, Upgrade, Sec-WebSocket-*), refuses the upgrade (500);
+// the error's text is logged, not sent, so it must hold no secret.
+func WithProofHeader(f func(r *http.Request, name string) (http.Header, error)) HubOption {
+	return hubOption(func(c *hubConfig) { c.proof = f })
+}
+
 // WithMaxWorkspaces bounds the workspaces connected at once; an upgrade
 // past it is refused (503) unless it replaces a connected one. The
 // default is DefaultMaxWorkspaces.
@@ -103,10 +117,12 @@ func WithMaxWorkspaces(n int) HubOption {
 // browser is a client, then one the enrollment refuses or names no
 // valid workspace for, or every one without an enrollment (401, with
 // the application's challenge, WithChallenge), then one past the bound
-// of workspaces (503). A second connection for a name that is
-// connected replaces the first, which is closed: a host that restarted
-// dials again before the hub has noticed that its old connection is
-// dead, and the newest is the one that is alive. Requests in flight on the replaced connection
+// of workspaces (503). The application's proof header (WithProofHeader)
+// is made last, for an upgrade about to be answered. A second
+// connection for a name that is connected replaces the first, which is
+// closed: a host that restarted dials again before the hub has noticed
+// that its old connection is dead, and the newest is the one that is
+// alive. Requests in flight on the replaced connection
 // fail. A new connection is taken only once it has answered a request
 // over HTTP/2, within HandshakeTimeout, so a host that upgrades and
 // never speaks HTTP/2 does not take the name from a working one.
@@ -229,6 +245,25 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusServiceUnavailable, fmt.Sprintf("%d workspaces are connected, the most there may be", h.cfg.maxWorkspaces))
 		return
 	}
+	if h.cfg.proof != nil {
+		hdr, err := h.cfg.proof(r, name)
+		if err != nil {
+			h.cfg.link.log.Info("tunnel: the proof's header was not made", "workspace", name, "err", err)
+			refuse(http.StatusInternalServerError, "the proof's header was not made")
+			return
+		}
+		for k := range hdr {
+			if handshake(k) {
+				refuse(http.StatusInternalServerError, fmt.Sprintf("the proof's header names %s, the handshake's own", http.CanonicalHeaderKey(k)))
+				return
+			}
+		}
+		for k, vs := range hdr {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+	}
 	c, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return // Accept answered it
@@ -242,6 +277,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The connection is held by its HTTP/2 client from here; the
 	// handler returning leaves it open.
 	h.cfg.link.log.Info("tunnel: connected", "workspace", name)
+}
+
+// handshake reports whether header k is the WebSocket handshake's own,
+// which a proof's header may not set: Accept reads some of them back.
+func handshake(k string) bool {
+	k = http.CanonicalHeaderKey(k)
+	return k == "Connection" || k == "Upgrade" || strings.HasPrefix(k, "Sec-Websocket-")
 }
 
 // open starts the HTTP/2 client over nc, waits for it to answer a

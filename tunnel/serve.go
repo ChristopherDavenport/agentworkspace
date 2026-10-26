@@ -54,6 +54,11 @@ const (
 	DefaultTransfers = 128
 )
 
+// ErrHubProof is a hub that failed the application's proof
+// (WithHubProof): the upgrade was answered, and the connection ended
+// before anything was served.
+var ErrHubProof = errors.New("tunnel: the hub failed the proof")
+
 // errRedirect is a redirect of the upgrade, which is never followed.
 var errRedirect = errors.New("tunnel: the server redirected the upgrade, which is never followed")
 
@@ -63,6 +68,7 @@ type serveConfig struct {
 	scoped    bool
 	hc        *http.Client
 	header    func(context.Context) (http.Header, error)
+	proof     func(*http.Request, *http.Response) error
 	handler   []remote.Option
 	redialMin time.Duration
 	redialMax time.Duration
@@ -109,6 +115,21 @@ func WithHTTPClient(hc *http.Client) Option {
 // text is logged, so it must hold no credential.
 func WithHeader(f func(ctx context.Context) (http.Header, error)) Option {
 	return serveOption(func(c *serveConfig) { c.header = f })
+}
+
+// WithHubProof checks the hub before anything is served to it: f is
+// called with each answered upgrade, req as it was sent (with the
+// header WithHeader added) and resp the hub's 101, after the 101 and
+// before the connection serves a request. An error from f ends the
+// connection, and counts as a refusal (ErrHubProof wraps it): Serve
+// returns it from a first dial, and tries again within the lease after
+// one that connected, as for a 401. Its text is logged, so it must
+// hold no credential. It is how the application proves the hub is the
+// one its credential was issued for, where TLS does not (a ws://
+// loopback URL behind a forward); the hub's half is WithProofHeader,
+// and the package doc shows a proof.
+func WithHubProof(f func(req *http.Request, resp *http.Response) error) Option {
+	return serveOption(func(c *serveConfig) { c.proof = f })
 }
 
 // WithHandlerOptions passes opts to the remote.Handler the workspace is
@@ -304,8 +325,9 @@ func (s *server) run(ctx context.Context) error {
 	}
 }
 
-// once dials, and serves the connection until it ends or ctx does; it
-// says whether the upgrade was answered, so there was a connection.
+// once dials, checks the hub's proof, and serves the connection until
+// it ends or ctx does; it says whether there was a connection that
+// served.
 func (s *server) once(ctx context.Context) (bool, error) {
 	dctx, cancel := context.WithTimeout(ctx, s.cfg.link.handshake)
 	defer cancel()
@@ -324,6 +346,19 @@ func (s *server) once(ctx context.Context) (bool, error) {
 	c, resp, err := websocket.Dial(dctx, s.url, &websocket.DialOptions{HTTPClient: s.cfg.hc, HTTPHeader: header})
 	if err != nil {
 		return false, dialError(resp, err)
+	}
+	if s.cfg.proof != nil {
+		req := resp.Request
+		if req == nil {
+			// A Transport that did not say what it sent: what Serve
+			// asked it to.
+			req, _ = http.NewRequestWithContext(dctx, http.MethodGet, s.url, nil)
+			req.Header = header
+		}
+		if err := s.cfg.proof(req, resp); err != nil {
+			c.CloseNow()
+			return false, &refusal{fmt.Errorf("%w: %w", ErrHubProof, err)}
+		}
 	}
 	cancel()
 	nc := conn(ctx, c, s.cfg.link.maxMessage)

@@ -42,6 +42,20 @@ versions may break the API.
   the connection, so it holds against an impostor that cannot reach the
   hub (the `ssh -R` case); where one can, use `wss://`. Over `ws://`
   the upgrade must carry no reusable credential.
+- Added: `remote.Handler.Bounds`, the bounds a handler was made with
+  (`remote.Bounds`: sessions, sessions per principal, processes,
+  transfers, write, Exec output and listing bounds), beside `Lease`.
+- Added: `tunnel.ReservedStreams` (`MaxStreams / 4`), the streams a
+  tunnel keeps for the requests answered at once.
+- Changed (breaking): `tunnel.Serve` enforces the stream arithmetic its guarantee
+  rests on (no unread output stops a renewal, a wait or a start): it
+  refuses remote bounds, given through `WithHandlerOptions`, that would
+  let the server hold more than `MaxStreams − ReservedStreams` streams
+  open (the sessions its one principal may have × their processes × 4,
+  plus the transfers), where before it served them and gave the
+  guarantee up. One bound is raised by lowering another. `MaxStreams`
+  and the windows are not raised to fit instead: the hub's windows are
+  its own, and assume the workspace end allows `MaxStreams` streams.
 
 ## v0.0.7 - 2026-10-26
 

@@ -343,6 +343,33 @@ func (h *Handler) isClosed() bool {
 // DefaultLease.
 func (h *Handler) Lease() time.Duration { return h.lease }
 
+// Bounds are a Handler's bounds, each its option's or its default: what
+// a program that serves the handler over a wire of its own checks that
+// wire's limits against (tunnel does, against its streams). The lease
+// is Lease's.
+type Bounds struct {
+	MaxSessions             int   // WithMaxSessions
+	MaxSessionsPerPrincipal int   // WithMaxSessionsPerPrincipal
+	MaxProcesses            int   // WithMaxProcesses, in one session
+	MaxTransfers            int   // WithMaxTransfers
+	MaxWriteBytes           int64 // WithMaxWriteBytes
+	MaxExecOutputBytes      int64 // WithMaxExecOutputBytes
+	MaxDirEntries           int   // WithMaxDirEntries
+}
+
+// Bounds are the bounds h was made with.
+func (h *Handler) Bounds() Bounds {
+	return Bounds{
+		MaxSessions:             h.maxSessions,
+		MaxSessionsPerPrincipal: h.maxPerOwner,
+		MaxProcesses:            h.maxProcesses,
+		MaxTransfers:            h.maxTransfers,
+		MaxWriteBytes:           h.maxWrite,
+		MaxExecOutputBytes:      h.maxOutput,
+		MaxDirEntries:           h.maxDirEntries,
+	}
+}
+
 // transfer serves f as one of the transfers WithMaxTransfers bounds,
 // refusing (and answering) one past the bound.
 func (h *Handler) transfer(f http.HandlerFunc) http.HandlerFunc {

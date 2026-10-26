@@ -257,6 +257,35 @@ func TestAClientIsWhatItsScopesAllow(t *testing.T) {
 	}
 }
 
+// A client's Scopes are the ones the server granted its principal at
+// Dial, in the server's order, and a copy: changing it changes no later
+// answer.
+func TestAClientSaysItsScopes(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	_, url := serve(t, l, WithAuthenticator(tokens()))
+	for _, tc := range []struct {
+		name, tok string
+		want      []Scope
+	}{
+		{"read", tokRead, []Scope{ScopeRead}},
+		{"read and write", tokRW, []Scope{ScopeRead, ScopeWrite}},
+		{"read and exec", tokRE, []Scope{ScopeRead, ScopeExec}},
+		{"all", tokAll, allScopes()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := dial(t, url, withToken(tc.tok))
+			got := ws.Scopes()
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("Scopes = %q, want %q", got, tc.want)
+			}
+			got[0] = "changed"
+			if again := ws.Scopes(); !slices.Equal(again, tc.want) {
+				t.Errorf("Scopes after changing a copy = %q, want %q", again, tc.want)
+			}
+		})
+	}
+}
+
 // The token the program gives its HTTP client is in no error, whatever
 // fails, nor in the Descriptor.
 func TestTheTokenIsInNoError(t *testing.T) {

@@ -95,7 +95,9 @@
 // Exec, a command's start, the sessions and the processes it started,
 // and the environment, which the info route gives a principal without
 // exec none of: such a client's Env is empty and it is no Starter. exec
-// is never implied by read, write or servers.
+// is never implied by read, write or servers. The info route names the
+// principal's scopes too, and a client's Scopes are those it named at
+// Dial.
 //
 // servers covers the MCP servers a served agentworkspace.ServerProvider
 // offers: their list, a server's start, the sessions they run in and

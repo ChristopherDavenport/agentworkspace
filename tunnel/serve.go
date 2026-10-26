@@ -81,7 +81,10 @@ func (o serveOption) applyServe(c *serveConfig) { o(c) }
 // servers (the MCP servers a workspace that is an
 // agentworkspace.ServerProvider offers) neither implies exec nor is
 // implied by it: servers alone grants the servers and nothing else, no
-// file and no command, the way to offer servers that hold secrets.
+// file and no command. A server that holds secrets is offered safely
+// only with servers alone: exec exposes its environment through /proc,
+// and write lets the server's code, config or PATH in the workspace be
+// changed to print its secret past any filter.
 func WithScopes(scopes ...remote.Scope) Option {
 	return serveOption(func(c *serveConfig) { c.scopes, c.scoped = slices.Clone(scopes), true })
 }

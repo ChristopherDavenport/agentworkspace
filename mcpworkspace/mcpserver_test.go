@@ -352,3 +352,38 @@ func TestAFilteredOfferedServerOverTheConnection(t *testing.T) {
 	}
 	within(t, 15*time.Second, "the server's end", func() { inner.Close() })
 }
+
+// A filter that panics fails the server's start, and the connection
+// carries ErrOutputFilter's words alone, never the panic's value, which
+// may hold a secret the filter was given.
+func TestAFilterPanicsValueNeverCrossesTheConnection(t *testing.T) {
+	const secret = "tok-panic-secret-0123456789"
+	dir := t.TempDir()
+	ws, err := agentworkspace.NewLocal(dir, []string{"PATH=" + os.Getenv("PATH")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ws.Close() })
+	o, err := agentworkspace.Offer(ws, []agentworkspace.OfferedServer{{
+		Server:  agentworkspace.Server{Name: "holder"},
+		Command: agentworkspace.Command{Args: []string{"cat"}, Env: []string{"TOKEN=" + secret}},
+		Secrets: []string{"TOKEN"},
+	}}, agentworkspace.WithOutputFilter(func(_ string, values map[string]string, _ io.Reader) io.Reader {
+		panic("cannot redact " + values["TOKEN"])
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, _ := serving(t, dir, o).connect(t)
+	c := conn(t, cs)
+	for _, stderr := range []io.Writer{nil, io.Discard} {
+		p, err := StartServer(context.Background(), c, "holder", stderr)
+		if err == nil {
+			p.Close()
+			t.Fatal("a start whose filter panicked succeeded")
+		}
+		if !strings.Contains(err.Error(), agentworkspace.ErrOutputFilter.Error()) || strings.Contains(err.Error(), secret) {
+			t.Errorf("the client's error = %q, want the filter's failure and no secret", err)
+		}
+	}
+}

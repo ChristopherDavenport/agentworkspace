@@ -110,10 +110,17 @@ func statusOf(code string) int {
 // client's to add. So is an unmapped errno's (ENOSPC, ENOTDIR, EIO):
 // its text alone. Any other error's message is its text, scrubbed and
 // bounded: the served workspace's words, such as "x is not a regular
-// file", with root cut from it.
+// file", with root cut from it. An offered server's OutputFilter that
+// failed is agentworkspace.ErrOutputFilter's words alone, never the
+// panic's value its error holds.
 func errorOf(root string, err error) wireError {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 		return wireError{Code: codeOther, Message: "the request ended"}
+	case errors.Is(err, agentworkspace.ErrOutputFilter):
+		// Its words alone: the panic's value it wraps may hold a
+		// secret the filter was given.
+		return wireError{Code: codeOther, Message: agentworkspace.ErrOutputFilter.Error()}
 	}
 	for _, c := range codes {
 		if !errors.Is(err, c.err) {

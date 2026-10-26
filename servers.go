@@ -16,6 +16,13 @@ import (
 // ErrNoServer is a server name a ServerProvider does not offer.
 var ErrNoServer = errors.New("no such server in this workspace")
 
+// ErrOutputFilter is an OutputFilter that failed: one that gave no
+// reader, or panicked in its call or in a read. The error that wraps it
+// holds the panic's value, which may hold what the filter was given, so
+// a backend that carries a server's start or output across a wire sends
+// this error's words alone, never the wrapping error's.
+var ErrOutputFilter = errors.New("the server's output filter failed")
+
 // Server is an MCP server a workspace offers: one it holds of its own,
 // such as a server installed in a container's image or one a host runs
 // beside a sandbox, rather than one the program names a command for.
@@ -95,10 +102,14 @@ type ServerProvider interface {
 // NewProcesses answers both servers.start and process.start, and one
 // served through remote to a principal holding exec runs its Exec and
 // Start) can read a running server's environment, its secrets among
-// it, from /proc/<pid>/environ. Offer secret-holding servers from a
-// workspace that runs nothing else for the client, as dax's box host
-// does with each server a unit in its own container, or serve the
-// Offering through remote with the servers scope alone.
+// it, from /proc/<pid>/environ. And a client that may write the
+// workspace can change a server's code, config or PATH wherever they
+// lie in it, and have the server print its secret in an encoding the
+// filter does not know: no filter survives that. Offer secret-holding
+// servers from a workspace the client can neither run commands in nor
+// write, as dax's box host does with each server a unit in its own
+// container, or serve the Offering through remote to a principal
+// holding the servers scope alone.
 func Offer(ws Starter, servers []OfferedServer, opts ...OfferOption) (*Offering, error) {
 	if ws == nil {
 		return nil, errors.New("agentworkspace: Offer of no workspace")
@@ -536,11 +547,11 @@ func (q *stderrQueue) feed(w *io.PipeWriter) {
 func applyFilter(f OutputFilter, name string, values map[string]string, r io.Reader) (out io.Reader, err error) {
 	defer func() {
 		if v := recover(); v != nil {
-			out, err = nil, fmt.Errorf("agentworkspace: server %q: the output filter panicked: %v", name, v)
+			out, err = nil, fmt.Errorf("agentworkspace: server %q: %w: it panicked: %v", name, ErrOutputFilter, v)
 		}
 	}()
 	if out = f(name, maps.Clone(values), r); out == nil {
-		return nil, fmt.Errorf("agentworkspace: server %q: the output filter gave no reader", name)
+		return nil, fmt.Errorf("agentworkspace: server %q: %w: it gave no reader", name, ErrOutputFilter)
 	}
 	return out, nil
 }
@@ -549,7 +560,7 @@ func applyFilter(f OutputFilter, name string, values map[string]string, r io.Rea
 func safeRead(r io.Reader, p []byte) (n int, err error) {
 	defer func() {
 		if v := recover(); v != nil {
-			n, err = 0, fmt.Errorf("agentworkspace: the output filter panicked: %v", v)
+			n, err = 0, fmt.Errorf("agentworkspace: %w: it panicked: %v", ErrOutputFilter, v)
 		}
 	}()
 	return r.Read(p)
@@ -614,7 +625,7 @@ func (f *filteredOutput) Read(p []byte) (int, error) {
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				panicked, err = true, fmt.Errorf("agentworkspace: the output filter panicked: %v", v)
+				panicked, err = true, fmt.Errorf("agentworkspace: %w: it panicked: %v", ErrOutputFilter, v)
 			}
 		}()
 		n, err = f.Reader.Read(p)

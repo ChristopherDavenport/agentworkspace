@@ -30,11 +30,14 @@ const (
 	// it, and needs no read to dial.
 	//
 	// Granted alone, it is how a host gives a client the servers it
-	// offers and nothing else, and the way to offer servers that hold
-	// secrets: a client that may also run commands as the servers' user
-	// can read a running server's environment from /proc (see
-	// agentworkspace.Offer), and one that may read files can read what a
-	// server keeps in the workspace.
+	// offers and nothing else, and a secret-holding server is offered
+	// safely only to a principal holding servers alone. With exec, the
+	// client runs commands as the servers' user and reads a running
+	// server's environment from /proc (see agentworkspace.Offer). With
+	// write, it can change the server's code, config or PATH wherever
+	// they lie in the workspace, and have the server print its secret in
+	// an encoding no OutputFilter looks for. With read, it reads
+	// whatever a server keeps in the workspace.
 	ScopeServers Scope = "servers"
 )
 
@@ -44,7 +47,11 @@ func allScopes() []Scope { return []Scope{ScopeRead, ScopeWrite, ScopeExec, Scop
 // Principal is who a request is from, as an Authenticator resolved it,
 // and what they may do. A session, and every process started in it,
 // belongs to the principal's Name: another principal's request names
-// no such session.
+// no such session. The Name is the session's owner, so a Name should
+// carry one set of Scopes: an Authenticator that gives one Name several
+// sets (two tokens, say, one holding exec and one servers) lets each
+// renew and close the sessions the Name opens, and a close ends every
+// process in the session, whichever scope started it.
 type Principal struct {
 	Name   string
 	Scopes []Scope

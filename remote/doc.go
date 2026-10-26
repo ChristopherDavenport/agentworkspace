@@ -52,7 +52,9 @@
 // though both are in its session. A session belongs to the principal
 // that opened it, by Name, and not to a scope: its renewal and its
 // close take either scope, and its close, or its lapse, ends every
-// process in it, whichever scope started each. Info's Start and
+// process in it, whichever scope started each. A Name should therefore
+// carry one set of scopes; given several, any of its tokens renews and
+// closes the sessions the Name opens. Info's Start and
 // Servers each say what the asking principal may start here: Start
 // that the served workspace is a Starter and the principal holds exec,
 // Servers that it is a ServerProvider and the principal holds servers.
@@ -99,18 +101,24 @@
 // offers: their list, a server's start, the sessions they run in and
 // the routes of the processes it started so, and nothing else. It does
 // not imply exec, nor exec it, and it needs no read: the info route
-// answers it too, with nothing but the root's name, the descriptor,
-// the bounds and that servers are offered. A principal holding servers
+// answers it too, with nothing but the root's last element (Root, and
+// the served descriptor's, are not the host's path to a principal
+// without read), the descriptor, the bounds and that servers are
+// offered. A principal holding servers
 // alone dials, lists and starts the offered servers and talks to them
 // over their pipes, and reads no file (its client's FS, WriteFile and
 // Remove are ErrForbidden), runs no command (no Exec, no Start, no
 // process exec started) and is told no environment; its client is an
 // agentworkspace.ServerProvider and no Starter. That is how a host
-// grants a client its servers and nothing else, and the way to offer
-// servers that hold secrets: servers alone, as an agentworkspace.Offering
-// embeds its Starter, so a client that may run commands as the
-// servers' user can read a running server's environment from /proc (see
-// agentworkspace.Offer). A server is started by the served workspace's
+// grants a client its servers and nothing else, and a server that holds
+// secrets is offered safely only to a principal holding servers alone.
+// exec exposes its environment: an agentworkspace.Offering embeds its
+// Starter, so a client that may run commands as the servers' user reads
+// a running server's environment from /proc (see agentworkspace.Offer).
+// write defeats any filter: a client that may write the workspace can
+// change the server's code, config or PATH wherever they lie in it, and
+// have the server print its secret in an encoding the filter does not
+// know. read reads whatever a server keeps in the workspace. A server is started by the served workspace's
 // StartServer, on the serving side, so an Offering's OutputFilter reads
 // its output there, before a byte of it is sent, and the secrets it
 // names never cross the wire.

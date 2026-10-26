@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -161,6 +162,13 @@ func TestAServersPrincipalRunsNoCommand(t *testing.T) {
 	}
 	if info := clientOf(ws).info; info.Start || !info.Servers || len(info.Env) != 0 {
 		t.Errorf("the info route told a servers principal start %v, servers %v, env %q", info.Start, info.Servers, info.Env)
+	}
+	// Nor the host's path: the root's last element alone.
+	if base := filepath.Base(o.Root()); ws.Root() != base || ws.Served().Root != base || ws.Descriptor().Root != base {
+		t.Errorf("a servers principal was told the root %q, served %q, descriptor %q; want %q alone", ws.Root(), ws.Served().Root, ws.Descriptor().Root, base)
+	}
+	if strings.Contains(fmt.Sprint(clientOf(ws).info), o.Root()) {
+		t.Errorf("the info route told a servers principal the host's path %s", o.Root())
 	}
 	for what, err := range map[string]error{
 		"stat":    func() error { _, err := fs.Stat(ws.FS(), "f.txt"); return err }(),
@@ -622,4 +630,97 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// A secret holder is safe only behind servers alone. With write too, a
+// server whose command lies in the workspace runs the client's code
+// with the server's secret: the client rewrites the script to print the
+// secret in base64, which the filter does not know, and reads it back.
+// That is the risk the docs name; with servers alone the write is
+// forbidden and the script is the host's.
+func TestServersAndWriteDefeatTheFilter(t *testing.T) {
+	const secret = "tok-write-secret-0123456789"
+	for _, c := range []struct {
+		name   string
+		scopes []Scope
+		leaks  bool
+	}{
+		{"servers and write", []Scope{ScopeServers, ScopeWrite}, true},
+		{"servers alone", []Scope{ScopeServers}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l, _ := newLocal(t, pathEnv())
+			if err := l.WriteFile(context.Background(), "run.sh", []byte("echo ready; exec cat\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			o, err := agentworkspace.Offer(l, []agentworkspace.OfferedServer{{
+				Server:  agentworkspace.Server{Name: "holder"},
+				Command: agentworkspace.Command{Args: []string{"sh", "run.sh"}, Env: []string{"TOKEN=" + secret}},
+				Secrets: []string{"TOKEN"},
+			}}, agentworkspace.WithOutputFilter(redact))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, url := serve(t, o, WithAuthenticator(scoped("p", c.scopes...)))
+			ws := dial(t, url)
+			werr := ws.WriteFile(context.Background(), "run.sh", []byte(`printf %s "$TOKEN" | base64; echo`+"\n"), 0o755)
+			switch {
+			case c.leaks && werr != nil:
+				t.Fatalf("the write: %v", werr)
+			case !c.leaks && !errors.Is(werr, ErrForbidden):
+				t.Fatalf("the write with servers alone: %v, want ErrForbidden", werr)
+			}
+			p, err := ws.(agentworkspace.ServerProvider).StartServer(context.Background(), "holder", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			var line string
+			within(t, 10*time.Second, "the first line", func() { line, _ = bufio.NewReader(p.Stdout()).ReadString('\n') })
+			decoded, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(line))
+			if got := string(decoded) == secret; got != c.leaks {
+				t.Errorf("the client recovered the secret: %v, want %v (it read %q)", got, c.leaks, line)
+			}
+			if !c.leaks && line != "ready\n" {
+				t.Errorf("with servers alone the server said %q, want the host's script", line)
+			}
+		})
+	}
+}
+
+// A filter that panics fails the server's start, and what crosses the
+// wire is ErrOutputFilter's words alone, never the panic's value, which
+// may hold a secret the filter was given.
+func TestAFilterPanicsValueNeverCrossesTheWire(t *testing.T) {
+	const secret = "tok-panic-secret-0123456789"
+	l, _ := newLocal(t, pathEnv())
+	o, err := agentworkspace.Offer(l, []agentworkspace.OfferedServer{{
+		Server:  agentworkspace.Server{Name: "holder"},
+		Command: agentworkspace.Command{Args: []string{"cat"}, Env: []string{"TOKEN=" + secret}},
+		Secrets: []string{"TOKEN"},
+	}}, agentworkspace.WithOutputFilter(func(_ string, values map[string]string, _ io.Reader) io.Reader {
+		panic("cannot redact " + values["TOKEN"])
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.StartServer(context.Background(), "holder", nil); !errors.Is(err, agentworkspace.ErrOutputFilter) {
+		t.Fatalf("the Offering's start = %v, want ErrOutputFilter", err)
+	}
+	_, url := serve(t, o, WithAuthenticator(scoped("p", ScopeServers)))
+	wire := &tee{next: http.DefaultTransport}
+	ws := dial(t, url, WithHTTPClient(&http.Client{Transport: wire}))
+	for _, stderr := range []io.Writer{nil, io.Discard} {
+		p, err := ws.(agentworkspace.ServerProvider).StartServer(context.Background(), "holder", stderr)
+		if err == nil {
+			p.Close()
+			t.Fatal("a start whose filter panicked succeeded")
+		}
+		if !strings.Contains(err.Error(), agentworkspace.ErrOutputFilter.Error()) || strings.Contains(err.Error(), secret) {
+			t.Errorf("the client's error = %q, want the filter's failure and no secret", err)
+		}
+	}
+	if strings.Contains(wire.String(), secret) {
+		t.Error("the wire holds the panic's secret")
+	}
 }

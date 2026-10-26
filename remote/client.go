@@ -277,7 +277,8 @@ func (c *Client) sessionRoute() string {
 	return routeSessions + "/" + c.session
 }
 
-// Root is the served workspace's Root.
+// Root is the served workspace's Root; for a principal without read,
+// whom the server does not tell its path, its last element alone.
 func (c *Client) Root() string { return c.info.Root }
 
 // Env is the served workspace's Env, a copy, as it was at Dial; empty
@@ -290,7 +291,8 @@ func (c *Client) Descriptor() agentworkspace.Descriptor {
 	return agentworkspace.Descriptor{Kind: agentworkspace.KindRemote, Ref: c.base.String(), Root: c.info.Root}
 }
 
-// Served is the served workspace's own Descriptor.
+// Served is the served workspace's own Descriptor, its Root as Root
+// gives it.
 func (c *Client) Served() agentworkspace.Descriptor { return c.info.Served.workspace() }
 
 // Close ends every process the client started, as Process.Close does,

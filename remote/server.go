@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -409,15 +410,21 @@ func decode(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 // descriptor, the bounds, and what this principal may do there (start
 // processes, start offered servers); the environment only to one
 // holding exec. It answers read or servers, so a principal holding
-// servers alone learns nothing it may not know.
+// servers alone learns nothing it may not know: to one without read,
+// the root, and the served descriptor's, are their last element alone,
+// not a path on the host.
 func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 	p := principalOf(r)
+	root, served := h.ws.Root(), descriptorOf(h.ws.Descriptor())
+	if !p.Has(ScopeRead) {
+		root, served.Root = filepath.Base(root), filepath.Base(served.Root)
+	}
 	_, start := h.ws.(agentworkspace.Starter)
 	_, servers := h.ws.(agentworkspace.ServerProvider)
 	_, links := h.ws.FS().(fs.ReadLinkFS)
 	reply := infoReply{
-		Root:    h.ws.Root(),
-		Served:  descriptorOf(h.ws.Descriptor()),
+		Root:    root,
+		Served:  served,
 		Start:   start && p.Has(ScopeExec),
 		Servers: servers && p.Has(ScopeServers),
 		Links:   links,

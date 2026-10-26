@@ -238,8 +238,13 @@ func (s *Processes) startServer(_ context.Context, ss *mcp.ServerSession, p *Ser
 	res, err := s.launch(ss, p.Stderr, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {
 		return sp.StartServer(ctx, p.Name, stderr)
 	})
-	if errors.Is(err, agentworkspace.ErrNoServer) {
+	switch {
+	case errors.Is(err, agentworkspace.ErrNoServer):
 		return nil, &jsonrpc.Error{Code: wire.CodeNoServer, Message: err.Error()}
+	case errors.Is(err, agentworkspace.ErrOutputFilter):
+		// Its words alone: the panic's value it wraps may hold a secret
+		// the filter was given.
+		return nil, errors.New(agentworkspace.ErrOutputFilter.Error())
 	}
 	return res, err
 }

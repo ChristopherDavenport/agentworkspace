@@ -223,7 +223,8 @@ func (h *Handler) renewSession(w http.ResponseWriter, r *http.Request) {
 
 // closeSession ends the session and every process in it, whichever
 // scope started each: a session is its principal's, by Name, not a
-// scope's, so either scope closes it.
+// scope's, so either scope closes it (and a Name given several scope
+// sets closes it with any of them; see Principal).
 func (h *Handler) closeSession(w http.ResponseWriter, r *http.Request) {
 	s := h.sessionOf(w, r)
 	if s == nil {

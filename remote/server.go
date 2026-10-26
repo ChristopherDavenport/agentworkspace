@@ -158,7 +158,9 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 		return nil, errors.New("remote: a bound that is not positive")
 	}
 	m := http.NewServeMux()
-	m.HandleFunc("GET "+routeInfo, h.need(ScopeRead, h.info))
+	// The info route answers a principal that may read or may start the
+	// offered servers: one holding servers alone dials too.
+	m.HandleFunc("GET "+routeInfo, h.needAny([]Scope{ScopeRead, ScopeServers}, h.info))
 	m.HandleFunc("GET "+routeStat, h.need(ScopeRead, h.stat))
 	m.HandleFunc("GET "+routeLstat, h.need(ScopeRead, h.lstat))
 	m.HandleFunc("GET "+routeReadLink, h.need(ScopeRead, h.readLink))
@@ -403,6 +405,11 @@ func decode(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 	return false
 }
 
+// info describes the served workspace to r's principal: its root and
+// descriptor, the bounds, and what this principal may do there (start
+// processes, start offered servers); the environment only to one
+// holding exec. It answers read or servers, so a principal holding
+// servers alone learns nothing it may not know.
 func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 	p := principalOf(r)
 	_, start := h.ws.(agentworkspace.Starter)
@@ -411,7 +418,7 @@ func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 	reply := infoReply{
 		Root:    h.ws.Root(),
 		Served:  descriptorOf(h.ws.Descriptor()),
-		Start:   start,
+		Start:   start && p.Has(ScopeExec),
 		Servers: servers && p.Has(ScopeServers),
 		Links:   links,
 		Scopes:  p.Scopes,

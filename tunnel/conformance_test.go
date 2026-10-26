@@ -40,8 +40,8 @@ func TestConformance(t *testing.T) {
 }
 
 // The server tables run on an Offering over Local through a tunnel:
-// with every scope, and with read and servers alone, whose workspace at
-// the hub is a ServerProvider and no Starter.
+// with every scope, and with servers alone, whose workspace at the hub
+// is a ServerProvider and no Starter.
 func TestServerProviderConformance(t *testing.T) {
 	open := func(scopes ...remote.Scope) func(*testing.T, string, []string, []agentworkspace.OfferedServer, ...agentworkspace.OfferOption) agentworkspace.ServerProvider {
 		return func(t *testing.T, dir string, env []string, servers []agentworkspace.OfferedServer, opts ...agentworkspace.OfferOption) agentworkspace.ServerProvider {
@@ -64,7 +64,7 @@ func TestServerProviderConformance(t *testing.T) {
 	}
 	workspacetest.RunServerProvider(t,
 		workspacetest.ServerProvider{Name: "tunnel", Open: open(allScopes...)},
-		workspacetest.ServerProvider{Name: "tunnel, servers alone", Open: open(remote.ScopeRead, remote.ScopeServers)},
+		workspacetest.ServerProvider{Name: "tunnel, servers alone", Open: open(remote.ScopeServers)},
 	)
 }
 

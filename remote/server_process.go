@@ -221,6 +221,9 @@ func (h *Handler) renewSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sessionReply{LeaseMs: h.lease.Milliseconds()})
 }
 
+// closeSession ends the session and every process in it, whichever
+// scope started each: a session is its principal's, by Name, not a
+// scope's, so either scope closes it.
 func (h *Handler) closeSession(w http.ResponseWriter, r *http.Request) {
 	s := h.sessionOf(w, r)
 	if s == nil {

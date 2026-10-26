@@ -42,10 +42,11 @@
 // Starter at the server, and its Exec is remote.ErrForbidden. A
 // workspace that offers MCP servers (an agentworkspace.ServerProvider,
 // such as an agentworkspace.Offering) is one at the server when the
-// scopes hold servers (remote.ScopeServers); served with read and
-// servers alone it is a ServerProvider and no Starter, so the server
-// may start the offered servers and run nothing else, which is how a
-// host offers servers that hold secrets (see agentworkspace.Offer). A
+// scopes hold servers (remote.ScopeServers); served with servers alone
+// it is a ServerProvider and no Starter, so the server may start the
+// offered servers and do nothing else (no file, no command), which is
+// how a host offers servers that hold secrets (see
+// agentworkspace.Offer). A
 // server's output is read through its Offering's OutputFilter at the
 // workspace end, before it enters the tunnel.
 //

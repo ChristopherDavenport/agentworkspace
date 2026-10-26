@@ -22,17 +22,19 @@ const (
 	ScopeExec Scope = "exec"
 	// ScopeServers starts the MCP servers the workspace offers (an
 	// agentworkspace.ServerProvider): it lists them, starts one by name,
-	// opens and renews the sessions they run in, and uses the routes of
-	// the processes it started so, and nothing else. It runs no command
-	// of the client's: no Exec, no process's start, no route of a
-	// process exec started, and no environment. It does not imply exec,
-	// nor exec it.
+	// opens and renews the sessions they run in, uses the routes of the
+	// processes it started so, and reads the info route, and nothing
+	// else. It runs no command of the client's: no Exec, no process's
+	// start, no route of a process exec started, and no environment;
+	// without read it reads no file. It does not imply exec, nor exec
+	// it, and needs no read to dial.
 	//
-	// It is how a host grants a client the servers it offers without
-	// granting it commands, and the only safe way to offer servers that
-	// hold secrets: a client that may also run commands as the servers'
-	// user can read a running server's environment from /proc (see
-	// agentworkspace.Offer).
+	// Granted alone, it is how a host gives a client the servers it
+	// offers and nothing else, and the way to offer servers that hold
+	// secrets: a client that may also run commands as the servers' user
+	// can read a running server's environment from /proc (see
+	// agentworkspace.Offer), and one that may read files can read what a
+	// server keeps in the workspace.
 	ScopeServers Scope = "servers"
 )
 

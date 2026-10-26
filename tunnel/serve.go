@@ -80,8 +80,8 @@ func (o serveOption) applyServe(c *serveConfig) { o(c) }
 // list. exec is implied by neither read nor write, as in remote, and
 // servers (the MCP servers a workspace that is an
 // agentworkspace.ServerProvider offers) neither implies exec nor is
-// implied by it: read and servers alone grant the servers and no
-// command, the way to offer servers that hold secrets.
+// implied by it: servers alone grants the servers and nothing else, no
+// file and no command, the way to offer servers that hold secrets.
 func WithScopes(scopes ...remote.Scope) Option {
 	return serveOption(func(c *serveConfig) { c.scopes, c.scoped = slices.Clone(scopes), true })
 }

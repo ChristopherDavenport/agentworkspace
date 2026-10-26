@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -88,6 +89,8 @@ func TestAClientIsAServerProviderWhenItsScopesAllow(t *testing.T) {
 			{ScopeRead, ScopeExec},
 			{ScopeRead, ScopeServers},
 			{ScopeRead, ScopeExec, ScopeServers},
+			{ScopeServers},
+			{ScopeExec, ScopeServers},
 		} {
 			_, url := serve(t, served.ws, WithAuthenticator(scoped("p", scopes...)))
 			ws := dial(t, url)
@@ -116,13 +119,16 @@ func TestAClientIsAServerProviderWhenItsScopesAllow(t *testing.T) {
 	}
 }
 
-// A principal holding servers and not exec lists the servers, starts
-// one and talks to it, and runs no command: no Exec, no Start, no
-// process's route, and no environment.
+// A principal holding servers alone dials, lists the servers, starts
+// one and talks to it, and does nothing else: no file read or written,
+// no Exec, no Start, no command's route, and no environment.
 func TestAServersPrincipalRunsNoCommand(t *testing.T) {
 	o, _ := offering(t, map[string][]string{"echo": {"cat"}})
+	if err := o.WriteFile(context.Background(), "f.txt", []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	_, url := serve(t, o, WithAuthenticator(grant(map[string]Principal{
-		tokRead: {Name: "p", Scopes: []Scope{ScopeRead, ScopeServers}},
+		tokRead: {Name: "p", Scopes: []Scope{ScopeServers}},
 	})))
 	ctx := context.Background()
 	ws := dial(t, url, withToken(tokRead))
@@ -152,6 +158,20 @@ func TestAServersPrincipalRunsNoCommand(t *testing.T) {
 	}
 	if _, err := agentworkspace.Start(ctx, ws, agentworkspace.Command{Args: []string{"true"}}); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("Start = %v, want ErrUnsupported", err)
+	}
+	if info := clientOf(ws).info; info.Start || !info.Servers || len(info.Env) != 0 {
+		t.Errorf("the info route told a servers principal start %v, servers %v, env %q", info.Start, info.Servers, info.Env)
+	}
+	for what, err := range map[string]error{
+		"stat":    func() error { _, err := fs.Stat(ws.FS(), "f.txt"); return err }(),
+		"read":    func() error { _, err := fs.ReadFile(ws.FS(), "f.txt"); return err }(),
+		"readdir": func() error { _, err := fs.ReadDir(ws.FS(), "."); return err }(),
+		"write":   ws.WriteFile(ctx, "g.txt", []byte("x"), 0o644),
+		"remove":  ws.Remove(ctx, "f.txt"),
+	} {
+		if !errors.Is(err, ErrForbidden) {
+			t.Errorf("a servers principal's %s: %v, want ErrForbidden", what, err)
+		}
 	}
 	route := clientOf(ws).sessionRoute()
 	if status, code := raw(t, "POST", url+route+"/processes", tokRead, strings.NewReader(`{"args":["true"]}`)); status != http.StatusForbidden || code != codeForbidden {

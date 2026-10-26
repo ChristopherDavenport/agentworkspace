@@ -123,10 +123,13 @@ func (l limits) valid() bool {
 type infoReply struct {
 	Root   string     `json:"root"`
 	Served descriptor `json:"served"`
-	// Start says the served workspace is an agentworkspace.Starter.
+	// Start says the principal may start processes here: the served
+	// workspace is an agentworkspace.Starter and the principal holds
+	// exec.
 	Start bool `json:"start"`
-	// Servers says it is an agentworkspace.ServerProvider, told only to
-	// a principal holding servers.
+	// Servers says the principal may start offered servers here: the
+	// served workspace is an agentworkspace.ServerProvider and the
+	// principal holds servers.
 	Servers bool `json:"servers,omitempty"`
 	// Links says its FS is an fs.ReadLinkFS.
 	Links  bool     `json:"links"`

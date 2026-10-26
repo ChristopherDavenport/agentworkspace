@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"slices"
 	"testing"
 	"time"
@@ -16,7 +17,7 @@ import (
 // A Hub carries the servers a workspace offers as remote does: the
 // workspace at the hub lists them and starts one by name when the
 // workspace end grants servers, and is a Starter only when it grants
-// exec, so read and servers alone start the servers and run no
+// exec, so servers alone starts the servers, reads no file and runs no
 // command.
 func TestAHubCarriesOfferedServers(t *testing.T) {
 	for _, c := range []struct {
@@ -24,7 +25,7 @@ func TestAHubCarriesOfferedServers(t *testing.T) {
 		scopes          []remote.Scope
 		starter, server bool
 	}{
-		{"servers alone", []remote.Scope{remote.ScopeRead, remote.ScopeServers}, false, true},
+		{"servers alone", []remote.Scope{remote.ScopeServers}, false, true},
 		{"exec alone", []remote.Scope{remote.ScopeRead, remote.ScopeExec}, true, false},
 		{"both", allScopes, true, true},
 	} {
@@ -48,6 +49,17 @@ func TestAHubCarriesOfferedServers(t *testing.T) {
 			if !c.starter {
 				if _, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"true"}}); !errors.Is(err, remote.ErrForbidden) {
 					t.Errorf("Exec without exec = %v, want ErrForbidden", err)
+				}
+			}
+			if !slices.Contains(c.scopes, remote.ScopeRead) {
+				for what, err := range map[string]error{
+					"stat":    func() error { _, err := fs.Stat(ws.FS(), "."); return err }(),
+					"readdir": func() error { _, err := fs.ReadDir(ws.FS(), "."); return err }(),
+					"read":    func() error { _, err := fs.ReadFile(ws.FS(), "f"); return err }(),
+				} {
+					if !errors.Is(err, remote.ErrForbidden) {
+						t.Errorf("%s without read = %v, want ErrForbidden", what, err)
+					}
 				}
 			}
 			if !c.server {

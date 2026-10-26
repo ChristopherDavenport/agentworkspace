@@ -55,7 +55,7 @@ var either = []Scope{ScopeExec, ScopeServers}
 
 // routes is one request on every route.
 var routes = []route{
-	{"GET", "/v1/info", []Scope{ScopeRead}},
+	{"GET", "/v1/info", []Scope{ScopeRead, ScopeServers}},
 	{"GET", "/v1/fs/stat?path=a", []Scope{ScopeRead}},
 	{"GET", "/v1/fs/lstat?path=a", []Scope{ScopeRead}},
 	{"GET", "/v1/fs/readlink?path=a", []Scope{ScopeRead}},

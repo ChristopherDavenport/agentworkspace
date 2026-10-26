@@ -22,7 +22,7 @@
 // relative to the served Root; both halves refuse any other, one that
 // leaves as agentworkspace.ErrOutside.
 //
-//	GET    /v1/info                              read     root, the served descriptor, Start, links, the bounds; Env with exec; Servers with servers
+//	GET    /v1/info                              read or servers  root, the served descriptor, links, the bounds; Start with exec, Servers with servers, Env with exec
 //	GET    /v1/fs/stat?path=N                    read
 //	GET    /v1/fs/lstat?path=N                   read     unsupported when the served FS cannot read links
 //	GET    /v1/fs/readlink?path=N                read     ditto
@@ -49,7 +49,13 @@
 // process's routes take the scope it was started under ("its own"):
 // exec for a command's, servers for a server's, so a principal holding
 // one of them is refused a process the other started (ErrForbidden),
-// though both are in its session.
+// though both are in its session. A session belongs to the principal
+// that opened it, by Name, and not to a scope: its renewal and its
+// close take either scope, and its close, or its lapse, ends every
+// process in it, whichever scope started each. Info's Start and
+// Servers each say what the asking principal may start here: Start
+// that the served workspace is a Starter and the principal holds exec,
+// Servers that it is a ServerProvider and the principal holds servers.
 //
 // A body is application/json, or application/octet-stream for a
 // file's content and a process's input, and a route refuses any other
@@ -92,13 +98,16 @@
 // servers covers the MCP servers a served agentworkspace.ServerProvider
 // offers: their list, a server's start, the sessions they run in and
 // the routes of the processes it started so, and nothing else. It does
-// not imply exec, nor exec it: a principal holding read and servers
-// alone lists and starts the offered servers and talks to them over
-// their pipes, and runs no command (no Exec, no Start, no process exec
-// started) and is told no environment; its client is an
+// not imply exec, nor exec it, and it needs no read: the info route
+// answers it too, with nothing but the root's name, the descriptor,
+// the bounds and that servers are offered. A principal holding servers
+// alone dials, lists and starts the offered servers and talks to them
+// over their pipes, and reads no file (its client's FS, WriteFile and
+// Remove are ErrForbidden), runs no command (no Exec, no Start, no
+// process exec started) and is told no environment; its client is an
 // agentworkspace.ServerProvider and no Starter. That is how a host
-// grants a client its servers without its commands, and the only safe
-// way to offer servers that hold secrets: an agentworkspace.Offering
+// grants a client its servers and nothing else, and the way to offer
+// servers that hold secrets: servers alone, as an agentworkspace.Offering
 // embeds its Starter, so a client that may run commands as the
 // servers' user can read a running server's environment from /proc (see
 // agentworkspace.Offer). A server is started by the served workspace's

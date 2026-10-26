@@ -98,7 +98,7 @@ type ServerProvider interface {
 // it, from /proc/<pid>/environ. Offer secret-holding servers from a
 // workspace that runs nothing else for the client, as dax's box host
 // does with each server a unit in its own container, or serve the
-// Offering through remote with the servers scope and not exec.
+// Offering through remote with the servers scope alone.
 func Offer(ws Starter, servers []OfferedServer, opts ...OfferOption) (*Offering, error) {
 	if ws == nil {
 		return nil, errors.New("agentworkspace: Offer of no workspace")

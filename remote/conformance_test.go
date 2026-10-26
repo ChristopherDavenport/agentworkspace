@@ -40,7 +40,7 @@ func TestStarterConformance(t *testing.T) {
 
 // The server tables run on an Offering over Local, served: to a
 // principal holding every scope, a StarterServerClient, and to one
-// holding read and servers alone, a ServerClient, which is no Starter.
+// holding servers alone, a ServerClient, which is no Starter.
 func TestServerProviderConformance(t *testing.T) {
 	open := func(scopes ...remote.Scope) func(*testing.T, string, []string, []agentworkspace.OfferedServer, ...agentworkspace.OfferOption) agentworkspace.ServerProvider {
 		return func(t *testing.T, dir string, env []string, servers []agentworkspace.OfferedServer, opts ...agentworkspace.OfferOption) agentworkspace.ServerProvider {
@@ -61,7 +61,7 @@ func TestServerProviderConformance(t *testing.T) {
 	}
 	workspacetest.RunServerProvider(t,
 		workspacetest.ServerProvider{Name: "remote", Open: open(remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec, remote.ScopeServers)},
-		workspacetest.ServerProvider{Name: "remote, servers alone", Open: open(remote.ScopeRead, remote.ScopeServers)},
+		workspacetest.ServerProvider{Name: "remote, servers alone", Open: open(remote.ScopeServers)},
 	)
 }
 

@@ -47,6 +47,7 @@ type Handler struct {
 	ws            agentworkspace.Workspace
 	auth          Authenticator
 	insecure      bool
+	challenge     string // the WWW-Authenticate of a 401, "" for none
 	lease         time.Duration
 	maxSessions   int
 	maxPerOwner   int
@@ -74,6 +75,16 @@ type Option func(*Handler)
 // WithAuthenticator resolves each request's principal with a, the
 // program's authentication.
 func WithAuthenticator(a Authenticator) Option { return func(h *Handler) { h.auth = a } }
+
+// WithChallenge sends value as the WWW-Authenticate header of every 401
+// the handler writes: a request the Authenticator refused, one that
+// named no principal, every one without an Authenticator, and a served
+// workspace's error that is ErrUnauthenticated. value is the program's
+// challenge, its scheme and any parameters ("Bearer", or `Bearer
+// realm="workspace"`), sent as given. Without it, or with "", a 401
+// carries no challenge: the authentication is the program's, and so is
+// naming its scheme.
+func WithChallenge(value string) Option { return func(h *Handler) { h.challenge = value } }
 
 // WithInsecureNoAuth serves every request, unauthenticated, as a
 // principal named "insecure" that holds every scope. For tests, and for
@@ -203,18 +214,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case h.insecure:
 		p = Principal{Name: "insecure", Scopes: allScopes()}
 	case h.auth == nil:
-		unauthenticated(w, "no authenticator is configured")
+		h.unauthenticated(w, "no authenticator is configured")
 		return
 	default:
 		var err error
 		if p, err = h.auth(r); err != nil {
-			unauthenticated(w, "unauthenticated")
+			h.unauthenticated(w, "unauthenticated")
 			return
 		}
 		if p.Name == "" {
 			// The name is what keeps one principal's sessions from
 			// another's.
-			unauthenticated(w, "the authenticator named no principal")
+			h.unauthenticated(w, "the authenticator named no principal")
 			return
 		}
 	}
@@ -272,9 +283,17 @@ func typed(want string, f http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func unauthenticated(w http.ResponseWriter, msg string) {
-	w.Header().Set("WWW-Authenticate", "Bearer")
-	writeError(w, wireError{Code: codeUnauthenticated, Message: "remote: " + msg})
+func (h *Handler) unauthenticated(w http.ResponseWriter, msg string) {
+	h.refuse(w, wireError{Code: codeUnauthenticated, Message: "remote: " + msg})
+}
+
+// refuse answers e, with the program's challenge (WithChallenge) when
+// it is a 401.
+func (h *Handler) refuse(w http.ResponseWriter, e wireError) {
+	if h.challenge != "" && statusOf(e.Code) == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", h.challenge)
+	}
+	writeError(w, e)
 }
 
 // Close ends every session, and every process each started, and every
@@ -388,7 +407,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // fail answers err, the served workspace's, as the wire carries it.
-func (h *Handler) fail(w http.ResponseWriter, err error) { writeError(w, errorOf(h.ws.Root(), err)) }
+func (h *Handler) fail(w http.ResponseWriter, err error) { h.refuse(w, errorOf(h.ws.Root(), err)) }
 
 // decode reads r's JSON body into v, at most max bytes, and answers the
 // refusal itself when it cannot.

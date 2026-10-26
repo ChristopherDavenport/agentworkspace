@@ -221,7 +221,7 @@ h, err := remote.NewHandler(ws, remote.WithAuthenticator(func(r *http.Request) (
 		return remote.Principal{}, err
 	}
 	return remote.Principal{Name: name, Scopes: []remote.Scope{remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec}}, nil
-}))
+}), remote.WithChallenge("Bearer")) // a 401's WWW-Authenticate names the program's scheme
 defer h.Close() // ends every session's processes
 http.Handle("/", h)
 
@@ -293,7 +293,7 @@ err := tunnel.Serve(ctx, "wss://hub.example/tunnel", ws,
 // from, or refuses it, before the upgrade is answered.
 hub, err := tunnel.NewHub(tunnel.WithEnrollment(func(r *http.Request) (string, error) {
 	return enrolled(r) // "build-1", or an error
-}))
+}), tunnel.WithChallenge("Bearer"))
 defer hub.Close()
 http.Handle("/tunnel", hub)
 

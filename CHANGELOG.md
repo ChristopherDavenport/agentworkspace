@@ -15,6 +15,16 @@ versions may break the API.
   that names no scopes, which no `Handler` sends. `remote.Workspace`
   gains the method, so a type of a program's own that implemented it
   must add it.
+- Added: `remote.WithChallenge(value)`, the `WWW-Authenticate` of every
+  401 a `Handler` writes (the `Authenticator`'s refusals, a principal
+  with no name, no authenticator at all, a served workspace's
+  `ErrUnauthenticated`), sent as given; and `tunnel.WithChallenge(value)`,
+  the same for the 401s a `Hub` writes for an upgrade it refuses. The
+  scheme is the program's, as its authentication is.
+- Changed (breaking): a `remote.Handler`'s 401 no longer carries
+  `WWW-Authenticate: Bearer` by default; without `WithChallenge` it
+  carries no challenge. A program that relied on the `Bearer` default
+  passes `remote.WithChallenge("Bearer")`.
 
 ## v0.0.7 - 2026-10-26
 

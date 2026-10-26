@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -83,6 +85,45 @@ func TestUpgradesAreRefusedBeforeTheyAreAnswered(t *testing.T) {
 	if n := called.Load(); n != 4 {
 		// The Origin is refused before the enrollment is asked.
 		t.Errorf("the enrollment was asked %d times, want 4", n)
+	}
+}
+
+// Every 401 the hub writes carries the application's challenge
+// (WithChallenge), as given, and none without it; a refusal that is not
+// a 401 carries none.
+func TestAHubsChallengeIsTheApplications(t *testing.T) {
+	invalid := func(*http.Request) (string, error) { return "Not A Label", nil }
+	later := func(*http.Request) (string, error) { return "", ErrTryLater }
+	for _, challenge := range []string{"", "Bearer", `Bearer realm="tunnel"`} {
+		for _, c := range []struct {
+			what   string
+			enroll Enrollment
+			header http.Header
+			status int
+		}{
+			{"no enrollment", nil, auth(tokA), http.StatusUnauthorized},
+			{"a wrong token", enroll(tokens), auth("not-a-token"), http.StatusUnauthorized},
+			{"an invalid name", invalid, auth(tokA), http.StatusUnauthorized},
+			{"an Origin", enroll(tokens), http.Header{"Authorization": {"Bearer " + tokA}, "Origin": {"https://evil.example"}}, http.StatusForbidden},
+			{"try later", later, auth(tokA), http.StatusServiceUnavailable},
+		} {
+			hub, err := NewHub(WithEnrollment(c.enroll), WithChallenge(challenge))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			maps.Copy(req.Header, c.header)
+			rec := httptest.NewRecorder()
+			hub.ServeHTTP(rec, req)
+			hub.Close()
+			want := []string(nil)
+			if challenge != "" && c.status == http.StatusUnauthorized {
+				want = []string{challenge}
+			}
+			if got := rec.Result().Header.Values("WWW-Authenticate"); rec.Code != c.status || !slices.Equal(got, want) {
+				t.Errorf("challenge %q, %s: %d, WWW-Authenticate %q; want %d, %q", challenge, c.what, rec.Code, got, c.status, want)
+			}
+		}
 	}
 }
 

@@ -50,7 +50,7 @@ func bearer(tok string) Option {
 }
 
 // allScopes is every scope remote checks.
-var allScopes = []remote.Scope{remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec}
+var allScopes = []remote.Scope{remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec, remote.ScopeServers}
 
 // fast redials at once, for the tests' drops.
 var fast = WithRedial(10*time.Millisecond, 50*time.Millisecond)

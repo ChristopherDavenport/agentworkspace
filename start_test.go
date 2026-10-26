@@ -23,6 +23,23 @@ func TestStarterConformance(t *testing.T) {
 	}})
 }
 
+// An Offering over Local runs the server tables; remote and tunnel
+// run them over one served.
+func TestServerProviderConformance(t *testing.T) {
+	workspacetest.RunServerProvider(t, workspacetest.ServerProvider{Name: "offering", Open: func(t *testing.T, dir string, env []string, servers []agentworkspace.OfferedServer, opts ...agentworkspace.OfferOption) agentworkspace.ServerProvider {
+		l, err := agentworkspace.NewLocal(dir, env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { l.Close() })
+		o, err := agentworkspace.Offer(l, servers, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}})
+}
+
 // Start is optional: the package's Start runs on a workspace that
 // offers it and says a workspace that does not cannot.
 func TestStartIsOptional(t *testing.T) {

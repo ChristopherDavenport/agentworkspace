@@ -88,14 +88,18 @@ func WithChallenge(value string) HubOption {
 	return hubOption(func(c *hubConfig) { c.challenge = value })
 }
 
-// WithProofHeader adds the header f returns to each upgrade's 101, f
-// called once for each with the request the enrollment named workspace
-// name for, after the enrollment and before the 101: the hub's half of
-// the application's proof that it is the hub the workspace end's
-// credential was issued for, which the workspace end checks with
-// WithHubProof. An error from f, or a header of the handshake's own
-// (Connection, Upgrade, Sec-WebSocket-*), refuses the upgrade (500);
-// the error's text is logged, not sent, so it must hold no secret.
+// WithProofHeader adds the header f returns to the answer to each
+// upgrade, f called once for each with the request the enrollment
+// named workspace name for, after the enrollment and before the answer:
+// the hub's half of the application's proof that it is the hub the
+// workspace end's credential was issued for, which the workspace end
+// checks with WithHubProof. The answer is the 101, or, for an upgrade
+// the WebSocket handshake itself refuses (a version it does not speak),
+// that refusal, which carries the header too. f is called for
+// concurrent upgrades at once. An error from f, or a header of the
+// handshake's own (Connection, Upgrade, Sec-WebSocket-*), refuses the
+// upgrade (500); the error's text is logged, not sent, so it must hold
+// no secret.
 func WithProofHeader(f func(r *http.Request, name string) (http.Header, error)) HubOption {
 	return hubOption(func(c *hubConfig) { c.proof = f })
 }

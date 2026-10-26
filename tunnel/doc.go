@@ -66,15 +66,27 @@
 // before it serves anything; a hub that fails is a refusal
 // (ErrHubProof), and nothing has been served to it.
 //
-// An HMAC over a nonce, keyed by a secret both ends hold, is one such
-// proof. The key itself is never sent, since the upgrade reaches an
-// impostor before the proof is checked: the workspace end sends a fresh
-// nonce and its own MAC under the key, which the enrollment checks, and
-// the hub answers with its MAC of the same nonce. The two MACs are of
-// different labels, so an impostor cannot answer with the one it was
-// sent; and the enrollment refuses a nonce it has seen, or one too old
-// (a time in it), so the workspace's MAC that reached an impostor
-// cannot be replayed to the hub.
+// The proof authenticates the hub at the handshake; it does not bind
+// the connection to it. An impostor that can reach the real hub itself
+// relays the upgrade to it, at once, and returns the hub's answer,
+// which passes; it then sits between the two on a plain connection. So
+// a proof holds against an impostor that cannot reach the hub: the ssh
+// -R case, where the hub is reached only through the forward the
+// impostor took the port of (with ExitOnForwardFailure, so ssh does not
+// go on without it). Where the impostor can reach the hub, use wss://,
+// whose TLS binds the connection.
+//
+// Over ws://, whatever the upgrade carries reaches an impostor before
+// the proof is checked, so it carries nothing the impostor could use
+// again: no bearer token, no key, only what is good for one dial. An
+// HMAC over a nonce, keyed by a secret both ends hold, is one such
+// proof. The workspace end sends a fresh nonce and its own MAC under
+// the key, which the enrollment checks, and the hub answers with its
+// MAC of the same nonce. The two MACs are of different labels, so an
+// impostor cannot answer with the one it was sent; and the enrollment
+// refuses a nonce it has seen, or one too old (a time in it), so the
+// workspace's MAC that reached an impostor cannot be replayed to the
+// hub later (relayed at once, it can, as above).
 //
 //	// mac is the hex HMAC-SHA256, under key, of label and nonce.
 //	mac := func(key []byte, label, nonce string) string {

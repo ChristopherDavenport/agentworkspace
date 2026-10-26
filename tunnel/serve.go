@@ -124,10 +124,18 @@ func WithHeader(f func(ctx context.Context) (http.Header, error)) Option {
 // connection, and counts as a refusal (ErrHubProof wraps it): Serve
 // returns it from a first dial, and tries again within the lease after
 // one that connected, as for a 401. Its text is logged, so it must
-// hold no credential. It is how the application proves the hub is the
-// one its credential was issued for, where TLS does not (a ws://
-// loopback URL behind a forward); the hub's half is WithProofHeader,
-// and the package doc shows a proof.
+// hold no credential. f runs on Serve's goroutine, with no context of
+// its own but req's, which the upgrade's HandshakeTimeout bounds; it
+// should not block, and a panic in it is not recovered. An impostor
+// that holds the port when Serve starts ends Serve so (as one that
+// answered 401 would), so a program supervises Serve and starts it
+// again after ErrHubProof rather than taking it as a mistake of its
+// configuration.
+//
+// It is how the application proves the hub is the one its credential
+// was issued for, where TLS does not (a ws:// loopback URL behind a
+// forward); the hub's half is WithProofHeader, and the package doc
+// shows a proof, and what it does not prove.
 func WithHubProof(f func(req *http.Request, resp *http.Response) error) Option {
 	return serveOption(func(c *serveConfig) { c.proof = f })
 }

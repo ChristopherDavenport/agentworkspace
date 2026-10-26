@@ -301,12 +301,18 @@ ws, err := hub.Workspace(ctx, "build-1") // waits for it to connect, bounded by 
 defer ws.Close()
 ```
 
-Over `wss://`, TLS proves the hub to the host. Over a `ws://` loopback
-URL, as behind an `ssh -R` forward, whoever binds the port first gets
-the upgrade, so the application proves the hub itself: the `Hub` adds
-its headers to the 101 (`WithProofHeader`), and `Serve` checks them
+Over `wss://`, TLS proves the hub to the host, and a bearer credential
+in the upgrade, as above, is safe. Over a `ws://` loopback URL, as
+behind an `ssh -R` forward, whoever binds the port first gets the
+upgrade and everything in it, so there the upgrade carries no bearer
+token or other reusable credential, only what is good for one dial,
+and the application proves the hub itself: the `Hub` adds its headers
+to the 101 (`WithProofHeader`), and `Serve` checks them
 (`WithHubProof`) before it serves anything. The package doc shows an
-HMAC over a nonce as such a proof.
+HMAC over a nonce as such a proof. It holds against an impostor that
+cannot reach the hub (the `ssh -R` case, with `ExitOnForwardFailure`);
+one that can relays the upgrade to it, so where the hub is reachable,
+use `wss://`.
 
 One `remote.Handler` serves every connection, so a session and its
 processes outlive a drop shorter than the lease, and the server's

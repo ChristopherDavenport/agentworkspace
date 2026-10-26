@@ -15,9 +15,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/remote"
 	"github.com/coder/websocket"
 )
@@ -93,6 +95,62 @@ func TestTheHubIsProvedBeforeItIsServed(t *testing.T) {
 			t.Errorf("%s: connected %q", name, c)
 		}
 	}
+}
+
+// Once Serve has connected, a hub that fails the proof on a redial is
+// served nothing and is tried again within the lease, so a process
+// outlives a hub that failed for a moment; a failure that lasts past
+// the lease since the drop ends Serve with ErrHubProof.
+func TestAFailedProofAfterAConnectionIsTriedAgainWithinTheLease(t *testing.T) {
+	const lease = 2 * time.Second
+	var wrong atomic.Bool
+	r := newRig(t, WithProofHeader(func(req *http.Request, _ string) (http.Header, error) {
+		key := theKey
+		if wrong.Load() {
+			key = otherKey
+		}
+		return http.Header{"X-Hub-Proof": {mac(key, "hub", req.Header.Get("X-Nonce"))}}, nil
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, r.url, local(t, t.TempDir(), pathEnv()), WithScopes(allScopes...), nonced(tokA), checks(theKey), fast,
+			WithHandlerOptions(remote.WithLease(lease)))
+	}()
+	s := r.workspace(t, "a").(agentworkspace.Starter)
+	_, _, pid := pidOf(t, s, "echo $$; exec sleep 60")
+
+	wrong.Store(true)
+	old := r.drop(t, "a")
+	time.Sleep(lease / 2)
+	if c := r.current("a"); c != nil {
+		t.Fatal("a hub that failed the proof was served")
+	}
+	if !alive(pid) {
+		t.Fatal("a failed proof within the lease ended the process")
+	}
+	wrong.Store(false)
+	r.reconnected(t, "a", old)
+	if !alive(pid) {
+		t.Fatal("the process did not outlive the failed proof")
+	}
+
+	// Past the lease, the failure stands.
+	wrong.Store(true)
+	r.drop(t, "a")
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrHubProof) {
+			t.Errorf("Serve = %v, want ErrHubProof", err)
+		}
+	case <-time.After(4 * lease):
+		t.Fatal("Serve went on past the lease at a lasting failed proof")
+	}
+	if alive(pid) {
+		t.Error("a process outlived Serve")
+	}
+	r.hub.Close()
 }
 
 // An impostor that takes the upgrade and asks for the workspace's info

@@ -37,7 +37,11 @@ versions may break the API.
   `f(r, name)` returns to the 101, given the request the enrollment
   named workspace `name` for; an error, or a header of the handshake's
   own, refuses the upgrade (500). The package doc shows an HMAC over a
-  nonce as the proof; the package ships none.
+  nonce as the proof (the package ships none), and what it does not
+  prove: it authenticates the hub at the handshake and does not bind
+  the connection, so it holds against an impostor that cannot reach the
+  hub (the `ssh -R` case); where one can, use `wss://`. Over `ws://`
+  the upgrade must carry no reusable credential.
 
 ## v0.0.7 - 2026-10-26
 

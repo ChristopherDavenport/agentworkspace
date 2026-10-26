@@ -173,7 +173,11 @@ func (h *Handler) lapse(s *session) {
 	}
 	s.gone = true
 	delete(h.sessions, s.id)
+	// Out of the table, so Close does not find it: it waits for the end
+	// here instead. Close has not begun, or it would have taken s.
+	h.inflight.Add(1)
 	h.mu.Unlock()
+	defer h.inflight.Done()
 	s.end()
 }
 
@@ -216,6 +220,9 @@ func (h *Handler) closeSession(w http.ResponseWriter, r *http.Request) {
 		s.gone = true
 		s.timer.Stop()
 		delete(h.sessions, s.id)
+		// As in lapse: Close waits for an end it does not find.
+		h.inflight.Add(1)
+		defer h.inflight.Done()
 	}
 	h.mu.Unlock()
 	s.end()

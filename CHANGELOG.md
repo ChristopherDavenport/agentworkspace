@@ -57,6 +57,11 @@ versions may break the API.
   closed without an authenticator and the browser checks are kept. A
   base URL with userinfo is still refused.
 
+- Fixed: `remote.Handler.Close` returns only once a session that was
+  ending as it was called (one that lapsed, or that its client closed)
+  has ended with its processes; it used to miss those, which had left
+  the table first.
+
 ## v0.0.5 - 2026-10-25
 
 - Added: package `remote`, in the root module and on the standard

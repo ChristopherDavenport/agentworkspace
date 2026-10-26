@@ -8,7 +8,7 @@ go 1.26
 // replace and get the require; make extracted builds the module with
 // it dropped, the way a consumer does.
 require (
-	github.com/ChristopherDavenport/agentworkspace v0.0.6
+	github.com/ChristopherDavenport/agentworkspace v0.0.7
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 )
 

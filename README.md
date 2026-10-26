@@ -219,13 +219,16 @@ defer ws.Close()
 
 Every request is authenticated, whatever its route; with no
 authenticator every request is refused, unless the handler was made
-`WithInsecureNoAuth`. `read` covers the files' reads, `write` writes and
+`WithInsecureNoAuth`, and such a handler answers only a loopback Host.
+A request that looks like a browser page's (an Origin, a cross-site
+`Sec-Fetch-Site`, a body of another type than its route's) is refused
+in every mode. `read` covers the files' reads, `write` writes and
 removes, and `exec` runs anything: `Exec`, the processes and the
 environment, which a client without it is not told. `exec` is never
 implied by `read` or `write`. A client's processes live in a session it
-opens at `Dial` and renews on a lease (`DefaultLease`); when the lease
-lapses, or the client closes, the server ends every process the
-session started, and a process is reached only through its own
+opens at its first `Start` and renews on a lease (`DefaultLease`); when
+the lease lapses, or the client closes, the server ends every process
+the session started, and a process is reached only through its own
 session, by the principal that opened it. `Exec` streams its output as
 NDJSON frames, and its process ends with the request. Errors keep
 their sentinels across the wire (`ErrOutside`, `fs.ErrNotExist` and the

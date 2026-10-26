@@ -23,7 +23,7 @@ versions may break the API.
   implied), `Principal`, `Authenticator`, `BearerTokens` (constant
   time), `WithAuthenticator`, `WithInsecureNoAuth`, `WithBearerToken`,
   `WithHTTPClient`, `WithTimeout`, and `PrincipalFrom`. Processes live
-  in a session the client opens at `Dial` and renews on a lease
+  in a session the client opens and renews on a lease
   (`WithLease`); its lapse, `Client.Close` and `Handler.Close` end
   them. The bounds: `MaxRequestBytes`, `MaxErrorBytes`, `StderrBytes`,
   `MaxReplyBytes`, and `DefaultLease`, `DefaultMaxSessions`,
@@ -34,6 +34,33 @@ versions may break the API.
   `fs.ErrClosed` cross the wire as codes, so `errors.Is` holds on the
   client; `ErrUnauthenticated`, `ErrForbidden`, `ErrNoSession` and
   `ErrNoProcess` are its own.
+- Added (remote, from review): every handler refuses a browser page's
+  request: one carrying an `Origin`, or a `Sec-Fetch-Site` other than
+  `same-origin` or `none`, and a body of another type than its route's
+  (`application/json`, or `application/octet-stream` for a file's
+  content and a process's input; 415). `WithInsecureNoAuth` answers
+  only a loopback `Host` (localhost, 127.0.0.0/8, ::1), so DNS
+  rebinding is refused. A principal with an empty `Name`, which keeps
+  sessions apart, is unauthenticated. `Handler.Close` returns only once
+  every `Exec` and every process being closed has ended. A session is
+  opened at the first `Start`, not at `Dial`, and one principal holds
+  at most `DefaultMaxSessionsPerPrincipal` (8,
+  `WithMaxSessionsPerPrincipal`). A client that goes a whole lease
+  without a renewal loses the session: its processes' `Wait` returns
+  -1 and `ErrNoSession`, their pipes fail with it, and the next
+  `Start` opens another. An `Exec` without a `Stream` gives back at
+  most `DefaultMaxExecOutputBytes` (16 MiB, `WithMaxExecOutputBytes`)
+  of each stream, told in `/v1/info`, and is `ErrLimit` past it, the
+  command having run; data frames are at most 32 KiB and the client
+  bounds every frame by the server's bounds. `WriteFile` passes the
+  permission bits alone, never setuid, setgid or sticky. A start
+  carries a key the client chose, which names the process: a start
+  sent again is the same process, and one whose reply was lost is
+  closed by its key. A blocked `Command.Stream` holds up neither
+  `Wait` nor `Close`. A listing reads one entry past its bound and no
+  more. A timeout a `time.Duration` cannot hold is refused. An
+  unmapped errno is sent as its words alone, and another error with
+  the served root and other paths' directories cut from it.
 - Added (tests): the confinement, FIFO, `Exec`, name and `Start`
   tables run on every backend, `remote` over `Local` among them,
   which joins from package `agentworkspace_test` (`AddBackend`,

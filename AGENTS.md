@@ -27,11 +27,13 @@ interface.
   `exec`, so a type assertion tells the truth. Every request is
   authenticated (`Authenticator`, `BearerTokens`, scopes `read`,
   `write`, `exec`; no authenticator refuses everything unless
-  `WithInsecureNoAuth`). Started processes live in a session the
-  client opens at Dial and renews on a lease; a lapse or `Close` ends
-  them. Its bounds are exported constants and options, its wire is in
-  its package doc, and it is not the tool-call cut dax's executor
-  uses.
+  `WithInsecureNoAuth`, which answers a loopback Host alone; every
+  handler refuses a browser page's request: an Origin, a cross-site
+  `Sec-Fetch-Site`, an untyped body). Started processes live in a
+  session the client opens at its first Start and renews on a lease; a
+  lapse, a lease unrenewed on the client's side, or `Close` ends them.
+  Its bounds are exported constants and options, its wire is in its
+  package doc, and it is not the tool-call cut dax's executor uses.
 - `mcpworkspace` (nested module
   `github.com/ChristopherDavenport/agentworkspace/mcpworkspace`, on the
   MCP Go SDK): a workspace's processes and files over an MCP connection

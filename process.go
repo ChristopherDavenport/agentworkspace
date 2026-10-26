@@ -11,12 +11,14 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ChristopherDavenport/agentworkspace/internal/lifetime"
 )
 
 // grace is how long a process's end waits at each step: for the
 // process to exit after its input closes, and again after SIGTERM,
-// before it is killed.
-const grace = 2 * time.Second
+// before it is killed. workspacetest checks against the same value.
+const grace = lifetime.Grace
 
 // Start runs a command in its own process group, with pipes for its
 // standard input and output, and returns at once. Its standard error

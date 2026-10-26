@@ -17,6 +17,11 @@ versions may break the API.
   `remote` run them; the tables moved out of the root's tests
   unchanged.
 
+- Added: `remote.WithMaxTransfers` and `remote.DefaultMaxTransfers`
+  (256): a handler serves at most that many Execs and reads and writes
+  of a file's content at once, one past it `ErrLimit`; a session's own
+  routes are not counted. `Handler.Lease` says the lease a handler
+  keeps.
 - Added: nested module `tunnel`
   (`github.com/ChristopherDavenport/agentworkspace/tunnel`, on
   `github.com/coder/websocket` v1.8.15), released with the root: a

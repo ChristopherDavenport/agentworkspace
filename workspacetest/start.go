@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/lifetime"
 )
 
 // Starter is a Starter the Start tables run on. Open opens one over
@@ -25,13 +26,14 @@ type Starter struct {
 	Open func(t *testing.T, dir string, env []string) agentworkspace.Starter
 }
 
-// grace is agentworkspace's (process.go): how long a process's end
+// grace is Local's, the one value both use: how long a process's end
 // waits for it to exit after its input closes, and again after SIGTERM.
 // A process that leaves at the end of its input closes well inside it.
-const grace = 2 * time.Second
+const grace = lifetime.Grace
 
 // RunStarter runs every Start table on every starter, each a subtest
-// named after the table and then the starter.
+// named after the table and then the starter. It calls t.Setenv, so it
+// cannot run under t.Parallel, nor can the test that calls it.
 func RunStarter(t *testing.T, starters ...Starter) {
 	path := []string{"PATH=" + os.Getenv("PATH")}
 	for _, table := range []struct {

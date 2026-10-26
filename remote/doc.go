@@ -121,7 +121,9 @@
 // (WithMaxSessions), a principal at most
 // DefaultMaxSessionsPerPrincipal of them
 // (WithMaxSessionsPerPrincipal), and a session at most
-// DefaultMaxProcesses processes (WithMaxProcesses); an Exec without a
+// DefaultMaxProcesses processes (WithMaxProcesses); a handler serves at
+// most DefaultMaxTransfers Execs and reads and writes of a file's
+// content at once (WithMaxTransfers); an Exec without a
 // Stream gives back at most DefaultMaxExecOutputBytes of each stream
 // (WithMaxExecOutputBytes), and past it the command has run and Exec
 // is ErrLimit, its output not sent (the served workspace's own

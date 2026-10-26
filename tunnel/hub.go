@@ -62,6 +62,7 @@ type Enrollment func(r *http.Request) (name string, err error)
 type hubConfig struct {
 	link          linkConfig
 	enroll        Enrollment
+	challenge     string // the WWW-Authenticate of a 401, "" for none
 	maxWorkspaces int
 }
 
@@ -73,6 +74,17 @@ func (o hubOption) applyHub(c *hubConfig) { o(c) }
 // it, before the upgrade is answered. A Hub without it refuses every
 // upgrade.
 func WithEnrollment(f Enrollment) HubOption { return hubOption(func(c *hubConfig) { c.enroll = f }) }
+
+// WithChallenge sends value as the WWW-Authenticate header of every 401
+// the Hub writes: an upgrade the enrollment refused or named no valid
+// workspace for, and every one without an enrollment. value is the
+// application's challenge, its scheme and any parameters, sent as
+// given. Without it, or with "", a 401 carries no challenge: the
+// authentication is the application's, and so is naming its scheme.
+// It is remote.WithChallenge's, for the hub's own refusals.
+func WithChallenge(value string) HubOption {
+	return hubOption(func(c *hubConfig) { c.challenge = value })
+}
 
 // WithMaxWorkspaces bounds the workspaces connected at once; an upgrade
 // past it is refused (503) unless it replaces a connected one. The
@@ -88,12 +100,13 @@ func WithMaxWorkspaces(n int) HubOption {
 //
 // An upgrade is answered only after the enrollment has named its
 // workspace: one carrying an Origin is refused (403) first, as no
-// browser is a client, then one the enrollment refuses, or every one
-// without an enrollment (401), then one past the bound of workspaces
-// (503). A second connection for a name that is connected replaces the
-// first, which is closed: a host that restarted dials again before the
-// hub has noticed that its old connection is dead, and the newest is
-// the one that is alive. Requests in flight on the replaced connection
+// browser is a client, then one the enrollment refuses or names no
+// valid workspace for, or every one without an enrollment (401, with
+// the application's challenge, WithChallenge), then one past the bound
+// of workspaces (503). A second connection for a name that is
+// connected replaces the first, which is closed: a host that restarted
+// dials again before the hub has noticed that its old connection is
+// dead, and the newest is the one that is alive. Requests in flight on the replaced connection
 // fail. A new connection is taken only once it has answered a request
 // over HTTP/2, within HandshakeTimeout, so a host that upgrades and
 // never speaks HTTP/2 does not take the name from a working one.
@@ -179,6 +192,9 @@ func (h *Hub) notify() {
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	refuse := func(status int, msg string) {
 		h.cfg.link.log.Info("tunnel: refused an upgrade", "from", r.RemoteAddr, "status", status, "why", msg)
+		if status == http.StatusUnauthorized && h.cfg.challenge != "" {
+			w.Header().Set("WWW-Authenticate", h.cfg.challenge)
+		}
 		http.Error(w, "tunnel: "+msg, status)
 	}
 	if len(r.Header.Values("Origin")) > 0 {

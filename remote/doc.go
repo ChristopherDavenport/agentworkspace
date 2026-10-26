@@ -88,7 +88,10 @@
 // is put to the Authenticator given with WithAuthenticator, the
 // program's hook, whatever its route, which answers with the
 // Principal it is from and the scopes it holds; without one, and
-// without WithInsecureNoAuth, every request is refused. A principal's
+// without WithInsecureNoAuth, every request is refused. A refusal as
+// unauthenticated is a 401 that carries the program's challenge, its
+// WWW-Authenticate, when it gives one (WithChallenge), and none
+// otherwise: the scheme is the program's to name. A principal's
 // Name is what keeps its sessions from another's, and one with an
 // empty Name is refused as unauthenticated. read covers the info route
 // and the file system's reads; write, WriteFile and Remove; exec,

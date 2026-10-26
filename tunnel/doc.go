@@ -33,7 +33,9 @@
 // whatever that client allows, so the credentials never leave the
 // wss:// URL they were given for. An Enrollment that cannot judge an
 // upgrade yet says ErrTryLater, which the Hub answers 503 and the host
-// dials again on.
+// dials again on. A refused upgrade's 401 names the application's
+// scheme in its WWW-Authenticate when the application gives one
+// (WithChallenge), and carries none otherwise.
 //
 // What the server may do is the workspace end's to say: WithScopes is
 // required, and every request that comes through the tunnel is from

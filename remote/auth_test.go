@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -148,6 +149,73 @@ func TestAnAuthenticatorsRefusalIsUnauthenticated(t *testing.T) {
 			t.Errorf("%s: Dial: %v, want ErrUnauthenticated", name, err)
 		}
 	}
+}
+
+// Every 401 a handler writes carries the program's challenge
+// (WithChallenge), as given, and none without it: the authenticator's
+// refusals, a principal with no name, no authenticator at all, and a
+// served workspace's error that is ErrUnauthenticated. A refusal that
+// is not a 401 carries none.
+func TestAChallengeIsTheProgramsOwn(t *testing.T) {
+	l, _ := newLocal(t, nil)
+	noName := func(*http.Request) (Principal, error) { return Principal{Scopes: allScopes()}, nil }
+	for _, tc := range []struct {
+		name string
+		opt  Option // nil for none
+		want string // "" for no header
+	}{
+		{"none", nil, ""},
+		{"empty", WithChallenge(""), ""},
+		{"bearer", WithChallenge("Bearer"), "Bearer"},
+		{"parameters", WithChallenge(`Bearer realm="workspace", error="invalid_token"`), `Bearer realm="workspace", error="invalid_token"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, bare := serve(t, l, tc.opt)
+			_, tokened := serve(t, l, WithAuthenticator(tokens()), tc.opt)
+			_, nameless := serve(t, l, WithAuthenticator(noName), tc.opt)
+			_, upstream := serve(t, refusingRemove{l}, WithAuthenticator(tokens()), tc.opt)
+			for _, r := range []struct {
+				what, method, url, tok string
+				status                 int
+			}{
+				{"no authenticator", "GET", bare + "/v1/info", tokAll, http.StatusUnauthorized},
+				{"no token", "GET", tokened + "/v1/info", "", http.StatusUnauthorized},
+				{"an unknown token", "DELETE", tokened + "/v1/fs/file?path=a", "tok-nobody", http.StatusUnauthorized},
+				{"no name", "GET", nameless + "/v1/info", tokAll, http.StatusUnauthorized},
+				{"the served workspace's", "DELETE", upstream + "/v1/fs/file?path=a", tokAll, http.StatusUnauthorized},
+				{"forbidden", "DELETE", tokened + "/v1/fs/file?path=a", tokRead, http.StatusForbidden},
+				{"not found", "GET", tokened + "/v1/fs/stat?path=missing", tokRead, http.StatusNotFound},
+			} {
+				req, err := http.NewRequest(r.method, r.url, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.tok != "" {
+					req.Header.Set("Authorization", "Bearer "+r.tok)
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+				want := []string(nil)
+				if tc.want != "" && r.status == http.StatusUnauthorized {
+					want = []string{tc.want}
+				}
+				if got := resp.Header.Values("WWW-Authenticate"); resp.StatusCode != r.status || !slices.Equal(got, want) {
+					t.Errorf("%s: %s, WWW-Authenticate %q; want %d, %q", r.what, resp.Status, got, r.status, want)
+				}
+			}
+		})
+	}
+}
+
+// refusingRemove is a workspace whose Remove is ErrUnauthenticated, as
+// a remote client served on is when its own server refuses it.
+type refusingRemove struct{ *agentworkspace.Local }
+
+func (refusingRemove) Remove(context.Context, string) error {
+	return fmt.Errorf("upstream: %w", ErrUnauthenticated)
 }
 
 // Every route needs its scope: a principal holding every other scope

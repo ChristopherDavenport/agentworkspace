@@ -1,0 +1,472 @@
+package remote
+
+// The server half of the sessions and their processes.
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"net/http"
+	"os"
+	"slices"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/ChristopherDavenport/agentworkspace"
+)
+
+// session is one client's: the processes it started, which live no
+// longer than it does. It lapses when it goes a lease unrenewed, and
+// ends when it lapses, when its client closes it, or when the handler
+// does.
+type session struct {
+	id    string
+	owner string // the principal's name
+	ctx   context.Context
+	stop  context.CancelFunc
+	timer *time.Timer
+
+	// Under the Handler's mu.
+	deadline time.Time
+	gone     bool // out of the table
+
+	mu    sync.Mutex
+	ended bool
+	procs map[string]*proc
+
+	endOnce sync.Once
+}
+
+// end closes every process in s and refuses another; it returns once
+// they have ended, as does every call made while the first runs.
+func (s *session) end() {
+	s.endOnce.Do(func() {
+		s.mu.Lock()
+		s.ended = true
+		procs := slices.Collect(maps.Values(s.procs))
+		clear(s.procs)
+		s.mu.Unlock()
+		var wg sync.WaitGroup
+		for _, sp := range procs {
+			wg.Go(sp.close)
+		}
+		wg.Wait()
+		s.stop()
+	})
+}
+
+// proc is a process a session started.
+type proc struct {
+	p       agentworkspace.Process
+	cancel  context.CancelFunc // ends it as its context's end does
+	stderr  *stderrBuffer      // nil when the start did not ask for it
+	streams [3]atomic.Bool     // stdin, stdout and stderr taken by a stream
+
+	exited chan struct{} // closed once status and err are set
+	status int
+	err    error
+}
+
+// close ends the process, and everything it started, and releases it.
+func (sp *proc) close() {
+	sp.p.Close()
+	<-sp.exited
+	sp.cancel()
+}
+
+// exit is how the process ended, once it has.
+func (sp *proc) exit() exitReply {
+	r := exitReply{Status: sp.status}
+	switch {
+	case errors.Is(sp.err, context.DeadlineExceeded):
+		r.Ended = endedTimeout
+	case errors.Is(sp.err, context.Canceled):
+		r.Ended = endedCanceled
+	case sp.err != nil:
+		r.Error = bounded(sp.err.Error())
+	}
+	return r
+}
+
+func (h *Handler) openSession(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.ws.(agentworkspace.Starter); !ok {
+		fail(w, fmt.Errorf("a %s workspace cannot start a process: %w", h.ws.Descriptor().Kind, errors.ErrUnsupported))
+		return
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	s := &session{id: rand.Text(), owner: principalOf(r).Name, ctx: ctx, stop: stop, procs: map[string]*proc{}}
+	h.mu.Lock()
+	switch {
+	case h.closed:
+		h.mu.Unlock()
+		stop()
+		writeError(w, wireError{Code: codeClosed, Message: "the server is closed"})
+		return
+	case len(h.sessions) >= h.maxSessions:
+		h.mu.Unlock()
+		stop()
+		writeError(w, wireError{Code: codeLimit, Message: fmt.Sprintf("%d sessions are open, the most there may be", h.maxSessions)})
+		return
+	}
+	s.deadline = time.Now().Add(h.lease)
+	s.timer = time.AfterFunc(h.lease, func() { h.lapse(s) })
+	h.sessions[s.id] = s
+	h.mu.Unlock()
+	writeJSON(w, sessionReply{ID: s.id, LeaseMs: h.lease.Milliseconds()})
+}
+
+// lapse ends s if it went a lease unrenewed, and waits again for the
+// rest of the lease if it was renewed.
+func (h *Handler) lapse(s *session) {
+	h.mu.Lock()
+	if s.gone {
+		h.mu.Unlock()
+		return
+	}
+	if d := time.Until(s.deadline); d > 0 {
+		s.timer.Reset(d)
+		h.mu.Unlock()
+		return
+	}
+	s.gone = true
+	delete(h.sessions, s.id)
+	h.mu.Unlock()
+	s.end()
+}
+
+// sessionOf is r's session, answering ErrNoSession itself for one that
+// is not open or is another principal's: the two read the same.
+func (h *Handler) sessionOf(w http.ResponseWriter, r *http.Request) *session {
+	h.mu.Lock()
+	s := h.sessions[r.PathValue("sid")]
+	h.mu.Unlock()
+	if s == nil || s.owner != principalOf(r).Name {
+		writeError(w, wireError{Code: codeNoSession, Message: ErrNoSession.Error()})
+		return nil
+	}
+	return s
+}
+
+func (h *Handler) renewSession(w http.ResponseWriter, r *http.Request) {
+	s := h.sessionOf(w, r)
+	if s == nil {
+		return
+	}
+	h.mu.Lock()
+	gone := s.gone
+	s.deadline = time.Now().Add(h.lease)
+	h.mu.Unlock()
+	if gone {
+		writeError(w, wireError{Code: codeNoSession, Message: ErrNoSession.Error()})
+		return
+	}
+	writeJSON(w, sessionReply{LeaseMs: h.lease.Milliseconds()})
+}
+
+func (h *Handler) closeSession(w http.ResponseWriter, r *http.Request) {
+	s := h.sessionOf(w, r)
+	if s == nil {
+		return
+	}
+	h.mu.Lock()
+	if !s.gone {
+		s.gone = true
+		s.timer.Stop()
+		delete(h.sessions, s.id)
+	}
+	h.mu.Unlock()
+	s.end()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// procOf is r's process in r's session, answering the refusal itself
+// for one the session did not start.
+func (h *Handler) procOf(w http.ResponseWriter, r *http.Request) *proc {
+	s := h.sessionOf(w, r)
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	sp := s.procs[r.PathValue("pid")]
+	s.mu.Unlock()
+	if sp == nil {
+		writeError(w, wireError{Code: codeNoProcess, Message: ErrNoProcess.Error()})
+	}
+	return sp
+}
+
+// start starts a process in the session, under a context of its own
+// that the session's end, and a cancel, end.
+func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
+	s := h.sessionOf(w, r)
+	if s == nil {
+		return
+	}
+	var req startRequest
+	if !decode(w, r, MaxRequestBytes, &req) {
+		return
+	}
+	if req.TimeoutMs < 0 {
+		writeError(w, wireError{Code: codeInvalid, Message: "a negative timeout"})
+		return
+	}
+	cmd := agentworkspace.Command{Args: req.Args, Dir: req.Dir, Env: req.Env, Timeout: time.Duration(req.TimeoutMs) * time.Millisecond}
+	sp := &proc{exited: make(chan struct{})}
+	if req.Stderr {
+		sp.stderr = newStderrBuffer()
+		cmd.Stream = sp.stderr
+	}
+	// The session is held across the start, which returns at once, so
+	// the count and the session's end see every process.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.ended:
+		writeError(w, wireError{Code: codeNoSession, Message: ErrNoSession.Error()})
+		return
+	case len(s.procs) >= h.maxProcesses:
+		writeError(w, wireError{Code: codeLimit, Message: fmt.Sprintf("%d processes are open in this session, the most there may be; close one first", h.maxProcesses)})
+		return
+	}
+	ctx, cancel := context.WithCancel(s.ctx)
+	p, err := agentworkspace.Start(ctx, h.ws, cmd)
+	if err != nil {
+		cancel()
+		fail(w, err)
+		return
+	}
+	sp.p, sp.cancel = p, cancel
+	go func() {
+		status, err := p.Wait()
+		sp.status, sp.err = status, err
+		if sp.stderr != nil {
+			// Wait returns once standard error is copied.
+			sp.stderr.end()
+		}
+		close(sp.exited)
+	}()
+	id := rand.Text()
+	s.procs[id] = sp
+	writeJSON(w, startedReply{ID: id})
+}
+
+// take claims one of a process's streams for the request, refusing (and
+// answering) a second.
+func take(w http.ResponseWriter, sp *proc, fd int) bool {
+	if sp.streams[fd].CompareAndSwap(false, true) {
+		return true
+	}
+	writeError(w, wireError{Code: codeInvalid, Message: fmt.Sprintf("%s is already streamed", [3]string{"standard input", "standard output", "standard error"}[fd])})
+	return false
+}
+
+// stdin copies the request's body to the process's input as it arrives
+// and closes the input at its end: the body's end is the process's end
+// of file, and so is a body cut short.
+func (h *Handler) stdin(w http.ResponseWriter, r *http.Request) {
+	sp := h.procOf(w, r)
+	if sp == nil || !take(w, sp, 0) {
+		return
+	}
+	in := sp.p.Stdin()
+	_, err := io.Copy(in, r.Body)
+	if cerr := in.Close(); err == nil && cerr != nil && !errors.Is(cerr, os.ErrClosed) {
+		err = cerr
+	}
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// stdout streams the process's output as it arrives, until it ends. A
+// client that goes closes it, as a reader closing a pipe does.
+func (h *Handler) stdout(w http.ResponseWriter, r *http.Request) {
+	sp := h.procOf(w, r)
+	if sp == nil || !take(w, sp, 1) {
+		return
+	}
+	out := sp.p.Stdout()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	rc := http.NewResponseController(w)
+	rc.Flush()
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := out.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil || rc.Flush() != nil {
+				out.Close()
+				return
+			}
+		}
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			panic(http.ErrAbortHandler)
+		}
+	}
+}
+
+// stderr streams what the process wrote to its standard error, which
+// the server holds (StderrBytes of it) until it is read.
+func (h *Handler) stderr(w http.ResponseWriter, r *http.Request) {
+	sp := h.procOf(w, r)
+	if sp == nil {
+		return
+	}
+	if sp.stderr == nil {
+		writeError(w, wireError{Code: codeInvalid, Message: "standard error was not asked for at the start"})
+		return
+	}
+	if !take(w, sp, 2) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	rc := http.NewResponseController(w)
+	rc.Flush()
+	for {
+		data, eof, err := sp.stderr.take(r.Context(), 32<<10)
+		if err != nil {
+			return
+		}
+		if len(data) > 0 {
+			if _, err := w.Write(data); err != nil || rc.Flush() != nil {
+				return
+			}
+		}
+		if eof {
+			return
+		}
+	}
+}
+
+// wait waits for the process to exit, as long as the request does.
+func (h *Handler) wait(w http.ResponseWriter, r *http.Request) {
+	sp := h.procOf(w, r)
+	if sp == nil {
+		return
+	}
+	select {
+	case <-sp.exited:
+		writeJSON(w, sp.exit())
+	case <-r.Context().Done():
+	}
+}
+
+func (h *Handler) signal(w http.ResponseWriter, r *http.Request) {
+	sp := h.procOf(w, r)
+	if sp == nil {
+		return
+	}
+	var req signalRequest
+	if !decode(w, r, MaxRequestBytes, &req) {
+		return
+	}
+	sig, ok := signals[req.Signal]
+	if !ok {
+		writeError(w, wireError{Code: codeInvalid, Message: fmt.Sprintf("no signal named %q", bounded(req.Signal))})
+		return
+	}
+	if err := sp.p.Signal(sig); err != nil {
+		fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// cancel ends the process as the end of its context does, and returns
+// at once; a wait says when it has ended.
+func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
+	sp := h.procOf(w, r)
+	if sp == nil {
+		return
+	}
+	sp.cancel()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// closeProcess ends the process, as Process.Close does, and answers
+// how it ended.
+func (h *Handler) closeProcess(w http.ResponseWriter, r *http.Request) {
+	s := h.sessionOf(w, r)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	sp := s.procs[r.PathValue("pid")]
+	delete(s.procs, r.PathValue("pid"))
+	s.mu.Unlock()
+	if sp == nil {
+		writeError(w, wireError{Code: codeNoProcess, Message: ErrNoProcess.Error()})
+		return
+	}
+	sp.close()
+	writeJSON(w, sp.exit())
+}
+
+// stderrBuffer is what a process wrote to its standard error that the
+// client has not read yet, at most StderrBytes: what does not fit is
+// dropped, so the process's Command.Stream never waits.
+type stderrBuffer struct {
+	mu      sync.Mutex
+	buf     []byte
+	eof     bool
+	changed chan struct{} // closed and replaced at every change
+}
+
+func newStderrBuffer() *stderrBuffer { return &stderrBuffer{changed: make(chan struct{})} }
+
+// notify wakes whoever waits on a change; b.mu is held.
+func (b *stderrBuffer) notify() {
+	close(b.changed)
+	b.changed = make(chan struct{})
+}
+
+func (b *stderrBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if room := StderrBytes - len(b.buf); room > 0 && len(p) > 0 {
+		b.buf = append(b.buf, p[:min(room, len(p))]...)
+		b.notify()
+	}
+	return len(p), nil
+}
+
+// end is end of file after what b holds.
+func (b *stderrBuffer) end() {
+	b.mu.Lock()
+	b.eof = true
+	b.notify()
+	b.mu.Unlock()
+}
+
+// take waits for output or its end, and returns at most n bytes of it
+// and whether that is all there will be.
+func (b *stderrBuffer) take(ctx context.Context, n int) ([]byte, bool, error) {
+	for {
+		b.mu.Lock()
+		if len(b.buf) > 0 || b.eof {
+			k := min(n, len(b.buf))
+			out := slices.Clone(b.buf[:k])
+			b.buf = append(b.buf[:0], b.buf[k:]...)
+			eof := b.eof && len(b.buf) == 0
+			b.mu.Unlock()
+			return out, eof, nil
+		}
+		ch := b.changed
+		b.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		}
+	}
+}

@@ -2,30 +2,38 @@ package agentworkspace
 
 import (
 	"go/build"
+	"slices"
 	"strings"
 	"testing"
 )
 
 const modulePath = "github.com/ChristopherDavenport/agentworkspace"
 
-// TestImportBoundary enforces the module's one dependency rule: the
-// package and its tests import the standard library alone, so a
-// product that wants only the interface and Local pays for nothing
-// else. A remote client or a container starter is a subpackage or a
-// nested module, with its own dependencies.
+// rootPackages are the root module's packages: the interface and Local,
+// and remote, the workspace over HTTP. A nested module (mcpworkspace)
+// is not one of them.
+var rootPackages = []string{modulePath, modulePath + "/remote"}
+
+// TestImportBoundary enforces the module's one dependency rule: every
+// package in it, and every test of one, imports the standard library
+// and the module's own packages alone, so a product that wants only the
+// interface, Local or remote pays for nothing else. A container
+// starter, or anything with a dependency, is a nested module.
 func TestImportBoundary(t *testing.T) {
-	pkg, err := build.Default.ImportDir(".", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, imp := range pkg.Imports {
-		if !isStandard(imp) {
-			t.Errorf("agentworkspace imports %q; only the standard library is allowed", imp)
+	for _, dir := range []string{".", "remote"} {
+		pkg, err := build.Default.ImportDir(dir, 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	for _, imp := range append(pkg.TestImports, pkg.XTestImports...) {
-		if !isStandard(imp) && !strings.HasPrefix(imp, modulePath) {
-			t.Errorf("agentworkspace tests import %q; only the standard library is allowed", imp)
+		for _, imp := range pkg.Imports {
+			if !isStandard(imp) && !slices.Contains(rootPackages, imp) {
+				t.Errorf("%s imports %q; only the standard library and the root module are allowed", dir, imp)
+			}
+		}
+		for _, imp := range append(pkg.TestImports, pkg.XTestImports...) {
+			if !isStandard(imp) && !slices.Contains(rootPackages, imp) {
+				t.Errorf("the tests in %s import %q; only the standard library and the root module are allowed", dir, imp)
+			}
 		}
 	}
 }

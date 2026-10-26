@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // mapped stands in for a container: its processes and its files see
@@ -66,18 +68,32 @@ type noLinks struct{ *Local }
 
 func (n noLinks) FS() fs.FS { return struct{ fs.FS }{n.Local.FS()} }
 
-// backends are the workspaces every confinement test runs on, each over
-// dir.
-var backends = []struct {
-	name string
-	open func(t *testing.T, dir string) Workspace
-}{
-	{"local", func(t *testing.T, dir string) Workspace { return mustLocal(t, dir) }},
+// backend is a workspace the tables run on, opened over dir with PATH
+// alone in its environment; links says its FS can read links.
+type backend struct {
+	name  string
+	open  func(t *testing.T, dir string) Workspace
+	links bool
+}
+
+// backends are the workspaces every confinement test runs on. A
+// backend in a package that imports this one (remote) is added by
+// AddBackend, from package agentworkspace_test.
+var backends = []backend{
+	{"local", func(t *testing.T, dir string) Workspace { return mustLocal(t, dir) }, true},
 	{"container stand-in", func(t *testing.T, dir string) Workspace {
 		l := mustLocal(t, dir)
 		return &mapped{backing: l, dir: l.Root()}
-	}},
-	{"no links", func(t *testing.T, dir string) Workspace { return noLinks{mustLocal(t, dir)} }},
+	}, true},
+	{"no links", func(t *testing.T, dir string) Workspace { return noLinks{mustLocal(t, dir)} }, false},
+}
+
+// AddBackend adds a backend to the tables. It is for an init function
+// in package agentworkspace_test, which can import a backend's package
+// that imports this one; being in a test file, it is not the package's
+// API.
+func AddBackend(name string, links bool, open func(t *testing.T, dir string) Workspace) {
+	backends = append(backends, backend{name, open, links})
 }
 
 func mustLocal(t *testing.T, dir string) *Local {
@@ -208,7 +224,7 @@ func TestInsideWorks(t *testing.T) {
 			// Where links lead is read through the workspace, or not at
 			// all: never followed on the host.
 			links, ok := ws.FS().(fs.ReadLinkFS)
-			if b.name == "no links" {
+			if !b.links {
 				if ok {
 					t.Error("an FS that cannot read links offers ReadLinkFS")
 				}
@@ -275,5 +291,61 @@ func TestALinkSwappedMidOperationStaysIn(t *testing.T) {
 	wg.Wait()
 	if _, err := os.Stat(filepath.Join(outside, "w.txt")); err == nil {
 		t.Error("a write through the swapped link landed outside")
+	}
+}
+
+// Nothing blocks on a FIFO, on any backend: it opens, or fails, at
+// once, what was opened says what it is, and it is not read as a file,
+// listed or written.
+func TestNothingBlocksOnAFIFO(t *testing.T) {
+	for _, b := range backends {
+		t.Run(b.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o644); err != nil {
+				t.Skipf("no FIFO here: %v", err)
+			}
+			ws := b.open(t, dir)
+			ctx := context.Background()
+			within(t, 10*time.Second, "the operations on a FIFO", func() {
+				if f, err := ws.FS().Open("pipe"); err == nil {
+					if fi, err := f.Stat(); err != nil || fi.Mode()&fs.ModeNamedPipe == 0 {
+						t.Errorf("Stat of the opened FIFO = %v, %v", fi, err)
+					}
+					f.Read(make([]byte, 1)) // returns, whatever it says
+					f.Close()
+				}
+				if fi, err := fs.Stat(ws.FS(), "pipe"); err != nil || fi.Mode()&fs.ModeNamedPipe == 0 {
+					t.Errorf("Stat of the FIFO = %v, %v", fi, err)
+				}
+				if _, err := Read(ws, "pipe", 1<<20); err == nil {
+					t.Error("Read read a FIFO")
+				}
+				if _, err := fs.ReadDir(ws.FS(), "pipe"); err == nil {
+					t.Error("a FIFO was listed")
+				}
+				if err := ws.WriteFile(ctx, "pipe", []byte("x"), 0o644); err == nil {
+					t.Error("a FIFO was written")
+				}
+			})
+		})
+	}
+}
+
+// Env is a copy on every backend: a caller that changes it changes
+// nothing the workspace gives next.
+func TestEnvIsACopyOnEveryBackend(t *testing.T) {
+	for _, b := range backends {
+		t.Run(b.name, func(t *testing.T) {
+			ws := b.open(t, t.TempDir())
+			e := ws.Env()
+			if len(e) == 0 {
+				t.Fatal("no environment")
+			}
+			want := e[0]
+			e[0] = "CHANGED=1"
+			if got := ws.Env(); got[0] != want {
+				t.Errorf("Env after a caller changed its copy = %q", got)
+			}
+		})
 	}
 }

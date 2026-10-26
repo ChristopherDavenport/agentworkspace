@@ -52,14 +52,16 @@ type Handler struct {
 	maxWrite      int64
 	maxOutput     int64
 	maxDirEntries int
+	maxTransfers  int
 	mux           *http.ServeMux
 	ctx           context.Context // ends with Close, and every Exec with it
 	stop          context.CancelFunc
 	inflight      sync.WaitGroup // the Execs and process closes Close waits for
 
-	mu       sync.Mutex
-	closed   bool
-	sessions map[string]*session
+	mu        sync.Mutex
+	closed    bool
+	sessions  map[string]*session
+	transfers int // the transfers being served
 }
 
 var _ http.Handler = (*Handler)(nil)
@@ -67,7 +69,8 @@ var _ http.Handler = (*Handler)(nil)
 // An Option configures NewHandler.
 type Option func(*Handler)
 
-// WithAuthenticator resolves each request's principal with a.
+// WithAuthenticator resolves each request's principal with a, the
+// program's authentication.
 func WithAuthenticator(a Authenticator) Option { return func(h *Handler) { h.auth = a } }
 
 // WithInsecureNoAuth serves every request, unauthenticated, as a
@@ -114,6 +117,14 @@ func WithMaxWriteBytes(n int64) Option { return func(h *Handler) { h.maxWrite = 
 // ErrLimit. The default is DefaultMaxDirEntries.
 func WithMaxDirEntries(n int) Option { return func(h *Handler) { h.maxDirEntries = n } }
 
+// WithMaxTransfers bounds the transfers served at once: Execs and a
+// file's content read or written, each of which holds its request open
+// as long as its body streams. One past it is ErrLimit. The sessions'
+// own routes (a renewal, a process's start, pipes, wait, signal, cancel
+// and close) are bounded by the sessions and their processes, and are
+// not counted. The default is DefaultMaxTransfers.
+func WithMaxTransfers(n int) Option { return func(h *Handler) { h.maxTransfers = n } }
+
 // NewHandler serves ws. It refuses a nil workspace, a bound that is not
 // positive, and both an authenticator and WithInsecureNoAuth.
 func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
@@ -129,6 +140,7 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 		maxWrite:      DefaultMaxWriteBytes,
 		maxOutput:     DefaultMaxExecOutputBytes,
 		maxDirEntries: DefaultMaxDirEntries,
+		maxTransfers:  DefaultMaxTransfers,
 		sessions:      map[string]*session{},
 	}
 	for _, o := range opts {
@@ -141,7 +153,7 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 		return nil, errors.New("remote: an authenticator and WithInsecureNoAuth; choose one")
 	case h.lease < time.Millisecond:
 		return nil, fmt.Errorf("remote: a lease of %v; at least a millisecond", h.lease)
-	case h.maxSessions <= 0 || h.maxPerOwner <= 0 || h.maxProcesses <= 0 || h.maxWrite <= 0 || h.maxOutput <= 0 || h.maxDirEntries <= 0:
+	case h.maxSessions <= 0 || h.maxPerOwner <= 0 || h.maxProcesses <= 0 || h.maxWrite <= 0 || h.maxOutput <= 0 || h.maxDirEntries <= 0 || h.maxTransfers <= 0:
 		return nil, errors.New("remote: a bound that is not positive")
 	}
 	m := http.NewServeMux()
@@ -150,10 +162,10 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 	m.HandleFunc("GET "+routeLstat, h.need(ScopeRead, h.lstat))
 	m.HandleFunc("GET "+routeReadLink, h.need(ScopeRead, h.readLink))
 	m.HandleFunc("GET "+routeReadDir, h.need(ScopeRead, h.readDir))
-	m.HandleFunc("GET "+routeFile, h.need(ScopeRead, h.read))
-	m.HandleFunc("PUT "+routeFile, h.need(ScopeWrite, typed(rawType, h.write)))
+	m.HandleFunc("GET "+routeFile, h.need(ScopeRead, h.transfer(h.read)))
+	m.HandleFunc("PUT "+routeFile, h.need(ScopeWrite, typed(rawType, h.transfer(h.write))))
 	m.HandleFunc("DELETE "+routeFile, h.need(ScopeWrite, h.remove))
-	m.HandleFunc("POST "+routeExec, h.need(ScopeExec, typed(jsonType, h.exec)))
+	m.HandleFunc("POST "+routeExec, h.need(ScopeExec, typed(jsonType, h.transfer(h.exec))))
 	m.HandleFunc("POST "+routeSessions, h.need(ScopeExec, typed(jsonType, h.openSession)))
 	m.HandleFunc("POST "+routeSessions+"/{sid}/renew", h.need(ScopeExec, typed(jsonType, h.renewSession)))
 	m.HandleFunc("DELETE "+routeSessions+"/{sid}", h.need(ScopeExec, h.closeSession))
@@ -300,6 +312,31 @@ func (h *Handler) isClosed() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.closed
+}
+
+// Lease is how long a session lives without a renewal: WithLease's, or
+// DefaultLease.
+func (h *Handler) Lease() time.Duration { return h.lease }
+
+// transfer serves f as one of the transfers WithMaxTransfers bounds,
+// refusing (and answering) one past the bound.
+func (h *Handler) transfer(f http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		if h.transfers >= h.maxTransfers {
+			h.mu.Unlock()
+			writeError(w, wireError{Code: codeLimit, Message: fmt.Sprintf("%d transfers are being served, the most there may be at once", h.maxTransfers)})
+			return
+		}
+		h.transfers++
+		h.mu.Unlock()
+		defer func() {
+			h.mu.Lock()
+			h.transfers--
+			h.mu.Unlock()
+		}()
+		f(w, r)
+	}
 }
 
 // need serves f to a principal holding s, on a handler not closed.

@@ -12,8 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
 )
@@ -297,4 +299,79 @@ func TestNamesThatAreNotUTF8(t *testing.T) {
 	if _, err := fs.ReadFile(ws.FS(), odd); !errors.Is(err, fs.ErrInvalid) {
 		t.Errorf("ReadFile = %v, want fs.ErrInvalid", err)
 	}
+}
+
+// The transfers served at once are bounded: an Exec that is running
+// holds one, one more is ErrLimit, and its end frees it. A session's
+// routes are not counted. (A file's content would hold one only while
+// the server is still writing it, which a small file over loopback is
+// not by the time the next request comes.)
+func TestTransfersAreBounded(t *testing.T) {
+	l, dir := newLocal(t, pathEnv())
+	os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644)
+	h, url := serve(t, l, WithInsecureNoAuth(), WithMaxTransfers(1))
+	if h.Lease() != DefaultLease {
+		t.Errorf("Lease = %v, want the default", h.Lease())
+	}
+	ctx := context.Background()
+	ws := dial(t, url)
+	hold, release := context.WithCancel(ctx)
+	defer release()
+	// The held Exec says when it runs, through its stream: until then
+	// nothing else is sent, so nothing else can hold the one transfer.
+	ready := &firstWrite{c: make(chan struct{})}
+	held := make(chan error, 1)
+	go func() {
+		_, err := ws.Exec(hold, agentworkspace.Command{Args: []string{"sh", "-c", "echo ready; exec sleep 30"}, Stream: ready})
+		held <- err
+	}()
+	select {
+	case <-ready.c:
+	case err := <-held:
+		t.Fatalf("the held Exec ended first: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the held Exec never ran")
+	}
+	if _, err := fs.ReadFile(ws.FS(), "f"); !errors.Is(err, ErrLimit) {
+		t.Errorf("a read past the bound: %v", err)
+	}
+	if _, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"true"}}); !errors.Is(err, ErrLimit) {
+		t.Errorf("an Exec past the bound: %v", err)
+	}
+	if err := ws.WriteFile(ctx, "g", []byte("x"), 0o644); !errors.Is(err, ErrLimit) {
+		t.Errorf("a write past the bound: %v", err)
+	}
+	p, err := agentworkspace.Start(ctx, ws, agentworkspace.Command{Args: []string{"true"}})
+	if err != nil {
+		t.Fatalf("a Start while a transfer is served: %v", err)
+	}
+	within(t, 10*time.Second, "the process", func() { p.Wait() })
+	p.Close()
+	release()
+	within(t, 10*time.Second, "the held Exec", func() { <-held })
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"true"}})
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrLimit) || time.Now().After(deadline) {
+			t.Fatalf("an Exec once the transfer is closed: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := NewHandler(l, WithInsecureNoAuth(), WithMaxTransfers(0)); err == nil {
+		t.Error("made a handler bounding no transfers")
+	}
+}
+
+// firstWrite closes c at its first write.
+type firstWrite struct {
+	once sync.Once
+	c    chan struct{}
+}
+
+func (w *firstWrite) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.c) })
+	return len(p), nil
 }

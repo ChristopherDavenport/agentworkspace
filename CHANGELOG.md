@@ -5,6 +5,71 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added: package `workspacetest`, in the root module and on the
+  standard library alone: the conformance tables every backend runs,
+  exported so a backend in a nested module runs them from its own
+  tests. `Run` takes `Backend`s (confinement, FIFOs, `Env`, `Exec`,
+  names that are not valid paths), `RunStarter` takes `Starter`s (the
+  pipes, the environment, the lifetimes, the refusals), and `Confined`
+  lays out a workspace beside a secret. The root's backends and
+  `remote` run them; the tables moved out of the root's tests
+  unchanged.
+
+- Added: `remote.WithMaxTransfers` and `remote.DefaultMaxTransfers`
+  (256): a handler serves at most that many Execs and reads and writes
+  of a file's content at once, one past it `ErrLimit`; a session's own
+  routes are not counted. `Handler.Lease` says the lease a handler
+  keeps.
+- Added: nested module `tunnel`
+  (`github.com/ChristopherDavenport/agentworkspace/tunnel`, on
+  `github.com/coder/websocket` v1.8.15), released with the root: a
+  workspace behind NAT or a firewall served to a server through a
+  WebSocket its host dials out, carrying remote's wire unchanged over
+  HTTP/2 without TLS (h2c) on the WebSocket's bytes. `Serve` is the
+  workspace end, the HTTP/2 server: it dials `wss://` (`ws://` to a
+  loopback host alone), serves one `remote.Handler` across every
+  reconnect, so sessions and processes outlive a drop shorter than the
+  lease, redials with jittered, capped backoff (`WithRedial`,
+  `DefaultRedialMin`, `DefaultRedialMax`), and closes the handler, and
+  every process, when its context ends; `WithScopes` (required) is what
+  the server may do, `WithHTTPClient` and `WithHeader` carry the
+  application's credentials, and `WithHandlerOptions` passes remote's.
+  It follows no redirect of the upgrade, whatever the application's
+  client allows, and once connected tries a refused upgrade again
+  within the lease. `DefaultSessions`, `DefaultProcesses` and
+  `DefaultTransfers` are its bounds for remote's, which with
+  `StreamWindow` and `ConnWindow` (all streams' windows) keep unread
+  output and open streams from starving a renewal.
+  `Hub` is the server end, an `http.Handler`: `NewHub`, `WithEnrollment`
+  (`Enrollment`, the application's authentication, asked before the
+  101; without one every upgrade is refused, and any with an `Origin`;
+  `ErrTryLater` is a 503 the host dials again on),
+  `WithMaxWorkspaces` (`DefaultMaxWorkspaces`), `Workspace`, which is
+  `remote.Dial` over the connection and waits for a reconnect bounded
+  by each request's context, `Connected`, `Close`, `ValidName` and
+  `MaxNameBytes`; a second connection for a name replaces the first
+  once it has answered over HTTP/2.
+  Both ends take `WithMaxMessageBytes` (`DefaultMaxMessageBytes`),
+  `WithPing` (HTTP/2 pings, `DefaultPingInterval`,
+  `DefaultPingTimeout`) and `WithLogger`; `MaxStreams`, `StreamWindow`,
+  `ConnWindow` and `HandshakeTimeout` bound the rest. `ErrNotConnected`
+  and `ErrClosed` are its errors. Offered MCP servers are not carried.
+- Removed: `remote.BearerTokens` and `remote.WithBearerToken`. The
+  library ships no authentication: it is the capability layer, and the
+  application supplies authentication through the hook
+  (`WithAuthenticator`, which names a request's `Principal` and its
+  scopes) and its own HTTP client (`WithHTTPClient`, which carries the
+  credentials). `Scope`, `Principal`, `WithInsecureNoAuth`, failing
+  closed without an authenticator and the browser checks are kept. A
+  base URL with userinfo is still refused.
+
+- Fixed: `remote.Handler.Close` returns only once a session that was
+  ending as it was called (one that lapsed, or that its client closed)
+  has ended with its processes; it used to miss those, which had left
+  the table first.
+
 ## v0.0.5 - 2026-10-25
 
 - Added: package `remote`, in the root module and on the standard

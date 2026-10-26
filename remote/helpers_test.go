@@ -148,4 +148,40 @@ func raw(t *testing.T, method, url, token string, body io.Reader) (int, string) 
 	return resp.StatusCode, code
 }
 
+// grant is an Authenticator over tokens, for the tests: a request whose
+// Authorization header is "Bearer <token>" for a token in tokens is
+// that token's principal. It stands in for the program's
+// authentication, which the package does not ship.
+func grant(tokens map[string]Principal) Authenticator {
+	return func(r *http.Request) (Principal, error) {
+		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		p, found := tokens[tok]
+		if !ok || !found {
+			return Principal{}, errors.New("no such token")
+		}
+		return p, nil
+	}
+}
+
+// withToken dials with an HTTP client that sends tok as a bearer token
+// on every request, as a program's client carries its credentials.
+func withToken(tok string) DialOption {
+	return WithHTTPClient(&http.Client{
+		Transport:     bearer{tok, http.DefaultTransport},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	})
+}
+
+// bearer sets the Authorization header of every request it sends.
+type bearer struct {
+	tok  string
+	next http.RoundTripper
+}
+
+func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+b.tok)
+	return b.next.RoundTrip(r)
+}
+
 func decodeReply(resp *http.Response, v any) error { return json.NewDecoder(resp.Body).Decode(v) }

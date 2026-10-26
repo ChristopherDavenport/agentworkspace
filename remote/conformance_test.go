@@ -1,9 +1,7 @@
-package agentworkspace_test
+package remote_test
 
-// The remote backend in the tables: remote.Dial over remote.NewHandler
-// serving Local, through httptest. It is here, in the external test
-// package, because remote imports agentworkspace; AddBackend and
-// AddStarter put it into the tables the package's own tests run.
+// The remote backend in the conformance tables: remote.Dial over
+// remote.NewHandler serving Local, through httptest.
 
 import (
 	"context"
@@ -14,23 +12,28 @@ import (
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/remote"
+	"github.com/ChristopherDavenport/agentworkspace/workspacetest"
 )
 
-func init() {
-	agentworkspace.AddBackend("remote", true, func(t *testing.T, dir string) agentworkspace.Workspace {
-		return served(t, local(t, dir, pathEnv()))
-	})
-	agentworkspace.AddBackend("remote, no links", false, func(t *testing.T, dir string) agentworkspace.Workspace {
-		return served(t, noLinks{local(t, dir, pathEnv())})
-	})
-	agentworkspace.AddStarter("remote", func(t *testing.T, dir string, env []string) agentworkspace.Starter {
-		ws := served(t, local(t, dir, env))
-		s, ok := ws.(agentworkspace.Starter)
+func TestConformance(t *testing.T) {
+	workspacetest.Run(t,
+		workspacetest.Backend{Name: "remote", Links: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+			return served(t, local(t, dir, pathEnv()))
+		}},
+		workspacetest.Backend{Name: "remote, no links", Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+			return served(t, noLinks{local(t, dir, pathEnv())})
+		}},
+	)
+}
+
+func TestStarterConformance(t *testing.T) {
+	workspacetest.RunStarter(t, workspacetest.Starter{Name: "remote", Open: func(t *testing.T, dir string, env []string) agentworkspace.Starter {
+		s, ok := served(t, local(t, dir, env)).(agentworkspace.Starter)
 		if !ok {
 			t.Fatal("a remote over Local is not a Starter")
 		}
 		return s
-	})
+	}})
 }
 
 func pathEnv() []string { return []string{"PATH=" + os.Getenv("PATH")} }

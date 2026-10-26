@@ -6,7 +6,9 @@ and bash tools run unchanged against a directory on this machine, a
 container or a remote runtime. The module imports the standard library
 alone, its package `remote` included, which serves a whole workspace
 over HTTP; `mcpworkspace`, a module of its own beside it, carries a
-workspace's processes and files over an MCP connection.
+workspace's processes and files over an MCP connection, and `tunnel`,
+another, serves a workspace behind NAT through a connection its host
+dials out.
 
 ```go
 ws, err := agentworkspace.NewLocal(dir, env) // env: this process's, credentials removed
@@ -204,37 +206,87 @@ client's side (the primitive cut; a sandbox that should run the tools
 themselves is cut at the tool calls instead, as dax's executor is).
 
 ```go
-// The server: a plain http.Handler; TLS and the listener are the program's.
-h, err := remote.NewHandler(ws, remote.WithAuthenticator(remote.BearerTokens(map[string]remote.Principal{
-	token: {Name: "agent", Scopes: []remote.Scope{remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec}},
-})))
+// The server: a plain http.Handler; TLS, the listener and the
+// authentication are the program's. authenticate is the program's own:
+// it says who a request is from and what that principal may do.
+h, err := remote.NewHandler(ws, remote.WithAuthenticator(func(r *http.Request) (remote.Principal, error) {
+	name, err := authenticate(r) // the program's check of its credentials
+	if err != nil {
+		return remote.Principal{}, err
+	}
+	return remote.Principal{Name: name, Scopes: []remote.Scope{remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec}}, nil
+}))
 defer h.Close() // ends every session's processes
 http.Handle("/", h)
 
 // The client: a Workspace, and a Starter when the server can start and
-// the principal holds exec.
-ws, err := remote.Dial(ctx, "https://host/", remote.WithBearerToken(token))
+// the principal holds exec. Its credentials are in the program's HTTP
+// client (a Transport that sets the Authorization header, or a client
+// certificate).
+ws, err := remote.Dial(ctx, "https://host/", remote.WithHTTPClient(hc))
 defer ws.Close()
 ```
 
-Every request is authenticated, whatever its route; with no
+The package ships no authentication: it asks the program's
+`Authenticator` who each request is from and grants that principal's
+scopes, and the client sends whatever the program's `http.Client` sends.
+Every request is put to the authenticator, whatever its route; with no
 authenticator every request is refused, unless the handler was made
-`WithInsecureNoAuth`, and such a handler answers only a loopback Host.
-A request that looks like a browser page's (an Origin, a cross-site
-`Sec-Fetch-Site`, a body of another type than its route's) is refused
-in every mode. `read` covers the files' reads, `write` writes and
-removes, and `exec` runs anything: `Exec`, the processes and the
-environment, which a client without it is not told. `exec` is never
-implied by `read` or `write`. A client's processes live in a session it
-opens at its first `Start` and renews on a lease (`DefaultLease`); when
-the lease lapses, or the client closes, the server ends every process
-the session started, and a process is reached only through its own
-session, by the principal that opened it. `Exec` streams its output as
-NDJSON frames, and its process ends with the request. Errors keep
-their sentinels across the wire (`ErrOutside`, `fs.ErrNotExist` and the
-rest), and every bound (body sizes, sessions, processes per session, a
-listing) is an exported constant or option. The routes are in the
-package doc.
+`WithInsecureNoAuth`, and such a handler answers only a loopback Host. A
+request that looks like a browser page's (an Origin, a cross-site
+`Sec-Fetch-Site`, a body of another type than its route's) is refused in
+every mode. `read` covers the files' reads, `write` writes and removes,
+and `exec` runs anything: `Exec`, the processes and the environment,
+which a client without it is not told. `exec` is never implied by `read`
+or `write`. A client's processes live in a session it opens at its first
+`Start` and renews on a lease (`DefaultLease`); when the lease lapses,
+or the client closes, the server ends every process the session started,
+and a process is reached only through its own session, by the principal
+that opened it. `Exec` streams its output as NDJSON frames, and its
+process ends with the request. Errors keep their sentinels across the
+wire (`ErrOutside`, `fs.ErrNotExist` and the rest), and every bound
+(body sizes, sessions, processes per session, a listing) is an exported
+constant or option. The routes are in the package doc.
+
+## Behind NAT: tunnel
+
+`github.com/ChristopherDavenport/agentworkspace/tunnel` is for a
+workspace the server cannot dial. Its host dials out over a WebSocket,
+and serves the workspace to the server through it, on remote's wire
+unchanged: the host is the HTTP/2 server inside the tunnel (h2c on the
+WebSocket's bytes), the server the client.
+
+```go
+// The workspace's host: dial the hub and serve ws until ctx ends,
+// dialling again after a drop. The scopes are this end's to grant; the
+// credentials are the application's, in its HTTP client or a header.
+err := tunnel.Serve(ctx, "wss://hub.example/tunnel", ws,
+	tunnel.WithScopes(remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec),
+	tunnel.WithHeader(func(ctx context.Context) (http.Header, error) {
+		return http.Header{"Authorization": {"Bearer " + credential()}}, nil
+	}))
+
+// The server: a Hub mounted where the hosts dial. The enrollment is the
+// application's authentication: it names the workspace an upgrade is
+// from, or refuses it, before the upgrade is answered.
+hub, err := tunnel.NewHub(tunnel.WithEnrollment(func(r *http.Request) (string, error) {
+	return enrolled(r) // "build-1", or an error
+}))
+defer hub.Close()
+http.Handle("/tunnel", hub)
+
+ws, err := hub.Workspace(ctx, "build-1") // waits for it to connect, bounded by ctx
+defer ws.Close()
+```
+
+One `remote.Handler` serves every connection, so a session and its
+processes outlive a drop shorter than the lease, and the server's
+client renews through the next connection; what was in flight, a
+process's open pipes included, fails and is not sent again. A drop past
+the lease ends the processes, as over HTTP. A second connection for a
+connected name replaces the first. HTTP/2 pings notice a dead tunnel at
+both ends; a WebSocket message, the workspaces a hub holds and the
+streams a tunnel carries are bounded. The package doc has the details.
 
 ## Planned
 

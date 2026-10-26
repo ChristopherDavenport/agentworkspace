@@ -38,6 +38,9 @@ const (
 	// the standard error an Exec without a Stream sends back
 	// (WithMaxExecOutputBytes).
 	DefaultMaxExecOutputBytes = 16 << 20
+	// DefaultMaxTransfers bounds the Execs and the reads and writes of a
+	// file's content served at once (WithMaxTransfers).
+	DefaultMaxTransfers = 256
 )
 
 // The bounds that are not options.

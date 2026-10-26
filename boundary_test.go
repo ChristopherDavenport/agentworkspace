@@ -10,17 +10,18 @@ import (
 const modulePath = "github.com/ChristopherDavenport/agentworkspace"
 
 // rootPackages are the root module's packages: the interface and Local,
-// and remote, the workspace over HTTP. A nested module (mcpworkspace)
-// is not one of them.
-var rootPackages = []string{modulePath, modulePath + "/remote"}
+// remote, the workspace over HTTP, and workspacetest, the conformance
+// tables, with internal/lifetime, what Local and the tables share. A
+// nested module (mcpworkspace, tunnel) is not one of them.
+var rootPackages = []string{modulePath, modulePath + "/remote", modulePath + "/workspacetest", modulePath + "/internal/lifetime"}
 
 // TestImportBoundary enforces the module's one dependency rule: every
 // package in it, and every test of one, imports the standard library
 // and the module's own packages alone, so a product that wants only the
-// interface, Local or remote pays for nothing else. A container
+// interface, Local, remote or the tables pays for nothing else. A container
 // starter, or anything with a dependency, is a nested module.
 func TestImportBoundary(t *testing.T) {
-	for _, dir := range []string{".", "remote"} {
+	for _, dir := range []string{".", "remote", "workspacetest", "internal/lifetime"} {
 		pkg, err := build.Default.ImportDir(dir, 0)
 		if err != nil {
 			t.Fatal(err)

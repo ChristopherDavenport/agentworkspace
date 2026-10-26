@@ -27,8 +27,8 @@ func TestSessionsAreLazyAndBoundPerPrincipal(t *testing.T) {
 	l, _ := newLocal(t, pathEnv())
 	h, url := serve(t, l, WithAuthenticator(tokens()), WithMaxSessionsPerPrincipal(1))
 	ctx := context.Background()
-	first := dial(t, url, WithBearerToken(tokAll))
-	dial(t, url, WithBearerToken(tokAll))
+	first := dial(t, url, withToken(tokAll))
+	dial(t, url, withToken(tokAll))
 	h.mu.Lock()
 	n := len(h.sessions)
 	h.mu.Unlock()
@@ -40,7 +40,7 @@ func TestSessionsAreLazyAndBoundPerPrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
-	second := dial(t, url, WithBearerToken(tokAll))
+	second := dial(t, url, withToken(tokAll))
 	if q, err := agentworkspace.Start(ctx, second, agentworkspace.Command{Args: []string{"true"}}); !errors.Is(err, ErrLimit) {
 		if q != nil {
 			q.Close()
@@ -50,7 +50,7 @@ func TestSessionsAreLazyAndBoundPerPrincipal(t *testing.T) {
 	if out, err := second.Exec(ctx, agentworkspace.Command{Args: []string{"echo", "hi"}}); err != nil || string(out.Stdout) != "hi\n" {
 		t.Errorf("Exec, which needs no session: %v, %v", out, err)
 	}
-	bob := dial(t, url, WithBearerToken(tokBob))
+	bob := dial(t, url, withToken(tokBob))
 	q, err := agentworkspace.Start(ctx, bob, agentworkspace.Command{Args: []string{"true"}})
 	if err != nil {
 		t.Errorf("another principal's session: %v", err)

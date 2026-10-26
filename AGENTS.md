@@ -13,8 +13,10 @@ interface.
 ## Module
 
 - Module path: `github.com/ChristopherDavenport/agentworkspace`.
-- Go 1.26 is the floor. The root module holds two packages:
-  `agentworkspace`, at the root, and `remote`.
+- Go 1.26 is the floor. The root module holds three packages:
+  `agentworkspace`, at the root, `remote`, and `workspacetest`, the
+  conformance tables every backend runs (`Run`, `RunStarter`,
+  `Confined`), exported so a nested module's backend runs them too.
 - The root module imports the standard library alone. `make deps` and
   a test (`TestImportBoundary`, which names the root's packages)
   enforce it. Anything with a dependency is a nested module, and none
@@ -24,14 +26,17 @@ interface.
   serves any workspace as an `http.Handler` the program mounts (TLS is
   the program's); `Dial` returns a `*Client`, or a `*StarterClient`
   when the served workspace is a `Starter` and the principal holds
-  `exec`, so a type assertion tells the truth. Every request is
-  authenticated (`Authenticator`, `BearerTokens`, scopes `read`,
-  `write`, `exec`; no authenticator refuses everything unless
-  `WithInsecureNoAuth`, which answers a loopback Host alone; every
-  handler refuses a browser page's request: an Origin, a cross-site
-  `Sec-Fetch-Site`, an untyped body). Started processes live in a
-  session the client opens at its first Start and renews on a lease; a
-  lapse, a lease unrenewed on the client's side, or `Close` ends them.
+  `exec`, so a type assertion tells the truth. It ships no
+  authentication: every request is put to the program's
+  `Authenticator`, which names its `Principal` and scopes (`read`,
+  `write`, `exec`), and the client's credentials are in the
+  `http.Client` the program gives `WithHTTPClient` (no authenticator
+  refuses everything unless `WithInsecureNoAuth`, which answers a
+  loopback Host alone; every handler refuses a browser page's request:
+  an Origin, a cross-site `Sec-Fetch-Site`, an untyped body). Started
+  processes live in a session the client opens at its first Start and
+  renews on a lease; a lapse, a lease unrenewed on the client's side,
+  or `Close` ends them.
   Its bounds are exported constants and options, its wire is in its
   package doc, and it is not the tool-call cut dax's executor uses.
 - `mcpworkspace` (nested module
@@ -50,6 +55,28 @@ interface.
   stdio server started in a workspace, and the server methods
   (`servers.list`, `servers.start`) carry a `ServerProvider` over the
   connection.
+- `tunnel` (nested module
+  `github.com/ChristopherDavenport/agentworkspace/tunnel`, on
+  `github.com/coder/websocket`): remote's wire, unchanged, over a
+  WebSocket the workspace's host dials out, for a workspace behind NAT
+  or a firewall. The roles flip inside it: the workspace end (`Serve`)
+  is the WebSocket client and the HTTP/2 server (h2c with prior
+  knowledge, `remote.NewHandler`), the server end (`Hub`, an
+  `http.Handler`) the WebSocket server and the HTTP/2 client
+  (`Hub.Workspace` is `remote.Dial` over an `http.ClientConn` from
+  `Transport.NewClientConn`; a `Transport`'s pool dials more than once
+  and cannot be given one connection). It ships no authentication: the
+  hub asks the application's `Enrollment` for an upgrade's workspace
+  before the 101, and the workspace end's credentials are in the
+  application's HTTP client or header (`WithHTTPClient`,
+  `WithHeader`). The scopes are the workspace end's (`WithScopes`,
+  required). One `remote.Handler` serves every reconnect, so sessions
+  outlive a drop shorter than the lease; HTTP/2 pings notice a dead
+  tunnel at both ends. Its connection window is all its streams'
+  windows, and its defaults for remote's bounds keep the streams the
+  server can hold open under `MaxStreams` (the arithmetic is on that
+  constant), so no unread output starves a renewal; keep both true
+  when changing either. Offered MCP servers are not carried.
 - Planned, beside them: a container starter.
 - Releases are lockstep, as agenttool's: the root and every nested
   module at one version from one commit, a nested module requiring the
@@ -63,11 +90,12 @@ interface.
 ## Rules the interface keeps
 
 Every backend, present and planned, holds to these; the tests check
-them, and a new backend runs the same tables (`backends` in
-`confine_test.go`, `starters` in `start_test.go`). A backend in a
-package that imports the root (remote) joins them from package
-`agentworkspace_test` through `AddBackend` and `AddStarter`, as
-`remote_backend_test.go` does.
+them, and a new backend runs the same tables: `workspacetest.Run` for
+a `Workspace` and `workspacetest.RunStarter` for a `Starter`, called
+from the backend's own tests, as the root's `confine_test.go` and
+`start_test.go`, remote's `conformance_test.go` and each nested
+module's do. A table belongs in `workspacetest` when every backend
+keeps its rule; one about Local alone stays in the root's tests.
 
 - A name that leaves the workspace is `ErrOutside`, however it leaves:
   absolute, `..`, or a link out, read, written, removed or used as a
@@ -117,10 +145,10 @@ workflow shape (minimum and stable Go; lint on Go 1.26.x with
 `check-latest`, since staticcheck cannot read go1.27.2's export data
 yet), a `CHANGELOG.md` in Keep a Changelog form, and annotated `v*`
 tags whose message becomes the release notes (`mcpworkspace/vX.Y.Z`
-for the nested module, written by the same `make release`). `make
-check` must pass before any commit; in this workspace run it as
-`GOWORK=off GOFLAGS=-mod=readonly make check`, and run `make extracted`
-before pushing a change to `mcpworkspace`.
+and `tunnel/vX.Y.Z` for the nested modules, written by the same `make
+release`). `make check` must pass before any commit; in this workspace
+run it as `GOWORK=off GOFLAGS=-mod=readonly make check`, and run `make
+extracted` before pushing a change to a nested module.
 
 Tests are table-driven and offline. They make real files, links,
 FIFOs and processes under `t.TempDir()`; a process test bounds its

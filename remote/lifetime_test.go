@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -264,7 +265,7 @@ func TestAnotherSessionCannotTouchAProcess(t *testing.T) {
 	l, _ := newLocal(t, pathEnv())
 	_, url := serve(t, l, WithAuthenticator(tokens()))
 	ctx := context.Background()
-	mine := dial(t, url, WithBearerToken(tokAll))
+	mine := dial(t, url, withToken(tokAll))
 	p, err := agentworkspace.Start(ctx, mine, agentworkspace.Command{Args: []string{"sleep", "30"}})
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +273,7 @@ func TestAnotherSessionCannotTouchAProcess(t *testing.T) {
 	defer p.Close()
 	route := p.(*process).route
 	pid := route[strings.LastIndex(route, "/")+1:]
-	otherWS := dial(t, url, WithBearerToken(tokAll))
+	otherWS := dial(t, url, withToken(tokAll))
 	q, err := agentworkspace.Start(ctx, otherWS, agentworkspace.Command{Args: []string{"true"}}) // opens its session
 	if err != nil {
 		t.Fatal(err)
@@ -324,4 +325,36 @@ func TestTheStartsContextIsWhatWaitReports(t *testing.T) {
 			t.Errorf("Wait = %d, %v; want -1, DeadlineExceeded", status, err)
 		}
 	})
+}
+
+// cut fails every request once it is set, as a network that went away.
+type cut struct {
+	off  *atomic.Bool
+	next http.RoundTripper
+}
+
+func (c cut) RoundTrip(r *http.Request) (*http.Response, error) {
+	if c.off.Load() {
+		return nil, errors.New("cut")
+	}
+	return c.next.RoundTrip(r)
+}
+
+// The handler's Close waits for a session that is ending because it
+// lapsed, though the lapse took it out of the table first.
+func TestClosingTheHandlerWaitsForALapse(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	const lease = 300 * time.Millisecond
+	h, url := serve(t, l, WithInsecureNoAuth(), WithLease(lease))
+	var off atomic.Bool
+	ws := dial(t, url, WithHTTPClient(&http.Client{Transport: cut{&off, http.DefaultTransport}}))
+	// It ignores its input's end and SIGTERM, so its end takes both
+	// graces.
+	_, pgid := alone(t, ws, context.Background(), "trap '' TERM; ")
+	off.Store(true)
+	time.Sleep(lease + 300*time.Millisecond) // lapsed, and ending
+	within(t, 15*time.Second, "the handler's close", func() { h.Close() })
+	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Errorf("a lapsing session's process runs on after the handler's Close: %v", err)
+	}
 }

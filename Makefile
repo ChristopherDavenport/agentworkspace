@@ -10,7 +10,7 @@ MODULE := $(shell GOWORK=off $(GO) list -m)
 # dependencies out of it. Each requires the root at exactly the version
 # the whole repository is released at, and carries a replace pointing
 # at the tree; see replaces below.
-SUBMODULES = mcpworkspace
+SUBMODULES = mcpworkspace tunnel
 
 .PHONY: build deps replaces test vet fmt tidy tidy-check lint vuln check \
 	extracted guard-test release-guard release release-commit clean
@@ -19,9 +19,10 @@ build:
 	$(GO) build ./...
 	@for m in $(SUBMODULES); do (cd $$m && $(GO) build ./...) || exit 1; done
 
-# The root module must build from the standard library alone, and so
-# must mcpworkspace/wire, which a program that only relays the methods
-# imports without the MCP SDK.
+# The root module must build from the standard library alone (tunnel's
+# WebSocket library and mcpworkspace's SDK stay in their modules), and
+# so must mcpworkspace/wire, which a program that only relays the
+# methods imports without the MCP SDK.
 deps:
 	@deps=$$($(GO) list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... \
 	  | grep -v '^github.com/ChristopherDavenport/agentworkspace' || true); \
@@ -105,7 +106,7 @@ RELEASE_TAGS = $(VERSION) $(patsubst %,%/$(VERSION),$(SUBMODULES))
 #
 # Every module is released at one version, from one commit, and a nested
 # module requires the root at exactly that version, so a consumer who
-# takes only mcpworkspace at vX.Y.Z gets root vX.Y.Z, the commit it was
+# takes only mcpworkspace (or tunnel) at vX.Y.Z gets root vX.Y.Z, the commit it was
 # built and tested against. The first thing this does is point every
 # nested module at VERSION, a version that does not exist yet; the
 # replace makes that resolve to the tree.
@@ -140,8 +141,9 @@ release: release-commit
 # untracked behind for the clean-tree gate to trip over next time.
 #
 # GitHub creates no events for a push of more than three tags, so the
-# release workflow would silently never run; a third nested module means
-# choosing between the atomic push and creating the releases with gh.
+# release workflow would silently never run. The root, mcpworkspace and
+# tunnel are three; a third nested module means choosing between the
+# atomic push and creating the releases with gh.
 release-commit:
 	@test -n "$(VERSION)" || { echo "usage: make release VERSION=vX.Y.Z"; exit 1; }
 	@test $(words $(RELEASE_TAGS)) -le 3 || { echo "$(words $(RELEASE_TAGS)) tags would be pushed at once, and GitHub creates no events for a push of more than three"; exit 1; }

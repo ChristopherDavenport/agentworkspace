@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.6 - 2026-10-25
 
 - Added: package `workspacetest`, in the root module and on the
   standard library alone: the conformance tables every backend runs,

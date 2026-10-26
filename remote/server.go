@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -166,17 +167,19 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 	m.HandleFunc("PUT "+routeFile, h.need(ScopeWrite, typed(rawType, h.transfer(h.write))))
 	m.HandleFunc("DELETE "+routeFile, h.need(ScopeWrite, h.remove))
 	m.HandleFunc("POST "+routeExec, h.need(ScopeExec, typed(jsonType, h.transfer(h.exec))))
-	m.HandleFunc("POST "+routeSessions, h.need(ScopeExec, typed(jsonType, h.openSession)))
-	m.HandleFunc("POST "+routeSessions+"/{sid}/renew", h.need(ScopeExec, typed(jsonType, h.renewSession)))
-	m.HandleFunc("DELETE "+routeSessions+"/{sid}", h.need(ScopeExec, h.closeSession))
+	m.HandleFunc("GET "+routeServers, h.need(ScopeServers, h.servers))
+	m.HandleFunc("POST "+routeSessions, h.needAny(sessionScopes, typed(jsonType, h.openSession)))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/renew", h.needAny(sessionScopes, typed(jsonType, h.renewSession)))
+	m.HandleFunc("DELETE "+routeSessions+"/{sid}", h.needAny(sessionScopes, h.closeSession))
 	m.HandleFunc("POST "+routeSessions+"/{sid}/processes", h.need(ScopeExec, typed(jsonType, h.start)))
-	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/stdin", h.need(ScopeExec, typed(rawType, h.stdin)))
-	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/stdout", h.need(ScopeExec, h.stdout))
-	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/stderr", h.need(ScopeExec, h.stderr))
-	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/wait", h.need(ScopeExec, h.wait))
-	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/signal", h.need(ScopeExec, typed(jsonType, h.signal)))
-	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/cancel", h.need(ScopeExec, typed(jsonType, h.cancel)))
-	m.HandleFunc("DELETE "+routeSessions+"/{sid}/processes/{pid}", h.need(ScopeExec, h.closeProcess))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/servers/{name}/start", h.need(ScopeServers, typed(jsonType, h.startServer)))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/stdin", h.needAny(sessionScopes, typed(rawType, h.stdin)))
+	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/stdout", h.needAny(sessionScopes, h.stdout))
+	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/stderr", h.needAny(sessionScopes, h.stderr))
+	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/wait", h.needAny(sessionScopes, h.wait))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/signal", h.needAny(sessionScopes, typed(jsonType, h.signal)))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/cancel", h.needAny(sessionScopes, typed(jsonType, h.cancel)))
+	m.HandleFunc("DELETE "+routeSessions+"/{sid}/processes/{pid}", h.needAny(sessionScopes, h.closeProcess))
 	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, wireError{Code: codeNotExist, Message: "no such route"})
 	})
@@ -339,11 +342,27 @@ func (h *Handler) transfer(f http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// sessionScopes are the scopes a session's routes take, either one: a
+// process's routes then take the scope it was started under.
+var sessionScopes = []Scope{ScopeExec, ScopeServers}
+
 // need serves f to a principal holding s, on a handler not closed.
 func (h *Handler) need(s Scope, f http.HandlerFunc) http.HandlerFunc {
+	return h.needAny([]Scope{s}, f)
+}
+
+// needAny serves f to a principal holding any of scopes, on a handler
+// not closed.
+func (h *Handler) needAny(scopes []Scope, f http.HandlerFunc) http.HandlerFunc {
+	names := make([]string, len(scopes))
+	for i, s := range scopes {
+		names[i] = "the " + string(s)
+	}
+	refusal := "remote: the principal lacks " + strings.Join(names, " or ") + " scope"
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !principalOf(r).Has(s) {
-			writeError(w, wireError{Code: codeForbidden, Message: fmt.Sprintf("remote: the principal lacks the %s scope", s)})
+		p := principalOf(r)
+		if !slices.ContainsFunc(scopes, p.Has) {
+			writeError(w, wireError{Code: codeForbidden, Message: refusal})
 			return
 		}
 		if h.isClosed() {
@@ -387,13 +406,15 @@ func decode(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 	p := principalOf(r)
 	_, start := h.ws.(agentworkspace.Starter)
+	_, servers := h.ws.(agentworkspace.ServerProvider)
 	_, links := h.ws.FS().(fs.ReadLinkFS)
 	reply := infoReply{
-		Root:   h.ws.Root(),
-		Served: descriptorOf(h.ws.Descriptor()),
-		Start:  start,
-		Links:  links,
-		Scopes: p.Scopes,
+		Root:    h.ws.Root(),
+		Served:  descriptorOf(h.ws.Descriptor()),
+		Start:   start,
+		Servers: servers && p.Has(ScopeServers),
+		Links:   links,
+		Scopes:  p.Scopes,
 		Limits: limits{
 			LeaseMs:        h.lease.Milliseconds(),
 			MaxProcesses:   h.maxProcesses,

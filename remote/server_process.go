@@ -62,6 +62,11 @@ func (s *session) end() {
 
 // proc is a process a session started.
 type proc struct {
+	// scope is the scope it was started under, which its routes take:
+	// exec for a command's start, servers for a server's.
+	scope Scope
+	// server is the server it is, "" for a command.
+	server  string
 	p       agentworkspace.Process
 	cancel  context.CancelFunc // ends it as its context's end does
 	stderr  *stderrBuffer      // nil when the start did not ask for it
@@ -116,9 +121,15 @@ func (k *keyRing) add(key string) {
 	k.order = append(k.order, key)
 }
 
+// openSession opens a session for a principal that can start anything
+// in it: one holding exec, of a Starter, or servers, of a
+// ServerProvider.
 func (h *Handler) openSession(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.ws.(agentworkspace.Starter); !ok {
-		h.fail(w, fmt.Errorf("a %s workspace cannot start a process: %w", h.ws.Descriptor().Kind, errors.ErrUnsupported))
+	p := principalOf(r)
+	_, starter := h.ws.(agentworkspace.Starter)
+	_, provider := h.ws.(agentworkspace.ServerProvider)
+	if !(starter && p.Has(ScopeExec)) && !(provider && p.Has(ScopeServers)) {
+		h.fail(w, fmt.Errorf("a %s workspace starts nothing this principal may start: %w", h.ws.Descriptor().Kind, errors.ErrUnsupported))
 		return
 	}
 	var req struct{}
@@ -230,7 +241,8 @@ func (h *Handler) closeSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // procOf is r's process in r's session, answering the refusal itself
-// for one the session did not start.
+// for one the session did not start, or one started under a scope the
+// principal does not hold.
 func (h *Handler) procOf(w http.ResponseWriter, r *http.Request) *proc {
 	s := h.sessionOf(w, r)
 	if s == nil {
@@ -239,13 +251,28 @@ func (h *Handler) procOf(w http.ResponseWriter, r *http.Request) *proc {
 	s.mu.Lock()
 	sp := s.procs[r.PathValue("pid")]
 	s.mu.Unlock()
-	if sp == nil {
+	switch {
+	case sp == nil:
 		writeError(w, wireError{Code: codeNoProcess, Message: ErrNoProcess.Error()})
+		return nil
+	case !mayUse(w, r, sp):
+		return nil
 	}
 	return sp
 }
 
-// start starts a process in the session, under a context of its own
+// mayUse reports whether r's principal holds the scope sp was started
+// under, answering the refusal itself when it does not: a process a
+// command's start began is exec's, and a server is servers'.
+func mayUse(w http.ResponseWriter, r *http.Request, sp *proc) bool {
+	if principalOf(r).Has(sp.scope) {
+		return true
+	}
+	writeError(w, wireError{Code: codeForbidden, Message: fmt.Sprintf("remote: the process was started under the %s scope, which the principal lacks", sp.scope)})
+	return false
+}
+
+// start starts a command in the session, under a context of its own
 // that the session's end, and a cancel, end.
 func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 	s := h.sessionOf(w, r)
@@ -256,29 +283,76 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, MaxRequestBytes, &req) || !validTimeout(w, req.TimeoutMs) {
 		return
 	}
-	if req.Key != "" && !validKey(req.Key) {
+	cmd := agentworkspace.Command{Args: req.Args, Dir: req.Dir, Env: req.Env, Timeout: time.Duration(req.TimeoutMs) * time.Millisecond}
+	h.launch(w, s, req.Key, req.Stderr, &proc{scope: ScopeExec}, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {
+		if stderr != nil {
+			cmd.Stream = stderr
+		}
+		return agentworkspace.Start(ctx, h.ws, cmd)
+	})
+}
+
+// startServer starts the server the route names in the session, as
+// start starts a command: the served workspace's StartServer starts
+// it, so an Offering's OutputFilter reads its output here, before any
+// of it is sent.
+func (h *Handler) startServer(w http.ResponseWriter, r *http.Request) {
+	s := h.sessionOf(w, r)
+	if s == nil {
+		return
+	}
+	var req serverStartRequest
+	if !decode(w, r, MaxRequestBytes, &req) {
+		return
+	}
+	provider, ok := h.ws.(agentworkspace.ServerProvider)
+	if !ok {
+		h.fail(w, fmt.Errorf("a %s workspace offers no servers: %w", h.ws.Descriptor().Kind, errors.ErrUnsupported))
+		return
+	}
+	name := r.PathValue("name")
+	if !agentworkspace.ValidServerName(name) {
+		writeError(w, wireError{Code: codeNoServer, Message: agentworkspace.ErrNoServer.Error()})
+		return
+	}
+	h.launch(w, s, req.Key, req.Stderr, &proc{scope: ScopeServers, server: name}, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {
+		return provider.StartServer(ctx, name, stderr)
+	})
+}
+
+// launch starts sp in s with run, which is given the process's context
+// and where its standard error goes (nil when the start did not ask for
+// it), and answers its id: key, or one of the server's choosing. A key
+// already running is the same start again, answered with the same
+// process when it is a start of the same kind, exec's of a command or
+// servers' of the same server.
+func (h *Handler) launch(w http.ResponseWriter, s *session, key string, stderr bool, sp *proc, run func(context.Context, io.Writer) (agentworkspace.Process, error)) {
+	if key != "" && !validKey(key) {
 		writeError(w, wireError{Code: codeInvalid, Message: "a start key is 16 to 64 letters and digits"})
 		return
 	}
-	cmd := agentworkspace.Command{Args: req.Args, Dir: req.Dir, Env: req.Env, Timeout: time.Duration(req.TimeoutMs) * time.Millisecond}
-	sp := &proc{exited: make(chan struct{})}
-	if req.Stderr {
+	sp.exited = make(chan struct{})
+	var stream io.Writer
+	if stderr {
 		sp.stderr = newStderrBuffer()
-		cmd.Stream = sp.stderr
+		stream = sp.stderr
 	}
 	// The session is held across the start, which returns at once, so
 	// the count and the session's end see every process.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	switch {
+	switch prior := s.procs[key]; {
 	case s.ended:
 		writeError(w, wireError{Code: codeNoSession, Message: ErrNoSession.Error()})
 		return
-	case s.procs[req.Key] != nil:
-		// The same start again: its reply was lost.
-		writeJSON(w, startedReply{ID: req.Key})
+	case prior != nil && (prior.scope != sp.scope || prior.server != sp.server):
+		writeError(w, wireError{Code: codeInvalid, Message: "the key names a start of something else"})
 		return
-	case s.closed.set[req.Key]:
+	case prior != nil:
+		// The same start again: its reply was lost.
+		writeJSON(w, startedReply{ID: key})
+		return
+	case s.closed.set[key]:
 		writeError(w, wireError{Code: codeNoProcess, Message: "the process this key started is closed"})
 		return
 	case len(s.procs) >= h.maxProcesses:
@@ -286,7 +360,7 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
-	p, err := agentworkspace.Start(ctx, h.ws, cmd)
+	p, err := run(ctx, stream)
 	if err != nil {
 		cancel()
 		h.fail(w, err)
@@ -302,12 +376,31 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 		}
 		close(sp.exited)
 	}()
-	id := req.Key
+	id := key
 	if id == "" {
 		id = rand.Text()
 	}
 	s.procs[id] = sp
 	writeJSON(w, startedReply{ID: id})
+}
+
+// servers lists the servers the served workspace offers, in its order.
+func (h *Handler) servers(w http.ResponseWriter, r *http.Request) {
+	provider, ok := h.ws.(agentworkspace.ServerProvider)
+	if !ok {
+		h.fail(w, fmt.Errorf("a %s workspace offers no servers: %w", h.ws.Descriptor().Kind, errors.ErrUnsupported))
+		return
+	}
+	list, err := provider.Servers(r.Context())
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	reply := serverList{Servers: make([]serverInfo, 0, len(list))}
+	for _, sv := range list {
+		reply.Servers = append(reply.Servers, serverInfo{Name: sv.Name, Description: sv.Description})
+	}
+	writeJSON(w, reply)
 }
 
 // take claims one of a process's streams for the request, refusing (and
@@ -470,13 +563,16 @@ func (h *Handler) closeProcess(w http.ResponseWriter, r *http.Request) {
 	pid := r.PathValue("pid")
 	s.mu.Lock()
 	sp := s.procs[pid]
-	if sp != nil {
+	if sp != nil && principalOf(r).Has(sp.scope) {
 		delete(s.procs, pid)
 		s.closed.add(pid)
 	}
 	s.mu.Unlock()
-	if sp == nil {
+	switch {
+	case sp == nil:
 		writeError(w, wireError{Code: codeNoProcess, Message: ErrNoProcess.Error()})
+		return
+	case !mayUse(w, r, sp):
 		return
 	}
 	sp.close()

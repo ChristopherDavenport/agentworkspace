@@ -86,6 +86,7 @@ const (
 	routeFile     = "/v1/fs/file"
 	routeExec     = "/v1/exec"
 	routeSessions = "/v1/sessions"
+	routeServers  = "/v1/servers"
 )
 
 // descriptor is an agentworkspace.Descriptor on the wire.
@@ -124,6 +125,9 @@ type infoReply struct {
 	Served descriptor `json:"served"`
 	// Start says the served workspace is an agentworkspace.Starter.
 	Start bool `json:"start"`
+	// Servers says it is an agentworkspace.ServerProvider, told only to
+	// a principal holding servers.
+	Servers bool `json:"servers,omitempty"`
 	// Links says its FS is an fs.ReadLinkFS.
 	Links  bool     `json:"links"`
 	Scopes []Scope  `json:"scopes"`
@@ -228,6 +232,25 @@ type startRequest struct {
 // validKey reports whether key can name a start: an id, long enough
 // that the client chose it at random.
 func validKey(key string) bool { return len(key) >= 16 && validID(key) }
+
+// serverStartRequest is a server's start: the server is the route's.
+// Stderr and Key are startRequest's.
+type serverStartRequest struct {
+	Stderr bool   `json:"stderr,omitempty"`
+	Key    string `json:"key,omitempty"`
+}
+
+// serverInfo is one server the servers route lists.
+type serverInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// serverList is the servers route's reply, in the served workspace's
+// order.
+type serverList struct {
+	Servers []serverInfo `json:"servers"`
+}
 
 type startedReply struct {
 	ID string `json:"id"`

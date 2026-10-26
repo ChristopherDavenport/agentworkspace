@@ -50,6 +50,7 @@ const (
 	codeLimit           = "limit"
 	codeNoSession       = "no_session"
 	codeNoProcess       = "no_process"
+	codeNoServer        = "no_server"
 	codeMediaType       = "media_type"
 	codeOther           = "other"
 )
@@ -75,6 +76,7 @@ var codes = []struct {
 	{codeLimit, ErrLimit, http.StatusRequestEntityTooLarge},
 	{codeNoSession, ErrNoSession, http.StatusNotFound},
 	{codeNoProcess, ErrNoProcess, http.StatusNotFound},
+	{codeNoServer, agentworkspace.ErrNoServer, http.StatusNotFound},
 	// A body of another type than the route's: the client's mistake,
 	// as an invalid name is.
 	{codeMediaType, fs.ErrInvalid, http.StatusUnsupportedMediaType},

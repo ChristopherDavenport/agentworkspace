@@ -58,8 +58,13 @@ func dial(t *testing.T, url string, opts ...DialOption) Workspace {
 }
 
 func clientOf(ws Workspace) *Client {
-	if s, ok := ws.(*StarterClient); ok {
-		return s.Client
+	switch c := ws.(type) {
+	case *StarterClient:
+		return c.Client
+	case *ServerClient:
+		return c.Client
+	case *StarterServerClient:
+		return c.Client
 	}
 	return ws.(*Client)
 }

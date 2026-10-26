@@ -15,14 +15,29 @@ const (
 	ScopeRead Scope = "read"
 	// ScopeWrite writes and removes files.
 	ScopeWrite Scope = "write"
-	// ScopeExec runs anything: Exec, every session and process route,
-	// and the workspace's environment, which the info route gives only
-	// to a principal holding it. It is never implied by read or write.
+	// ScopeExec runs anything: Exec, a process's start, the sessions,
+	// the routes of the processes it started, and the workspace's
+	// environment, which the info route gives only to a principal
+	// holding it. It is never implied by read, write or servers.
 	ScopeExec Scope = "exec"
+	// ScopeServers starts the MCP servers the workspace offers (an
+	// agentworkspace.ServerProvider): it lists them, starts one by name,
+	// opens and renews the sessions they run in, and uses the routes of
+	// the processes it started so, and nothing else. It runs no command
+	// of the client's: no Exec, no process's start, no route of a
+	// process exec started, and no environment. It does not imply exec,
+	// nor exec it.
+	//
+	// It is how a host grants a client the servers it offers without
+	// granting it commands, and the only safe way to offer servers that
+	// hold secrets: a client that may also run commands as the servers'
+	// user can read a running server's environment from /proc (see
+	// agentworkspace.Offer).
+	ScopeServers Scope = "servers"
 )
 
 // allScopes are every scope a Handler checks, the insecure principal's.
-func allScopes() []Scope { return []Scope{ScopeRead, ScopeWrite, ScopeExec} }
+func allScopes() []Scope { return []Scope{ScopeRead, ScopeWrite, ScopeExec, ScopeServers} }
 
 // Principal is who a request is from, as an Authenticator resolved it,
 // and what they may do. A session, and every process started in it,

@@ -54,8 +54,9 @@ func ValidServerName(name string) bool {
 // to a server it started from a command. It is an interface of its own,
 // as Starter is, so that a workspace offering none is still a
 // Workspace; a caller asks for it with a type assertion. A client of a
-// workspace elsewhere (mcpworkspace's) implements it too, without being
-// a Workspace, which is why it does not embed one.
+// workspace elsewhere implements it too: mcpworkspace's, without being
+// a Workspace, which is why it does not embed one, and remote's, when
+// its principal holds the servers scope.
 //
 // Which of the servers a session uses is the program's to decide: a
 // workspace offering a server does not make the program connect to it.
@@ -91,11 +92,13 @@ type ServerProvider interface {
 // An Offering embeds ws, so its Start and Exec run whatever they are
 // given, unfiltered, as the same user as the servers; a client of a
 // workspace that runs its commands (one served through mcpworkspace's
-// NewProcesses answers both servers.start and process.start) can read
-// a running server's environment, its secrets among it, from
-// /proc/<pid>/environ. Offer secret-holding servers from a workspace
-// that runs nothing else for the client, as dax's box host does with
-// each server a unit in its own container.
+// NewProcesses answers both servers.start and process.start, and one
+// served through remote to a principal holding exec runs its Exec and
+// Start) can read a running server's environment, its secrets among
+// it, from /proc/<pid>/environ. Offer secret-holding servers from a
+// workspace that runs nothing else for the client, as dax's box host
+// does with each server a unit in its own container, or serve the
+// Offering through remote with the servers scope and not exec.
 func Offer(ws Starter, servers []OfferedServer, opts ...OfferOption) (*Offering, error) {
 	if ws == nil {
 		return nil, errors.New("agentworkspace: Offer of no workspace")

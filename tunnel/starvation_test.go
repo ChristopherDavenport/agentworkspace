@@ -3,6 +3,7 @@ package tunnel
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -144,12 +145,12 @@ func TestUnreadOutputStarvesNothing(t *testing.T) {
 	}
 }
 
-// With the server holding every stream its bounds allow open, the
-// streams ReservedStreams keeps are spare: a session's renewals get
-// through for several leases, and so do a Signal and a Stat. The
-// bounds are one process and the transfers to the budget, each
-// transfer a write whose body never ends; transfers past the bound are
-// refused at once and hold nothing.
+// With the server holding its bounds' streams open, the streams
+// ReservedStreams keeps are spare: a session's renewals get through for
+// several leases, and so do a Signal and a Stat. The bounds are one
+// process and the transfers to the budget, each transfer a write whose
+// body never ends; transfers past the bound are refused at once and
+// hold nothing. The bodies fail at the end, so nothing is written.
 func TestTheReservedStreamsAreSpare(t *testing.T) {
 	const (
 		lease = time.Second
@@ -160,14 +161,14 @@ func TestTheReservedStreamsAreSpare(t *testing.T) {
 	r.serve(t, local(t, t.TempDir(), pathEnv()), WithScopes(allScopes...), bearer(tokA), fast,
 		WithHandlerOptions(remote.WithLease(lease), remote.WithMaxSessions(1), remote.WithMaxProcesses(1), remote.WithMaxTransfers(transfers)))
 	ws := r.workspace(t, "a")
-	p, _, pid := pidOf(t, ws.(agentworkspace.Starter), "echo $$; exec sleep 60")
+	p, _, pid := pidOf(t, ws.(agentworkspace.Starter), "echo $$; exec cat")
 
 	cc := r.current("a").cc
 	var refused atomic.Int32
 	var writers []*io.PipeWriter
 	defer func() {
 		for _, w := range writers {
-			w.Close()
+			w.CloseWithError(errors.New("the test is over"))
 		}
 	}()
 	for i := range transfers + extra {

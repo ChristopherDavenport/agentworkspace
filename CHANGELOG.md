@@ -49,22 +49,25 @@ versions may break the API.
   tunnel keeps for the requests answered at once.
 - Changed (breaking): `tunnel.Serve` enforces the stream arithmetic
   its guarantee rests on (no unread output stops a renewal, a wait or
-  a start): it refuses remote bounds, given through `WithHandlerOptions`, that would
-  let the server hold more than `MaxStreams − ReservedStreams` streams
-  open (the sessions its one principal may have × their processes × 4,
-  plus the transfers), where before it served them and gave the
+  a start): it refuses remote bounds, given through
+  `WithHandlerOptions`, that would let the server hold more than
+  `MaxStreams − ReservedStreams` streams open (the sessions its one
+  principal may have × their processes × 4, plus the transfers), where before it served them and gave the
   guarantee up. One bound is raised by lowering another. `MaxStreams`
   and the windows are not raised to fit instead: the hub's windows are
   its own, and assume the workspace end allows `MaxStreams` streams.
 - Changed: `remote` keeps what a process and a session hold within its
   bounds whatever the client sends. A process being closed counts
-  against `WithMaxProcesses` until it has exited, and a session being
-  closed or lapsed against `WithMaxSessions` and
-  `WithMaxSessionsPerPrincipal` until it has ended. A process's input
-  stream is cut as its close begins, and its output, standard error
-  streams once it has exited, read or not. One wait is served for a
-  process at a time: another while one waits is refused (`invalid`),
-  and a client asks again, as `remote.Client` does.
+  against `WithMaxProcesses` until its streams have all ended, and a
+  session being closed or lapsed against `WithMaxSessions` and
+  `WithMaxSessionsPerPrincipal` until it has ended, its closes in
+  flight with it. A closed process's streams are cut, read or not: its
+  input's as the close begins, its output's once it has exited, and
+  its standard error's, sent to its end first, a grace after that. One
+  wait is served for a process at a time: another while one waits is
+  refused (`invalid`), and a client asks again, as `remote.Client`
+  does. A program that wraps the handler's `ResponseWriter` gives the
+  wrapper an `Unwrap`, as `http.ResponseController` asks.
 
 ## v0.0.7 - 2026-10-26
 

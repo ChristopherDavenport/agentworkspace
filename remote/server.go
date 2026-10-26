@@ -145,6 +145,13 @@ func WithMaxTransfers(n int) Option { return func(h *Handler) { h.maxTransfers =
 
 // NewHandler serves ws. It refuses a nil workspace, a bound that is not
 // positive, and both an authenticator and WithInsecureNoAuth.
+//
+// A program that wraps the handler's http.ResponseWriter (middleware
+// that logs or measures) gives the wrapper an Unwrap method returning
+// the server's, as http.ResponseController asks: through it the
+// handler flushes a stream, and cuts a closed process's streams by
+// their deadlines, which keeps what a process holds within its bounds
+// whatever its client does.
 func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 	if ws == nil {
 		return nil, errors.New("remote: no workspace to serve")

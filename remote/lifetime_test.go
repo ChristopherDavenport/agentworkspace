@@ -271,7 +271,6 @@ func TestAnotherSessionCannotTouchAProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
-	go p.Wait() // the client's own wait
 	route := p.(*process).route
 	pid := route[strings.LastIndex(route, "/")+1:]
 	otherWS := dial(t, url, withToken(tokAll))
@@ -441,5 +440,30 @@ func TestOneWaitAtATime(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if code := wait(200 * time.Millisecond); code != codeInvalid {
 		t.Errorf("a second wait: %q, want %q", code, codeInvalid)
+	}
+}
+
+// A process's standard error reaches its Stream to the end when it is
+// closed: what it writes on its way out is sent before the stream is
+// cut. Many times over, as losing it is a race. (The first line, waited
+// for, has the stream open before the close.)
+func TestStandardErrorOutlivesAClose(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	_, url := serve(t, l, WithInsecureNoAuth())
+	ws := dial(t, url)
+	for i := range 50 {
+		var stream syncBuffer
+		p, err := agentworkspace.Start(context.Background(), ws, agentworkspace.Command{Args: []string{"sh", "-c", "echo hi >&2; read x; echo bye >&2"}, Stream: &stream})
+		if err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for stream.String() == "" && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		within(t, 10*time.Second, "the close", func() { p.Close() })
+		if got := stream.String(); got != "hi\nbye\n" {
+			t.Fatalf("close %d: the stream has %q, want %q", i, got, "hi\nbye\n")
+		}
 	}
 }

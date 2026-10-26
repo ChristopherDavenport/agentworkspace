@@ -25,22 +25,34 @@ versions may break the API.
   type assertion to `Starter` or `ServerProvider` tells the truth in
   every combination. A name not offered is `agentworkspace.ErrNoServer`
   on the client (the wire code `no_server`). `servers` and `exec` imply
-  neither the other, so read and servers alone grant a client the
-  servers and no command, the safe way to offer servers that hold
-  secrets. `tunnel.WithScopes` takes `remote.ScopeServers`; its stream
+  neither the other, and `servers` needs no `read`: the info route
+  answers it, so a principal holding `servers` alone dials, and its
+  client lists and starts the servers and reads no file (its `FS`,
+  `WriteFile` and `Remove` are `ErrForbidden`) and runs no command, the
+  way to offer servers that hold secrets. `tunnel.WithScopes` takes `remote.ScopeServers`; its stream
   arithmetic is unchanged, a server being one of its session's
   processes. `workspacetest.RunServerProvider` (`ServerProvider`) is
   the conformance table every `ServerProvider` runs: the list, the
   pipes, the workspace a server runs in, `ErrNoServer`, the lifetimes,
   standard error, and secrets kept out of the output; an `Offering` over
-  `Local`, over `remote` and over `tunnel` run it.
+  `Local`, over `mcpworkspace`'s connection, over `remote` and over
+  `tunnel` run it. A test in `mcpworkspace` holds one MCP server to one
+  interface (the same `initialize`, `tools/list` and `tools/call`),
+  offered and as a command, here, over `mcpworkspace` and over `remote`.
 - Changed: `remote`'s session routes take `exec` or `servers`, either
   one, where they took `exec`, and a process's routes take the scope it
   was started under: a command's start is `exec`'s, a server's
   `servers'`, and a principal holding the one is refused
-  (`ErrForbidden`) a process the other started. The info route says
-  whether servers are offered to a principal holding `servers`, and
-  `WithInsecureNoAuth`'s principal holds `servers` too.
+  (`ErrForbidden`) a process the other started. A session is still its
+  principal's: its close, or its lapse, ends every process in it,
+  whichever scope started each. The info route answers `read` or
+  `servers`, and its `start` and `servers` flags each say what the asking
+  principal may start: `start` is now false for a principal without
+  `exec`. `WithInsecureNoAuth`'s principal holds `servers` too.
+- Changed: `mcpworkspace.StartServer` refuses a name
+  `agentworkspace.ValidServerName` refuses with an error that is
+  `agentworkspace.ErrNoServer`, as `Offering` and `remote` do, and
+  `servers.start` answers such a name with `wire.CodeNoServer`.
 
 ## v0.0.6 - 2026-10-25
 

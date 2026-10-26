@@ -138,7 +138,7 @@ read a running server's environment from `/proc/<pid>/environ`. Offer
 secret-holding servers from a workspace that runs nothing else for the
 client, as dax's box host does, each server a unit in its own
 container, or serve the `Offering` through `remote` (or `tunnel`) with
-the `servers` scope and not `exec`.
+the `servers` scope alone.
 
 ## Over MCP: mcpworkspace
 
@@ -244,8 +244,12 @@ which a client without it is not told. `exec` is never implied by `read`
 or `write`. A served `ServerProvider`'s MCP servers take a scope of
 their own, `servers`: the client lists them and starts one by name
 (`Servers`, `StartServer`), each a process of its session, and runs no
-command; `servers` and `exec` imply neither the other, and a process's
-routes take the scope it was started under. The server starts it, so an
+command; `servers` and `exec` imply neither the other, `servers` needs
+no `read` to dial (a client holding it alone reads no file: its
+`FS`, `WriteFile` and `Remove` are `ErrForbidden`), and a process's
+routes take the scope it was started under. A session is its
+principal's, so its close ends every process in it, whichever scope
+started it. The server starts it, so an
 `Offering`'s `OutputFilter` reads its output before a byte is sent, and
 its secrets never cross the wire. `Dial`'s client is a `Starter` exactly
 when the server can start and the principal holds `exec`, and a
@@ -301,9 +305,9 @@ the lease ends the processes, as over HTTP. A second connection for a
 connected name replaces the first. HTTP/2 pings notice a dead tunnel at
 both ends; a WebSocket message, the workspaces a hub holds and the
 streams a tunnel carries are bounded. A workspace's offered MCP servers
-cross as they do over HTTP: `WithScopes(remote.ScopeRead,
-remote.ScopeServers)` grants the server the servers alone, its
-`Workspace` a `ServerProvider` and no `Starter`. The package doc has the
+cross as they do over HTTP: `WithScopes(remote.ScopeServers)` grants
+the server the servers alone, no file and no command, its `Workspace`
+a `ServerProvider` and no `Starter`. The package doc has the
 details.
 
 ## Planned

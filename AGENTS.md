@@ -33,7 +33,9 @@ interface.
   authentication: every request is put to the program's
   `Authenticator`, which names its `Principal` and scopes (`read`,
   `write`, `exec`, `servers`; `exec` and `servers` imply neither the
-  other, and a process's routes take the scope it was started under),
+  other, `servers` needs no `read` to dial, and a process's routes take
+  the scope it was started under; a session is its principal's, and
+  its close ends every process in it),
   and the client's credentials are in the
   `http.Client` the program gives `WithHTTPClient` (no authenticator
   refuses everything unless `WithInsecureNoAuth`, which answers a
@@ -132,9 +134,19 @@ keeps its rule; one about Local alone stays in the root's tests.
   client. A backend that carries a `ServerProvider` across a wire
   (mcpworkspace's server methods, remote's `servers` routes) starts the
   server on the serving side, so the filter runs there and no secret
-  crosses, and lets a host grant the servers apart from commands, as
-  remote's `servers` scope does without `exec` (mcpworkspace's
-  `NewProcesses` answers both, so there it is what the host serves).
+  crosses, and lets a host grant the servers apart from commands and
+  files, as remote's `servers` scope does alone (mcpworkspace's
+  `NewProcesses` answers both, so there it is what the host serves). A
+  name `ValidServerName` refuses is `ErrNoServer` on every backend.
+- An MCP server's interface is the same wherever it runs: at the
+  control, at a URL, or in the workspace (a command started there or a
+  server it offers), and over whichever wire reaches it, so a program
+  has one MCP transport and one set of tools whatever the placement.
+  No wire adds to, drops or rewrites what the server says but for an
+  `OutputFilter`'s redaction. mcpworkspace's
+  `TestOneServerOneInterfaceOverEveryWire` pins it: one stdio server,
+  offered and as a command, here, over mcpworkspace and over remote,
+  gives one `initialize`, `tools/list` and `tools/call`.
 
 ## Siblings
 

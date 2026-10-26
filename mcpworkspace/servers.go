@@ -46,11 +46,12 @@ func ListServers(ctx context.Context, c Conn) ([]agentworkspace.Server, error) {
 // the same lifetime and the same Conn rules: its standard input and
 // output carry the MCP stream, and its standard error, when stderr is
 // set, is written there as it arrives. A name the workspace does not
-// offer, or one that offers none, is an error that errors.Is
-// agentworkspace.ErrNoServer.
+// offer, one that offers none, or a name agentworkspace.ValidServerName
+// refuses, which no workspace offers and which is not sent, is an
+// error that errors.Is agentworkspace.ErrNoServer.
 func StartServer(ctx context.Context, c Conn, name string, stderr io.Writer) (agentworkspace.Process, error) {
 	if !agentworkspace.ValidServerName(name) {
-		return nil, fmt.Errorf("mcpworkspace: server name %q: agentworkspace.ValidServerName refuses it", name)
+		return nil, fmt.Errorf("mcpworkspace: server name %q: agentworkspace.ValidServerName refuses it: %w", name, agentworkspace.ErrNoServer)
 	}
 	if err := checkConn(c); err != nil {
 		return nil, err

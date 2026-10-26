@@ -220,9 +220,9 @@ func TestAnOfferedServersStandardError(t *testing.T) {
 	within(t, 10*time.Second, "the close", func() { p.Close() })
 }
 
-// A name the workspace does not offer is ErrNoServer, a name no
-// workspace could offer is refused before it is sent, and a server
-// whose workspace offers none lists none and starts none.
+// A name the workspace does not offer is ErrNoServer, and so is a name
+// no workspace could offer, refused before it is sent; a server whose
+// workspace offers none lists none and starts none.
 func TestServersNotOffered(t *testing.T) {
 	s := offering(t)
 	cs, _ := s.connect(t)
@@ -233,8 +233,8 @@ func TestServersNotOffered(t *testing.T) {
 		}
 		t.Errorf("StartServer(absent) = %v, want ErrNoServer", err)
 	}
-	if _, err := StartServer(context.Background(), c, "Not_A_Name", nil); err == nil || errors.Is(err, agentworkspace.ErrNoServer) {
-		t.Errorf("StartServer(Not_A_Name) = %v, want a refusal of the name", err)
+	if _, err := StartServer(context.Background(), c, "Not_A_Name", nil); !errors.Is(err, agentworkspace.ErrNoServer) {
+		t.Errorf("StartServer(Not_A_Name) = %v, want ErrNoServer", err)
 	}
 
 	plain := newTestServer(t)
@@ -270,23 +270,18 @@ func TestAStartedServerEndsWithItsSession(t *testing.T) {
 }
 
 // The server half refuses a name the workspace does not offer with
-// CodeNoServer, and a name no workspace could offer, sent as the raw
-// request since the client refuses it before sending.
+// CodeNoServer, and a name no workspace could offer too, sent as the
+// raw request since the client refuses it before sending.
 func TestTheServerRefusesANameNotOffered(t *testing.T) {
 	s := offering(t)
 	cs, _ := s.connect(t)
 	ctx := context.Background()
-	for name, wantCode := range map[string]bool{"absent": true, "Not_A_Name": false, "": false} {
+	for _, name := range []string{"absent", "Not_A_Name", ""} {
 		_, err := mcp.CallCustomMethod[*ServerStartParams, *StartResult](ctx, cs, wire.MethodServersStart,
 			&ServerStartParams{ServerStartArgs: wire.ServerStartArgs{Name: name}})
 		var we *jsonrpc.Error
-		switch {
-		case err == nil:
-			t.Errorf("servers.start %q was taken", name)
-		case wantCode && !(errors.As(err, &we) && we.Code == wire.CodeNoServer):
+		if !(errors.As(err, &we) && we.Code == wire.CodeNoServer) {
 			t.Errorf("servers.start %q = %v, want CodeNoServer", name, err)
-		case !wantCode && errors.As(err, &we) && we.Code == wire.CodeNoServer:
-			t.Errorf("servers.start %q = %v, want a refusal of the name, not CodeNoServer", name, err)
 		}
 	}
 }

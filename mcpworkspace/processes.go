@@ -227,8 +227,12 @@ func (s *Processes) servers(ctx context.Context, _ *mcp.ServerSession, _ *Server
 }
 
 func (s *Processes) startServer(_ context.Context, ss *mcp.ServerSession, p *ServerStartParams) (*StartResult, error) {
-	if p == nil || !agentworkspace.ValidServerName(p.Name) {
-		return nil, errors.New("no server name, or one agentworkspace.ValidServerName refuses")
+	switch {
+	case p == nil:
+		return nil, errors.New("no server name")
+	case !agentworkspace.ValidServerName(p.Name):
+		// No workspace offers a server called so.
+		return nil, &jsonrpc.Error{Code: wire.CodeNoServer, Message: agentworkspace.ErrNoServer.Error() + ": a name agentworkspace.ValidServerName refuses"}
 	}
 	sp := s.ws.(agentworkspace.ServerProvider)
 	res, err := s.launch(ss, p.Stderr, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {

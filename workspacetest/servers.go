@@ -194,7 +194,8 @@ func serverRunsInTheWorkspace(t *testing.T, sp ServerProvider) {
 }
 
 // A name the provider does not offer is ErrNoServer, and starts
-// nothing; so is any name of a provider that offers none.
+// nothing; so is any name of a provider that offers none, and a name
+// ValidServerName refuses, which no provider can offer.
 func serverNotOffered(t *testing.T, sp ServerProvider) {
 	ctx := context.Background()
 	for what, servers := range map[string][]agentworkspace.OfferedServer{
@@ -202,12 +203,14 @@ func serverNotOffered(t *testing.T, sp ServerProvider) {
 		"none offered":    nil,
 	} {
 		p := sp.Open(t, t.TempDir(), pathOnly(), servers)
-		var stderr lockedBuffer
-		if proc, err := p.StartServer(ctx, "not-there", &stderr); !errors.Is(err, agentworkspace.ErrNoServer) {
-			if proc != nil {
-				proc.Close()
+		for _, name := range []string{"not-there", "Not_A_Name", ""} {
+			var stderr lockedBuffer
+			if proc, err := p.StartServer(ctx, name, &stderr); !errors.Is(err, agentworkspace.ErrNoServer) {
+				if proc != nil {
+					proc.Close()
+				}
+				t.Errorf("%s: StartServer(%q) = %v, want ErrNoServer", what, name, err)
 			}
-			t.Errorf("%s: StartServer = %v, want ErrNoServer", what, err)
 		}
 	}
 }

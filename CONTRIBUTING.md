@@ -22,10 +22,10 @@ make check        # gofmt, tidy, vet, deps, staticcheck, govulncheck, race tests
 
 The root module imports the standard library alone, and so does
 `mcpworkspace/wire`; `make deps` and a test fail if anything else creeps
-in. `mcpworkspace` is a nested module, released at the root's version
-from the same commit (`make release` tags both); `make extracted` builds
-it the way a consumer gets it, against the published root, and needs the
-network.
+in. `mcpworkspace` and `tunnel` are nested modules, released at the
+root's version from the same commit (`make release` tags all three);
+`make extracted` builds each the way a consumer gets it, against the
+published root, and needs the network.
 
 ## Pull requests
 

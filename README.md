@@ -6,7 +6,9 @@ and bash tools run unchanged against a directory on this machine, a
 container or a remote runtime. The module imports the standard library
 alone, its package `remote` included, which serves a whole workspace
 over HTTP; `mcpworkspace`, a module of its own beside it, carries a
-workspace's processes and files over an MCP connection.
+workspace's processes and files over an MCP connection, and `tunnel`,
+another, serves a workspace behind NAT through a connection its host
+dials out.
 
 ```go
 ws, err := agentworkspace.NewLocal(dir, env) // env: this process's, credentials removed
@@ -245,6 +247,46 @@ process ends with the request. Errors keep their sentinels across the
 wire (`ErrOutside`, `fs.ErrNotExist` and the rest), and every bound
 (body sizes, sessions, processes per session, a listing) is an exported
 constant or option. The routes are in the package doc.
+
+## Behind NAT: tunnel
+
+`github.com/ChristopherDavenport/agentworkspace/tunnel` is for a
+workspace the server cannot dial. Its host dials out over a WebSocket,
+and serves the workspace to the server through it, on remote's wire
+unchanged: the host is the HTTP/2 server inside the tunnel (h2c on the
+WebSocket's bytes), the server the client.
+
+```go
+// The workspace's host: dial the hub and serve ws until ctx ends,
+// dialling again after a drop. The scopes are this end's to grant; the
+// credentials are the application's, in its HTTP client or a header.
+err := tunnel.Serve(ctx, "wss://hub.example/tunnel", ws,
+	tunnel.WithScopes(remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec),
+	tunnel.WithHeader(func(ctx context.Context) (http.Header, error) {
+		return http.Header{"Authorization": {"Bearer " + credential()}}, nil
+	}))
+
+// The server: a Hub mounted where the hosts dial. The enrollment is the
+// application's authentication: it names the workspace an upgrade is
+// from, or refuses it, before the upgrade is answered.
+hub, err := tunnel.NewHub(tunnel.WithEnrollment(func(r *http.Request) (string, error) {
+	return enrolled(r) // "build-1", or an error
+}))
+defer hub.Close()
+http.Handle("/tunnel", hub)
+
+ws, err := hub.Workspace(ctx, "build-1") // waits for it to connect, bounded by ctx
+defer ws.Close()
+```
+
+One `remote.Handler` serves every connection, so a session and its
+processes outlive a drop shorter than the lease, and the server's
+client renews through the next connection; what was in flight, a
+process's open pipes included, fails and is not sent again. A drop past
+the lease ends the processes, as over HTTP. A second connection for a
+connected name replaces the first. HTTP/2 pings notice a dead tunnel at
+both ends; a WebSocket message, the workspaces a hub holds and the
+streams a tunnel carries are bounded. The package doc has the details.
 
 ## Planned
 

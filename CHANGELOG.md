@@ -17,6 +17,32 @@ versions may break the API.
   `remote` run them; the tables moved out of the root's tests
   unchanged.
 
+- Added: nested module `tunnel`
+  (`github.com/ChristopherDavenport/agentworkspace/tunnel`, on
+  `github.com/coder/websocket` v1.8.15), released with the root: a
+  workspace behind NAT or a firewall served to a server through a
+  WebSocket its host dials out, carrying remote's wire unchanged over
+  HTTP/2 without TLS (h2c) on the WebSocket's bytes. `Serve` is the
+  workspace end, the HTTP/2 server: it dials `wss://` (`ws://` to a
+  loopback host alone), serves one `remote.Handler` across every
+  reconnect, so sessions and processes outlive a drop shorter than the
+  lease, redials with jittered, capped backoff (`WithRedial`,
+  `DefaultRedialMin`, `DefaultRedialMax`), and closes the handler, and
+  every process, when its context ends; `WithScopes` (required) is what
+  the server may do, `WithHTTPClient` and `WithHeader` carry the
+  application's credentials, and `WithHandlerOptions` passes remote's.
+  `Hub` is the server end, an `http.Handler`: `NewHub`, `WithEnrollment`
+  (`Enrollment`, the application's authentication, asked before the
+  101; without one every upgrade is refused, and any with an `Origin`),
+  `WithMaxWorkspaces` (`DefaultMaxWorkspaces`), `Workspace`, which is
+  `remote.Dial` over the connection and waits for a reconnect bounded
+  by each request's context, `Connected`, `Close`, `ValidName` and
+  `MaxNameBytes`; a second connection for a name replaces the first.
+  Both ends take `WithMaxMessageBytes` (`DefaultMaxMessageBytes`),
+  `WithPing` (HTTP/2 pings, `DefaultPingInterval`,
+  `DefaultPingTimeout`) and `WithLogger`; `MaxStreams`, `StreamWindow`,
+  `ConnWindow` and `HandshakeTimeout` bound the rest. `ErrNotConnected`
+  and `ErrClosed` are its errors. Offered MCP servers are not carried.
 - Removed: `remote.BearerTokens` and `remote.WithBearerToken`. The
   library ships no authentication: it is the capability layer, and the
   application supplies authentication through the hook

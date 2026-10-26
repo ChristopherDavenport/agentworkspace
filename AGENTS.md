@@ -31,12 +31,12 @@ interface.
   `Authenticator`, which names its `Principal` and scopes (`read`,
   `write`, `exec`), and the client's credentials are in the
   `http.Client` the program gives `WithHTTPClient` (no authenticator
-  refuses everything unless
-  `WithInsecureNoAuth`, which answers a loopback Host alone; every
-  handler refuses a browser page's request: an Origin, a cross-site
-  `Sec-Fetch-Site`, an untyped body). Started processes live in a
-  session the client opens at its first Start and renews on a lease; a
-  lapse, a lease unrenewed on the client's side, or `Close` ends them.
+  refuses everything unless `WithInsecureNoAuth`, which answers a
+  loopback Host alone; every handler refuses a browser page's request:
+  an Origin, a cross-site `Sec-Fetch-Site`, an untyped body). Started
+  processes live in a session the client opens at its first Start and
+  renews on a lease; a lapse, a lease unrenewed on the client's side,
+  or `Close` ends them.
   Its bounds are exported constants and options, its wire is in its
   package doc, and it is not the tool-call cut dax's executor uses.
 - `mcpworkspace` (nested module
@@ -55,6 +55,24 @@ interface.
   stdio server started in a workspace, and the server methods
   (`servers.list`, `servers.start`) carry a `ServerProvider` over the
   connection.
+- `tunnel` (nested module
+  `github.com/ChristopherDavenport/agentworkspace/tunnel`, on
+  `github.com/coder/websocket`): remote's wire, unchanged, over a
+  WebSocket the workspace's host dials out, for a workspace behind NAT
+  or a firewall. The roles flip inside it: the workspace end (`Serve`)
+  is the WebSocket client and the HTTP/2 server (h2c with prior
+  knowledge, `remote.NewHandler`), the server end (`Hub`, an
+  `http.Handler`) the WebSocket server and the HTTP/2 client
+  (`Hub.Workspace` is `remote.Dial` over an `http.ClientConn` from
+  `Transport.NewClientConn`; a `Transport`'s pool dials more than once
+  and cannot be given one connection). It ships no authentication: the
+  hub asks the application's `Enrollment` for an upgrade's workspace
+  before the 101, and the workspace end's credentials are in the
+  application's HTTP client or header (`WithHTTPClient`,
+  `WithHeader`). The scopes are the workspace end's (`WithScopes`,
+  required). One `remote.Handler` serves every reconnect, so sessions
+  outlive a drop shorter than the lease; HTTP/2 pings notice a dead
+  tunnel at both ends. Offered MCP servers are not carried.
 - Planned, beside them: a container starter.
 - Releases are lockstep, as agenttool's: the root and every nested
   module at one version from one commit, a nested module requiring the
@@ -123,10 +141,10 @@ workflow shape (minimum and stable Go; lint on Go 1.26.x with
 `check-latest`, since staticcheck cannot read go1.27.2's export data
 yet), a `CHANGELOG.md` in Keep a Changelog form, and annotated `v*`
 tags whose message becomes the release notes (`mcpworkspace/vX.Y.Z`
-for the nested module, written by the same `make release`). `make
-check` must pass before any commit; in this workspace run it as
-`GOWORK=off GOFLAGS=-mod=readonly make check`, and run `make extracted`
-before pushing a change to `mcpworkspace`.
+and `tunnel/vX.Y.Z` for the nested modules, written by the same `make
+release`). `make check` must pass before any commit; in this workspace
+run it as `GOWORK=off GOFLAGS=-mod=readonly make check`, and run `make
+extracted` before pushing a change to a nested module.
 
 Tests are table-driven and offline. They make real files, links,
 FIFOs and processes under `t.TempDir()`; a process test bounds its

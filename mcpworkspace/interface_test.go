@@ -41,10 +41,12 @@ func served(t *testing.T, ws agentworkspace.Workspace, scopes ...remote.Scope) r
 	return c
 }
 
-// face is what a program's MCP client sees of a server: who it says it
-// is, its tools, and what a call of one gives, each as JSON.
+// face is what a program's MCP client sees of a server: its whole
+// initialize result (protocol version, capabilities, instructions and
+// who it says it is), its tools, and what a call of one gives, each as
+// JSON.
 type face struct {
-	server, tools, call string
+	initialize, tools, call string
 }
 
 // faceOf connects to the server tr reaches and reads its face, calling
@@ -68,7 +70,7 @@ func faceOf(t *testing.T, tr mcp.Transport) face {
 			}
 			return string(b)
 		}
-		f.server = js(cs.InitializeResult().ServerInfo)
+		f.initialize = js(cs.InitializeResult())
 		tools, err := cs.ListTools(ctx, nil)
 		if err != nil {
 			t.Error(err)
@@ -85,8 +87,8 @@ func faceOf(t *testing.T, tr mcp.Transport) face {
 	return f
 }
 
-// The test's server gives the same initialize, tools/list and
-// tools/call whichever way it is reached: offered by an Offering and
+// The test's server gives the same initialize result, whole, the same
+// tools/list and the same tools/call whichever way it is reached: offered by an Offering and
 // started by name here, over mcpworkspace's connection, over remote to
 // a principal holding servers alone, and started as a command on a
 // Starter here and over remote. The wire never changes the interface.
@@ -126,7 +128,8 @@ func TestOneServerOneInterfaceOverEveryWire(t *testing.T) {
 	}
 	want := faceOf(t, ways[0].tr)
 	root, _ := json.Marshal(l.Root())
-	if !strings.Contains(want.tools, `"where"`) || !strings.Contains(want.tools, `"pid"`) || !strings.Contains(want.call, string(root)) {
+	if !strings.Contains(want.initialize, `"protocolVersion"`) || !strings.Contains(want.initialize, `"in-the-workspace"`) ||
+		!strings.Contains(want.tools, `"where"`) || !strings.Contains(want.tools, `"pid"`) || !strings.Contains(want.call, string(root)) {
 		t.Fatalf("the server here gave the wrong face: %+v; want its two tools, and where saying %s", want, root)
 	}
 	for _, w := range ways[1:] {

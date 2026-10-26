@@ -67,11 +67,26 @@ func offered(name, description string, args ...string) agentworkspace.OfferedSer
 	}
 }
 
+// tryStart is p.StartServer, bounded: a backend whose start hangs fails
+// the test rather than hang it.
+func tryStart(t *testing.T, ctx context.Context, p agentworkspace.ServerProvider, name string, stderr io.Writer) (proc agentworkspace.Process, err error) {
+	t.Helper()
+	within(t, 10*time.Second, "StartServer("+name+")", func() { proc, err = p.StartServer(ctx, name, stderr) })
+	return proc, err
+}
+
+// list is p.Servers, bounded as tryStart is.
+func list(t *testing.T, p agentworkspace.ServerProvider) (servers []agentworkspace.Server, err error) {
+	t.Helper()
+	within(t, 10*time.Second, "Servers", func() { servers, err = p.Servers(context.Background()) })
+	return servers, err
+}
+
 // startServer starts name in p, failing the test if it cannot, and
 // closes the process when the test ends.
 func startServer(t *testing.T, ctx context.Context, p agentworkspace.ServerProvider, name string, stderr io.Writer) agentworkspace.Process {
 	t.Helper()
-	proc, err := p.StartServer(ctx, name, stderr)
+	proc, err := tryStart(t, ctx, p, name, stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,13 +116,12 @@ func (l *lockedBuffer) String() string {
 // Servers lists every server offered, once, with its description, in
 // the same order every time; a provider offering none lists none.
 func serversListed(t *testing.T, sp ServerProvider) {
-	ctx := context.Background()
 	p := sp.Open(t, t.TempDir(), pathOnly(), []agentworkspace.OfferedServer{
 		offered("b-two", "the second", "cat"),
 		offered("a-one", "", "cat"),
 		offered("c3", "the third", "cat"),
 	})
-	first, err := p.Servers(ctx)
+	first, err := list(t, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,14 +141,14 @@ func serversListed(t *testing.T, sp ServerProvider) {
 			t.Errorf("Servers = %+v: %s missing or described %q, want %q", first, name, g, d)
 		}
 	}
-	again, err := p.Servers(ctx)
+	again, err := list(t, p)
 	if err != nil || !slices.Equal(first, again) {
 		t.Errorf("Servers again = %+v, %v; want the same list in the same order, %+v", again, err, first)
 	}
 
 	none := sp.Open(t, t.TempDir(), pathOnly(), nil)
-	if list, err := none.Servers(ctx); err != nil || len(list) != 0 {
-		t.Errorf("Servers of a provider offering none = %+v, %v", list, err)
+	if got, err := list(t, none); err != nil || len(got) != 0 {
+		t.Errorf("Servers of a provider offering none = %+v, %v", got, err)
 	}
 }
 
@@ -205,7 +219,7 @@ func serverNotOffered(t *testing.T, sp ServerProvider) {
 		p := sp.Open(t, t.TempDir(), pathOnly(), servers)
 		for _, name := range []string{"not-there", "Not_A_Name", ""} {
 			var stderr lockedBuffer
-			if proc, err := p.StartServer(ctx, name, &stderr); !errors.Is(err, agentworkspace.ErrNoServer) {
+			if proc, err := tryStart(t, ctx, p, name, &stderr); !errors.Is(err, agentworkspace.ErrNoServer) {
 				if proc != nil {
 					proc.Close()
 				}
@@ -272,7 +286,7 @@ func serverEndsWithItsOwner(t *testing.T, sp ServerProvider) {
 		if status, _ := ended(t, "the end after the owner's Close", proc, out); status != -1 {
 			t.Errorf("Wait after the owner's Close = %d, want -1", status)
 		}
-		if proc, err := p.StartServer(context.Background(), "s", nil); err == nil {
+		if proc, err := tryStart(t, context.Background(), p, "s", nil); err == nil {
 			proc.Close()
 			t.Error("a closed provider started a server")
 		}
@@ -366,8 +380,8 @@ func serverSecretsStayOut(t *testing.T, sp ServerProvider) {
 		t.Errorf("standard error = %q", got)
 	}
 	told := []string{seen.String(), stderr.String()}
-	if list, err := p.Servers(context.Background()); err == nil {
-		for _, sv := range list {
+	if got, err := list(t, p); err == nil {
+		for _, sv := range got {
 			told = append(told, sv.Name, sv.Description)
 		}
 	}

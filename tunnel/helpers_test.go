@@ -3,6 +3,9 @@ package tunnel
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/remote"
+	"github.com/coder/websocket"
 )
 
 // The tests' tokens: each names the workspace it enrolls. The package
@@ -186,3 +190,60 @@ func within(t *testing.T, d time.Duration, what string, f func()) {
 
 // alive reports whether process pid is running.
 func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
+
+// host is a workspace end of the tests' own over a raw upgrade: it
+// speaks HTTP/2 (answering every request 204), so the hub takes it, and
+// it can be frozen, after which it reads and answers nothing, as a host
+// that died without closing.
+type host struct {
+	ws     *websocket.Conn
+	frozen atomic.Bool
+	gone   chan struct{}
+}
+
+// host upgrades with header and serves HTTP/2 on the connection; nil
+// with the status when the upgrade is refused.
+func (r *rig) host(t *testing.T, header http.Header) (*host, int) {
+	t.Helper()
+	c, status := r.upgrade(t, header)
+	if c == nil {
+		return nil, status
+	}
+	h := &host{ws: c, gone: make(chan struct{})}
+	nc := &freezable{Conn: conn(context.Background(), c, DefaultMaxMessageBytes), h: h}
+	srv := &http.Server{
+		Handler:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+		Protocols: h2c(),
+		HTTP2:     defaultLink().http2(),
+		ErrorLog:  log.New(io.Discard, "", 0),
+	}
+	go srv.Serve(listenOn(nc))
+	t.Cleanup(func() {
+		close(h.gone)
+		srv.Close()
+	})
+	return h, status
+}
+
+// freezable is a host's connection: once frozen, its reads wait for the
+// test's end and its writes go nowhere.
+type freezable struct {
+	net.Conn
+	h *host
+}
+
+func (f *freezable) Read(p []byte) (int, error) {
+	n, err := f.Conn.Read(p)
+	if f.h.frozen.Load() {
+		<-f.h.gone
+		return 0, io.EOF
+	}
+	return n, err
+}
+
+func (f *freezable) Write(p []byte) (int, error) {
+	if f.h.frozen.Load() {
+		return len(p), nil
+	}
+	return f.Conn.Write(p)
+}

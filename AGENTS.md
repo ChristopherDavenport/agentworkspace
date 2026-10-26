@@ -72,7 +72,11 @@ interface.
   `WithHeader`). The scopes are the workspace end's (`WithScopes`,
   required). One `remote.Handler` serves every reconnect, so sessions
   outlive a drop shorter than the lease; HTTP/2 pings notice a dead
-  tunnel at both ends. Offered MCP servers are not carried.
+  tunnel at both ends. Its connection window is all its streams'
+  windows, and its defaults for remote's bounds keep the streams the
+  server can hold open under `MaxStreams` (the arithmetic is on that
+  constant), so no unread output starves a renewal; keep both true
+  when changing either. Offered MCP servers are not carried.
 - Planned, beside them: a container starter.
 - Releases are lockstep, as agenttool's: the root and every nested
   module at one version from one commit, a nested module requiring the

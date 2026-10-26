@@ -21,16 +21,19 @@ import (
 // before the 101, and one that replaces a connected name is not.
 func TestTheHubBoundsItsWorkspaces(t *testing.T) {
 	r := newRig(t, WithMaxWorkspaces(1))
-	if _, status := r.upgrade(t, auth(tokA)); status != http.StatusSwitchingProtocols {
+	if _, status := r.host(t, auth(tokA)); status != http.StatusSwitchingProtocols {
 		t.Fatalf("the first: %d", status)
 	}
 	eventually(t, 10*time.Second, "the first's connection", func() bool { return r.current("a") != nil })
-	if _, status := r.upgrade(t, auth(tokB)); status != http.StatusServiceUnavailable {
+	old := r.current("a")
+	if _, status := r.host(t, auth(tokB)); status != http.StatusServiceUnavailable {
 		t.Errorf("one past the bound: %d, want 503", status)
 	}
-	if _, status := r.upgrade(t, auth(tokA)); status != http.StatusSwitchingProtocols {
+	if _, status := r.host(t, auth(tokA)); status != http.StatusSwitchingProtocols {
 		t.Errorf("a replacement at the bound: %d, want 101", status)
 	}
+	// Taken, on the new connection, and not closed after the 101.
+	r.reconnected(t, "a", old)
 }
 
 // A message over the bound ends the tunnel; one end's writes are sent
@@ -39,15 +42,15 @@ func TestTheMessageBound(t *testing.T) {
 	const bound = 4 << 10
 	t.Run("over it", func(t *testing.T) {
 		r := newRig(t, WithMaxMessageBytes(bound))
-		c, status := r.upgrade(t, auth(tokA))
+		h, status := r.host(t, auth(tokA))
 		if status != http.StatusSwitchingProtocols {
 			t.Fatalf("upgrade: %d", status)
 		}
 		eventually(t, 10*time.Second, "the connection", func() bool { return r.current("a") != nil })
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		c.CloseRead(ctx) // answers the hub's close, which then ends at once
-		c.Write(ctx, websocket.MessageBinary, make([]byte, bound+1))
+		// One message past the bound, past the host's own chunking.
+		h.ws.Write(ctx, websocket.MessageBinary, make([]byte, bound+1))
 		eventually(t, 10*time.Second, "the tunnel's end", func() bool { return r.current("a") == nil })
 	})
 	t.Run("written under it", func(t *testing.T) {
@@ -71,11 +74,13 @@ func TestADeadTunnelIsNoticed(t *testing.T) {
 	ping := WithPing(100*time.Millisecond, 200*time.Millisecond)
 	t.Run("at the hub", func(t *testing.T) {
 		r := newRig(t, ping)
-		if _, status := r.upgrade(t, auth(tokA)); status != http.StatusSwitchingProtocols {
+		h, status := r.host(t, auth(tokA))
+		if status != http.StatusSwitchingProtocols {
 			t.Fatalf("upgrade: %d", status)
 		}
 		eventually(t, 10*time.Second, "the connection", func() bool { return r.current("a") != nil })
-		// The WebSocket is open and never read: no ping is answered.
+		// The host stops answering anything, pings included.
+		h.frozen.Store(true)
 		eventually(t, 5*time.Second, "the silent tunnel's end", func() bool { return r.current("a") == nil })
 	})
 	// A hub that takes the upgrade and then says nothing, or says

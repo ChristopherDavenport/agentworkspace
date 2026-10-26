@@ -36,6 +36,25 @@ const (
 // the least again.
 const stable = 10 * time.Second
 
+// Serve's defaults for remote's bounds, which keep the streams the
+// server can hold open on one tunnel well under MaxStreams (see the
+// arithmetic there). WithHandlerOptions may change them.
+const (
+	// DefaultSessions bounds the sessions the server may hold open
+	// (remote.WithMaxSessions and remote.WithMaxSessionsPerPrincipal:
+	// the tunnel is one principal).
+	DefaultSessions = 4
+	// DefaultProcesses bounds the processes open in one session
+	// (remote.WithMaxProcesses).
+	DefaultProcesses = 32
+	// DefaultTransfers bounds the Execs and file reads and writes served
+	// at once (remote.WithMaxTransfers).
+	DefaultTransfers = 128
+)
+
+// errRedirect is a redirect of the upgrade, which is never followed.
+var errRedirect = errors.New("tunnel: the server redirected the upgrade, which is never followed")
+
 type serveConfig struct {
 	link      linkConfig
 	scopes    []remote.Scope
@@ -66,10 +85,11 @@ func WithScopes(scopes ...remote.Scope) Option {
 // the request's Authorization header, a TLS config with a client
 // certificate or the server's CA. This package sends no credentials of
 // its own. hc must be an http.Client whose Transport returns a writable
-// body for a 101 (http.Transport does); a redirect is followed only as
-// hc's CheckRedirect allows. The default is a client of its own over
-// http.DefaultTransport, which verifies the server's certificate
-// against the system's roots and follows no redirect.
+// body for a 101 (http.Transport does). Serve uses a copy of it that
+// follows no redirect, whatever hc's CheckRedirect says: a redirect
+// could take the upgrade, and its credentials, off wss:// or to
+// another host. The default is a client over http.DefaultTransport,
+// which verifies the server's certificate against the system's roots.
 func WithHTTPClient(hc *http.Client) Option {
 	return serveOption(func(c *serveConfig) { c.hc = hc })
 }
@@ -83,8 +103,12 @@ func WithHeader(f func(ctx context.Context) (http.Header, error)) Option {
 }
 
 // WithHandlerOptions passes opts to the remote.Handler the workspace is
-// served by: its lease and its bounds. An authenticator among them is
-// replaced by the tunnel's, and WithInsecureNoAuth is refused.
+// served by: its lease and its bounds. They are applied after the
+// tunnel's own defaults for remote's bounds (DefaultSessions,
+// DefaultProcesses, DefaultTransfers), which they may change; raising
+// those past MaxStreams' arithmetic lets open streams starve a
+// renewal. An authenticator among them is replaced by the tunnel's,
+// and WithInsecureNoAuth is refused.
 func WithHandlerOptions(opts ...remote.Option) Option {
 	return serveOption(func(c *serveConfig) { c.handler = append(c.handler, opts...) })
 }
@@ -111,11 +135,17 @@ func WithRedial(min, max time.Duration) Option {
 // returns ctx's error once they have ended.
 //
 // It returns early with an error when it cannot serve at all: a URL it
-// will not dial, no WithScopes, an option out of bounds, or an upgrade
-// the hub refuses as unauthenticated (401, remote.ErrUnauthenticated)
-// or forbidden (403, remote.ErrForbidden), which another dial would not
-// change. Any other failure to dial, a hub that is full or not up yet
-// included, is tried again after the redial's wait.
+// will not dial, no WithScopes, an option out of bounds, or a first
+// upgrade the hub refuses as unauthenticated (401,
+// remote.ErrUnauthenticated) or forbidden (403, remote.ErrForbidden).
+// Once it has connected, a refusal is tried again like any other
+// failure for as long as the sessions' lease (remote.Handler.Lease)
+// since the connection last dropped, so a hub that restarts, or a
+// credential that rotates, does not end the processes; past that the
+// sessions have lapsed, and Serve returns the refusal. Any other
+// failure to dial (a redirect, a hub that is full, not up yet, or
+// whose Enrollment said ErrTryLater) is tried again after the redial's
+// wait.
 func Serve(ctx context.Context, serverURL string, ws agentworkspace.Workspace, opts ...Option) error {
 	cfg := serveConfig{
 		link:      defaultLink(),
@@ -149,11 +179,14 @@ func Serve(ctx context.Context, serverURL string, ws agentworkspace.Workspace, o
 		return err
 	}
 	if cfg.hc == nil {
-		cfg.hc = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		cfg.hc = &http.Client{}
 	}
 	if cfg.hc.Timeout != 0 {
 		return errors.New("tunnel: an HTTP client with a Timeout, which would end every tunnel at it")
 	}
+	hc := *cfg.hc
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return errRedirect }
+	cfg.hc = &hc
 	// Every request through the tunnel is the server's: the tunnel is
 	// the authentication, the server having been dialled and its
 	// upgrade accepted.
@@ -161,7 +194,14 @@ func Serve(ctx context.Context, serverURL string, ws agentworkspace.Workspace, o
 	grant := func(*http.Request) (remote.Principal, error) {
 		return remote.Principal{Name: p.Name, Scopes: slices.Clone(p.Scopes)}, nil
 	}
-	h, err := remote.NewHandler(ws, append(slices.Clone(cfg.handler), remote.WithAuthenticator(grant))...)
+	hopts := []remote.Option{
+		remote.WithMaxSessions(DefaultSessions),
+		remote.WithMaxSessionsPerPrincipal(DefaultSessions),
+		remote.WithMaxProcesses(DefaultProcesses),
+		remote.WithMaxTransfers(DefaultTransfers),
+	}
+	hopts = append(append(hopts, cfg.handler...), remote.WithAuthenticator(grant))
+	h, err := remote.NewHandler(ws, hopts...)
 	if err != nil {
 		return err
 	}
@@ -219,16 +259,25 @@ func (r *refusal) Unwrap() error { return r.err }
 func (s *server) run(ctx context.Context) error {
 	lg := s.cfg.link.log.With("server", s.host)
 	wait := s.cfg.redialMin
+	var dropped time.Time // when the last connection ended; zero before the first
 	for {
 		began := time.Now()
-		err := s.once(ctx)
+		connected, err := s.once(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if connected {
+			dropped = time.Now()
+		}
 		var r *refusal
 		if errors.As(err, &r) {
-			lg.Warn("tunnel: the server refused the workspace", "err", err)
-			return r.err
+			if dropped.IsZero() || time.Since(dropped) >= s.h.Lease() {
+				// Never connected, or the sessions have lapsed: there
+				// is nothing left to keep.
+				lg.Warn("tunnel: the server refused the workspace", "err", err)
+				return r.err
+			}
+			lg.Warn("tunnel: the server refused the workspace; trying again within the lease", "err", err)
 		}
 		if time.Since(began) >= stable {
 			wait = s.cfg.redialMin
@@ -246,15 +295,16 @@ func (s *server) run(ctx context.Context) error {
 	}
 }
 
-// once dials, and serves the connection until it ends or ctx does.
-func (s *server) once(ctx context.Context) error {
+// once dials, and serves the connection until it ends or ctx does; it
+// says whether the upgrade was answered, so there was a connection.
+func (s *server) once(ctx context.Context) (bool, error) {
 	dctx, cancel := context.WithTimeout(ctx, s.cfg.link.handshake)
 	defer cancel()
 	header := http.Header{}
 	if s.cfg.header != nil {
 		h, err := s.cfg.header(dctx)
 		if err != nil {
-			return fmt.Errorf("tunnel: the upgrade's header: %w", err)
+			return false, fmt.Errorf("tunnel: the upgrade's header: %w", err)
 		}
 		for k, vs := range h {
 			for _, v := range vs {
@@ -264,7 +314,7 @@ func (s *server) once(ctx context.Context) error {
 	}
 	c, resp, err := websocket.Dial(dctx, s.url, &websocket.DialOptions{HTTPClient: s.cfg.hc, HTTPHeader: header})
 	if err != nil {
-		return dialError(resp, err)
+		return false, dialError(resp, err)
 	}
 	cancel()
 	nc := conn(ctx, c, s.cfg.link.maxMessage)
@@ -298,12 +348,15 @@ func (s *server) once(ctx context.Context) error {
 	srv.Close()
 	nc.Close()
 	<-served
-	return errors.New("tunnel: the connection ended")
+	return true, errors.New("tunnel: the connection ended")
 }
 
 // dialError is a failed upgrade's error, a refusal another dial would
 // not change marked so, and with no URL in it.
 func dialError(resp *http.Response, err error) error {
+	if errors.Is(err, errRedirect) {
+		return errRedirect
+	}
 	if resp != nil {
 		switch resp.StatusCode {
 		case http.StatusUnauthorized:

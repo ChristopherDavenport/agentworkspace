@@ -36,13 +36,21 @@ versions may break the API.
   every process, when its context ends; `WithScopes` (required) is what
   the server may do, `WithHTTPClient` and `WithHeader` carry the
   application's credentials, and `WithHandlerOptions` passes remote's.
+  It follows no redirect of the upgrade, whatever the application's
+  client allows, and once connected tries a refused upgrade again
+  within the lease. `DefaultSessions`, `DefaultProcesses` and
+  `DefaultTransfers` are its bounds for remote's, which with
+  `StreamWindow` and `ConnWindow` (all streams' windows) keep unread
+  output and open streams from starving a renewal.
   `Hub` is the server end, an `http.Handler`: `NewHub`, `WithEnrollment`
   (`Enrollment`, the application's authentication, asked before the
-  101; without one every upgrade is refused, and any with an `Origin`),
+  101; without one every upgrade is refused, and any with an `Origin`;
+  `ErrTryLater` is a 503 the host dials again on),
   `WithMaxWorkspaces` (`DefaultMaxWorkspaces`), `Workspace`, which is
   `remote.Dial` over the connection and waits for a reconnect bounded
   by each request's context, `Connected`, `Close`, `ValidName` and
-  `MaxNameBytes`; a second connection for a name replaces the first.
+  `MaxNameBytes`; a second connection for a name replaces the first
+  once it has answered over HTTP/2.
   Both ends take `WithMaxMessageBytes` (`DefaultMaxMessageBytes`),
   `WithPing` (HTTP/2 pings, `DefaultPingInterval`,
   `DefaultPingTimeout`) and `WithLogger`; `MaxStreams`, `StreamWindow`,

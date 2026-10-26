@@ -3,7 +3,10 @@ package tunnel
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -49,6 +52,9 @@ func TestUpgradesAreRefusedBeforeTheyAreAnswered(t *testing.T) {
 	none := newRig(t, WithEnrollment(nil))
 	enrolled := newRig(t, WithEnrollment(counting))
 	invalid := newRig(t, WithEnrollment(func(*http.Request) (string, error) { return "Not A Label", nil }))
+	later := newRig(t, WithEnrollment(func(*http.Request) (string, error) {
+		return "", fmt.Errorf("the store is starting: %w", ErrTryLater)
+	}))
 	for name, c := range map[string]struct {
 		r      *rig
 		header http.Header
@@ -59,15 +65,16 @@ func TestUpgradesAreRefusedBeforeTheyAreAnswered(t *testing.T) {
 		"a wrong token":       {enrolled, auth("not-a-token"), http.StatusUnauthorized},
 		"an Origin":           {enrolled, http.Header{"Authorization": {"Bearer " + tokA}, "Origin": {"https://evil.example"}}, http.StatusForbidden},
 		"an invalid name":     {invalid, auth(tokA), http.StatusUnauthorized},
+		"try later":           {later, auth(tokA), http.StatusServiceUnavailable},
 		"a good token":        {enrolled, auth(tokA), http.StatusSwitchingProtocols},
 		"the other good one":  {enrolled, auth(tokB), http.StatusSwitchingProtocols},
 		"an empty Origin too": {enrolled, http.Header{"Authorization": {"Bearer " + tokA}, "Origin": {""}}, http.StatusForbidden},
 	} {
-		if _, status := c.r.upgrade(t, c.header); status != c.want {
+		if _, status := c.r.host(t, c.header); status != c.want {
 			t.Errorf("%s: %d, want %d", name, status, c.want)
 		}
 	}
-	if len(none.hub.Connected()) != 0 || len(invalid.hub.Connected()) != 0 {
+	if len(none.hub.Connected()) != 0 || len(invalid.hub.Connected()) != 0 || len(later.hub.Connected()) != 0 {
 		t.Error("a refused upgrade is connected")
 	}
 	eventually(t, 10*time.Second, "the good upgrades' connections", func() bool {
@@ -212,5 +219,69 @@ func TestWorkspaceWaitsBoundedByItsContext(t *testing.T) {
 	}
 	if !ValidName(strings.Repeat("a", MaxNameBytes)) || !ValidName("build-1") {
 		t.Error("a valid name is refused")
+	}
+}
+
+// eofConn takes every write and reads end of file at once: a peer that
+// hung up right after the 101.
+type eofConn struct{ net.Conn }
+
+func (eofConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (eofConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (eofConn) Close() error                     { return nil }
+func (eofConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (eofConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (eofConn) SetDeadline(time.Time) error      { return nil }
+func (eofConn) SetReadDeadline(time.Time) error  { return nil }
+func (eofConn) SetWriteDeadline(time.Time) error { return nil }
+
+// A connection that dies as it is taken never stays in the table,
+// however its end races the table's other users.
+func TestADeadConnectionNeverStaysInTheTable(t *testing.T) {
+	h, err := NewHub(WithEnrollment(enroll(tokens)), WithMaxWorkspaces(1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	var stop atomic.Bool
+	go func() { // the table's other users, as wait and Connected are
+		for !stop.Load() {
+			h.mu.Lock()
+			_ = len(h.tunnels)
+			h.mu.Unlock()
+		}
+	}()
+	const n = 3000
+	taken := 0
+	for i := range n {
+		if _, err := h.open(fmt.Sprintf("n%d", i), eofConn{}); err == nil {
+			taken++
+		}
+	}
+	stop.Store(true)
+	time.Sleep(100 * time.Millisecond)
+	if got := h.Connected(); taken != 0 || len(got) != 0 {
+		t.Errorf("%d of %d dead connections were taken, %d are in the table", taken, n, len(got))
+	}
+}
+
+// A connection that never speaks HTTP/2 does not replace a working one,
+// which keeps serving.
+func TestASilentConnectionReplacesNothing(t *testing.T) {
+	r := newRig(t, withHandshake(300*time.Millisecond))
+	l := local(t, t.TempDir(), pathEnv())
+	l.WriteFile(context.Background(), "f", []byte("x"), 0o644)
+	r.serve(t, l, WithScopes(remote.ScopeRead), bearer(tokA), fast)
+	ws := r.workspace(t, "a")
+	old := r.current("a")
+	if _, status := r.upgrade(t, auth(tokA)); status != http.StatusSwitchingProtocols {
+		t.Fatalf("the silent upgrade: %d", status)
+	}
+	time.Sleep(600 * time.Millisecond) // past the hub's wait for it
+	if r.current("a") != old {
+		t.Fatal("a connection that never spoke HTTP/2 replaced a working one")
+	}
+	if _, err := fs.Stat(ws.FS(), "f"); err != nil {
+		t.Errorf("the working connection after: %v", err)
 	}
 }

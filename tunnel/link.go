@@ -29,23 +29,38 @@ const (
 )
 
 // The bounds of the HTTP/2 a tunnel carries, which are not options.
+//
+// They are chosen so that nothing the workspace end's handler allows
+// can stop a session's renewal, a Wait, a Signal, a Close or a new
+// Start from getting through. The connection's window is never the one
+// that binds: ConnWindow is MaxStreams streams' windows, so each stream
+// can be stalled only by its own reader. And the streams the handler
+// lets the server hold open stay well under MaxStreams: with Serve's
+// defaults for remote's bounds, DefaultSessions sessions of
+// DefaultProcesses processes, each holding at most four streams (its
+// input, its output, its standard error and the client's one wait), are
+// 4 × 32 × 4 = 512 streams, and DefaultTransfers Execs and file reads
+// and writes are 128 more: 640 of 1024, which leaves 384 for the
+// requests answered at once (renewals, starts, signals, closes, the
+// file system's). Raising remote's bounds through WithHandlerOptions
+// past that arithmetic gives the guarantee up.
 const (
 	// MaxStreams bounds the requests open at once on one tunnel: every
 	// stream, wait and Exec of remote's is one while it lasts. Past it, a
 	// request waits for one to end.
 	MaxStreams = 1024
 	// StreamWindow is how much of one request's or reply's body either
-	// end holds that its reader has not taken.
-	StreamWindow = 1 << 20
-	// ConnWindow is how much of every body on one tunnel either end
-	// holds that its readers have not taken. A body not read holds its
-	// share of it, so ConnWindow/StreamWindow bodies left unread (a
-	// process's input that it does not read, a process's output the
-	// program does not) stall the rest of the tunnel in that direction
-	// until one is read or ends.
-	ConnWindow = 64 << 20
-	// HandshakeTimeout bounds a WebSocket upgrade and the HTTP/2
-	// handshake after it, at either end.
+	// end holds that its reader has not taken; a reader that takes no
+	// more stalls that stream alone.
+	StreamWindow = 128 << 10
+	// ConnWindow is how much of all a tunnel's bodies either end holds
+	// that its readers have not taken: MaxStreams × StreamWindow, so that
+	// the connection's window never runs out before a stream's does.
+	// It is the most one tunnel buffers unread at the hub (128 MiB).
+	ConnWindow = MaxStreams * StreamWindow
+	// HandshakeTimeout bounds a WebSocket upgrade at the workspace end,
+	// the wait for HTTP/2's preface there, and at the hub the wait for a
+	// new connection to answer a request before it is taken.
 	HandshakeTimeout = 30 * time.Second
 )
 

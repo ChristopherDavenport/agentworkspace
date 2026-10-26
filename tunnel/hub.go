@@ -31,6 +31,12 @@ var ErrNotConnected = errors.New("tunnel: the workspace is not connected")
 // ErrClosed is a Hub that was closed.
 var ErrClosed = errors.New("tunnel: the hub is closed")
 
+// ErrTryLater is an Enrollment's answer for an upgrade it cannot judge
+// now (its store is not up yet, say): the Hub answers 503, and the
+// workspace end dials again after its wait, as for a hub that is down.
+// An Enrollment returns it, or an error that wraps it.
+var ErrTryLater = errors.New("tunnel: the enrollment cannot answer now; try later")
+
 // ValidName reports whether name may name a workspace: a DNS label, 1
 // to MaxNameBytes lower-case letters, digits and hyphens, neither
 // first nor last a hyphen. It is the host of the remote's base URL.
@@ -49,7 +55,8 @@ func ValidName(name string) bool {
 // Enrollment says which workspace an upgrade is from: the
 // application's authentication of the host that dialled, which this
 // package does not implement. An error refuses the upgrade (401); its
-// text is not sent.
+// text is not sent. ErrTryLater asks the host to dial again later
+// (503).
 type Enrollment func(r *http.Request) (name string, err error)
 
 type hubConfig struct {
@@ -87,7 +94,9 @@ func WithMaxWorkspaces(n int) HubOption {
 // first, which is closed: a host that restarted dials again before the
 // hub has noticed that its old connection is dead, and the newest is
 // the one that is alive. Requests in flight on the replaced connection
-// fail.
+// fail. A new connection is taken only once it has answered a request
+// over HTTP/2, within HandshakeTimeout, so a host that upgrades and
+// never speaks HTTP/2 does not take the name from a working one.
 type Hub struct {
 	cfg  hubConfig
 	ctx  context.Context // ends with Close, and every tunnel with it
@@ -127,23 +136,35 @@ type tunnel struct {
 	name string
 	nc   net.Conn
 	cc   *http.ClientConn
+	dead bool // under h.mu: closing or closed, and never put in the table again
 	once sync.Once
 }
 
-// close ends the connection, at once, and takes it out of the table if
-// it is still the name's.
+// close takes the tunnel out of the table, if it is there, marks it dead
+// so that open never puts it there, and then ends the connection. It
+// may be called more than once, and from anywhere.
 func (t *tunnel) close() {
+	t.h.mu.Lock()
+	t.dead = true
+	if t.h.tunnels[t.name] == t {
+		delete(t.h.tunnels, t.name)
+		t.h.notify()
+	}
+	t.h.mu.Unlock()
 	t.once.Do(func() {
 		t.cc.Close()
 		t.nc.Close()
-		t.h.mu.Lock()
-		if t.h.tunnels[t.name] == t {
-			delete(t.h.tunnels, t.name)
-			t.h.notify()
-		}
-		t.h.mu.Unlock()
 		t.h.cfg.link.log.Info("tunnel: disconnected", "workspace", t.name)
 	})
+}
+
+// usable reports whether a request can still be sent on the tunnel: it
+// is not closed, and if it has no stream free it is because every one
+// is in use, not because the connection was told to go away or has
+// used up its stream ids. It relies on the workspace end allowing
+// MaxStreams streams, as Serve does.
+func (t *tunnel) usable() bool {
+	return t.cc.Err() == nil && (t.cc.Available() > 0 || t.cc.InFlight() >= MaxStreams)
 }
 
 // notify wakes whoever waits on a change; h.mu is held.
@@ -170,6 +191,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	name, err := h.cfg.enroll(r)
 	switch {
+	case errors.Is(err, ErrTryLater):
+		refuse(http.StatusServiceUnavailable, "the enrollment asks to try later")
+		return
 	case err != nil:
 		refuse(http.StatusUnauthorized, "unauthenticated")
 		return
@@ -204,9 +228,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.cfg.link.log.Info("tunnel: connected", "workspace", name)
 }
 
-// open starts the HTTP/2 client over nc and puts it in the table,
-// closing the one it replaces. The bound of workspaces is checked again
-// here, as upgrades are answered at once.
+// open starts the HTTP/2 client over nc, waits for it to answer a
+// request, and puts it in the table, closing the one it replaces. The
+// bound of workspaces is checked again here, as upgrades are answered
+// at once.
 func (h *Hub) open(name string, nc net.Conn) (*tunnel, error) {
 	tr := &http.Transport{
 		Protocols: h2c(),
@@ -227,9 +252,16 @@ func (h *Hub) open(name string, nc net.Conn) (*tunnel, error) {
 			go t.close()
 		}
 	})
+	if err := t.probe(ctx); err != nil {
+		t.close()
+		return nil, err
+	}
 	h.mu.Lock()
 	old := h.tunnels[name]
 	switch {
+	case t.dead:
+		h.mu.Unlock()
+		return nil, errors.New("tunnel: the connection ended before it was taken")
 	case h.closed:
 		h.mu.Unlock()
 		t.close()
@@ -249,6 +281,23 @@ func (h *Hub) open(name string, nc net.Conn) (*tunnel, error) {
 		old.close()
 	}
 	return t, nil
+}
+
+// probe sends one request over the tunnel and takes any answer as proof
+// that the other end speaks HTTP/2: the remote handler answers a path
+// it has no route for with an error of its own. NewClientConn does not
+// wait for the peer's settings; this does.
+func (t *tunnel) probe(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+t.name+".tunnel.invalid/", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := t.cc.RoundTrip(req)
+	if err != nil {
+		return fmt.Errorf("tunnel: the connection answered no request over HTTP/2: %w", err)
+	}
+	resp.Body.Close()
+	return nil
 }
 
 // wait is name's tunnel, once there is one, or ErrNotConnected when
@@ -282,7 +331,16 @@ func (h *Hub) wait(ctx context.Context, name string) (*tunnel, error) {
 // connected waits, bounded by its own context, for the next
 // connection, so the client's renewals carry its session over a drop
 // shorter than the lease. Requests in flight when a connection drops
-// fail, and are not sent again. Its Descriptor's Ref is
+// fail, and are not sent again.
+//
+// The workspace is the first connection's: its Root, Env, bounds and
+// whether it is a Starter are what that host's info said at the dial.
+// When another host takes the name (a second connection replaces the
+// first), requests go to the new host, but the workspace still
+// describes the first, and its session, if it has one, is lost there
+// (remote.ErrNoSession). A program that lets a name move between hosts
+// dials again (Workspace) after a replacement, and does not write
+// through a workspace dialled before it. Its Descriptor's Ref is
 // http://<name>.tunnel.invalid, a host that resolves nowhere, as the
 // tunnel is the only way there. A remote.WithHTTPClient among opts is
 // replaced.
@@ -317,15 +375,23 @@ func (rt route) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			return nil, err
 		}
-		if err := t.cc.Reserve(); err != nil && t.cc.Err() != nil {
-			// Dead before this request was sent on it: it may go on
-			// the next.
+		if err := t.cc.Reserve(); err != nil && !t.usable() {
+			// Unusable before this request was sent on it: it leaves
+			// the table at once, so the next wait blocks for the next
+			// connection rather than finding this one, and the request
+			// may go on that.
 			t.close()
 			continue
 		}
 		// Reserved, or the connection is at its bound of streams, and
 		// RoundTrip waits for one.
-		return t.cc.RoundTrip(req)
+		resp, err := t.cc.RoundTrip(req)
+		if err != nil && req.Context().Err() == nil && !t.usable() {
+			// Told to go away, or out of stream ids, while it lasted:
+			// closed, so the host dials again.
+			t.close()
+		}
+		return resp, err
 	}
 }
 

@@ -29,7 +29,11 @@
 // is a client). At the workspace end, the application's credentials go
 // in the HTTP client the upgrade is made through (WithHTTPClient) or a
 // header made for each dial (WithHeader); this package puts none in a
-// URL, an error or a log.
+// URL, an error or a log, and follows no redirect of the upgrade,
+// whatever that client allows, so the credentials never leave the
+// wss:// URL they were given for. An Enrollment that cannot judge an
+// upgrade yet says ErrTryLater, which the Hub answers 503 and the host
+// dials again on.
 //
 // What the server may do is the workspace end's to say: WithScopes is
 // required, and every request that comes through the tunnel is from
@@ -41,7 +45,12 @@
 //
 // Serve dials again when the connection drops, after a jittered wait
 // that doubles from DefaultRedialMin to DefaultRedialMax (WithRedial)
-// and starts over after a connection that lasted. It serves every
+// and starts over after a connection that lasted. Once it has
+// connected, an upgrade refused as unauthenticated or forbidden is
+// tried again too, for as long as the sessions' lease since the drop:
+// a hub that restarts or a credential that rotates does not end the
+// processes; past that they have lapsed, and Serve returns the
+// refusal. A first upgrade refused so ends Serve at once. It serves every
 // connection with one remote.Handler, so the sessions the server opened
 // and the processes it started outlive a drop: the server's client
 // renews its session through the next connection, and a process's Wait,
@@ -64,9 +73,14 @@
 // (remote.WithTimeout, 30 seconds), so while a workspace is away its
 // file operations and a process's Close wait that long before they
 // fail; Hub.Close fails them at once. A second connection for a name
-// that is connected replaces the first, which is closed: two hosts
-// that both dial as one name take the name from each other at every
-// redial, so an enrollment names each host apart.
+// that is connected replaces the first, which is closed, once the new
+// one has answered a request over HTTP/2 within HandshakeTimeout (a
+// host that upgrades and never speaks HTTP/2 replaces nothing). Two
+// hosts that both dial as one name take the name from each other at
+// every redial, so an enrollment names each host apart. A Workspace
+// keeps the info of the host it was dialled to (its Root, Env, bounds
+// and whether it is a Starter); after another host takes the name, a
+// program dials again.
 //
 // # Liveness and bounds
 //
@@ -79,8 +93,15 @@
 // under its bound. A Hub holds at most DefaultMaxWorkspaces workspaces
 // connected (WithMaxWorkspaces). A tunnel carries at most MaxStreams
 // requests at once, and holds at most StreamWindow of one body and
-// ConnWindow of all its bodies unread; an upgrade and its HTTP/2
-// handshake take at most HandshakeTimeout. Serve's ctx ending closes the
+// ConnWindow, all MaxStreams streams' windows, of all its bodies
+// unread, so a body nobody reads stalls only itself. Serve gives remote
+// bounds of its own (DefaultSessions, DefaultProcesses,
+// DefaultTransfers) that keep the streams the server can hold open
+// under MaxStreams with room to spare, so no output left unread and no
+// number of open streams the handler allows keeps a renewal, a Wait, a
+// Signal, a Close or a Start from getting through; MaxStreams' doc has
+// the arithmetic. An upgrade, and the wait for HTTP/2 to start on it,
+// take at most HandshakeTimeout. Serve's ctx ending closes the
 // connection and the handler, which ends every process the server
 // started; Hub.Close closes every connection.
 //

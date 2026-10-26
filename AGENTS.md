@@ -13,10 +13,27 @@ interface.
 ## Module
 
 - Module path: `github.com/ChristopherDavenport/agentworkspace`.
-- Go 1.26 is the floor. One package, `agentworkspace`, at the root.
+- Go 1.26 is the floor. The root module holds two packages:
+  `agentworkspace`, at the root, and `remote`.
 - The root module imports the standard library alone. `make deps` and
-  a test enforce it. Anything with a dependency is a nested module, and
-  none of them may pull one into the root.
+  a test (`TestImportBoundary`, which names the root's packages)
+  enforce it. Anything with a dependency is a nested module, and none
+  of them may pull one into the root.
+- `remote` (`github.com/ChristopherDavenport/agentworkspace/remote`):
+  the primitive cut, a whole `Workspace` over HTTP. `NewHandler`
+  serves any workspace as an `http.Handler` the program mounts (TLS is
+  the program's); `Dial` returns a `*Client`, or a `*StarterClient`
+  when the served workspace is a `Starter` and the principal holds
+  `exec`, so a type assertion tells the truth. Every request is
+  authenticated (`Authenticator`, `BearerTokens`, scopes `read`,
+  `write`, `exec`; no authenticator refuses everything unless
+  `WithInsecureNoAuth`, which answers a loopback Host alone; every
+  handler refuses a browser page's request: an Origin, a cross-site
+  `Sec-Fetch-Site`, an untyped body). Started processes live in a
+  session the client opens at its first Start and renews on a lease; a
+  lapse, a lease unrenewed on the client's side, or `Close` ends them.
+  Its bounds are exported constants and options, its wire is in its
+  package doc, and it is not the tool-call cut dax's executor uses.
 - `mcpworkspace` (nested module
   `github.com/ChristopherDavenport/agentworkspace/mcpworkspace`, on the
   MCP Go SDK): a workspace's processes and files over an MCP connection
@@ -33,22 +50,24 @@ interface.
   stdio server started in a workspace, and the server methods
   (`servers.list`, `servers.start`) carry a `ServerProvider` over the
   connection.
-- Planned, beside it: the HTTP `remote` client and handler (the
-  primitive cut, a whole `Workspace` over HTTP) and a container
-  starter.
+- Planned, beside them: a container starter.
 - Releases are lockstep, as agenttool's: the root and every nested
   module at one version from one commit, a nested module requiring the
   root at exactly that version, with `replace ... => ..` in its go.mod
   so the release commit can name a version the proxy does not serve
   yet (`make replaces` checks it; `make extracted` builds without it).
 - `Local` is for Unix (Linux and macOS): process groups and
-  non-blocking opens.
+  non-blocking opens. So is `remote`, whose signals are Unix's, sent by
+  name.
 
 ## Rules the interface keeps
 
 Every backend, present and planned, holds to these; the tests check
 them, and a new backend runs the same tables (`backends` in
-`confine_test.go`).
+`confine_test.go`, `starters` in `start_test.go`). A backend in a
+package that imports the root (remote) joins them from package
+`agentworkspace_test` through `AddBackend` and `AddStarter`, as
+`remote_backend_test.go` does.
 
 - A name that leaves the workspace is `ErrOutside`, however it leaves:
   absolute, `..`, or a link out, read, written, removed or used as a

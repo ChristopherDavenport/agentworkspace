@@ -5,6 +5,67 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added: package `remote`, in the root module and on the standard
+  library alone: a whole `Workspace` served over HTTP (`NewHandler`,
+  a `*Handler` the program mounts, with `Close`) and one at the other
+  end (`Dial`, which returns a `Workspace`: a `*Client`, or a
+  `*StarterClient` when the served workspace is a `Starter` and the
+  principal holds `exec`; `Served` is the served workspace's own
+  `Descriptor`, and `Descriptor` is `KindRemote` with the base URL as
+  its `Ref`). Its `FS` is an `fs.StatFS` and `fs.ReadDirFS`, and an
+  `fs.ReadLinkFS` when the served one is; `Open` never blocks, and a
+  regular file's content is streamed. `Exec` streams `Command.Stream`
+  as NDJSON frames under the request's context; a started process's
+  pipes are streams, its wait a long poll, its signals sent by name.
+  Authentication fails closed: `Scope` (`read`, `write`, `exec`, never
+  implied), `Principal`, `Authenticator`, `BearerTokens` (constant
+  time), `WithAuthenticator`, `WithInsecureNoAuth`, `WithBearerToken`,
+  `WithHTTPClient`, `WithTimeout`, and `PrincipalFrom`. Processes live
+  in a session the client opens and renews on a lease
+  (`WithLease`); its lapse, `Client.Close` and `Handler.Close` end
+  them. The bounds: `MaxRequestBytes`, `MaxErrorBytes`, `StderrBytes`,
+  `MaxReplyBytes`, and `DefaultLease`, `DefaultMaxSessions`,
+  `DefaultMaxProcesses`, `DefaultMaxWriteBytes` and
+  `DefaultMaxDirEntries` with their options; over one is `ErrLimit`.
+  `ErrOutside`, `fs.ErrNotExist`, `fs.ErrExist`, `fs.ErrPermission`,
+  `fs.ErrInvalid`, `errors.ErrUnsupported`, `os.ErrProcessDone` and
+  `fs.ErrClosed` cross the wire as codes, so `errors.Is` holds on the
+  client; `ErrUnauthenticated`, `ErrForbidden`, `ErrNoSession` and
+  `ErrNoProcess` are its own.
+- Added: `remote` refuses, in every handler, a browser page's
+  request: one carrying an `Origin`, or a `Sec-Fetch-Site` other than
+  `same-origin` or `none`, and a body of another type than its route's
+  (`application/json`, or `application/octet-stream` for a file's
+  content and a process's input; 415). `WithInsecureNoAuth` answers
+  only a loopback `Host` (localhost, 127.0.0.0/8, ::1), so DNS
+  rebinding is refused. A principal with an empty `Name`, which keeps
+  sessions apart, is unauthenticated. `Handler.Close` returns only once
+  every `Exec` and every process being closed has ended. A session is
+  opened at the first `Start`, not at `Dial`, and one principal holds
+  at most `DefaultMaxSessionsPerPrincipal` (8,
+  `WithMaxSessionsPerPrincipal`). A client that goes a whole lease
+  without a renewal loses the session: its processes' `Wait` returns
+  -1 and `ErrNoSession`, their pipes fail with it, and the next
+  `Start` opens another. An `Exec` without a `Stream` gives back at
+  most `DefaultMaxExecOutputBytes` (16 MiB, `WithMaxExecOutputBytes`)
+  of each stream, told in `/v1/info`, and is `ErrLimit` past it, the
+  command having run; data frames are at most 32 KiB and the client
+  bounds every frame by the server's bounds. `WriteFile` passes the
+  permission bits alone, never setuid, setgid or sticky. A start
+  carries a key the client chose, which names the process: a start
+  sent again is the same process, and one whose reply was lost is
+  closed by its key. A blocked `Command.Stream` holds up neither
+  `Wait` nor `Close`. A listing reads one entry past its bound and no
+  more. A timeout a `time.Duration` cannot hold is refused. An
+  unmapped errno is sent as its words alone, and another error with
+  the served root and other paths' directories cut from it.
+- Added (tests): the confinement, FIFO, `Exec`, name and `Start`
+  tables run on every backend, `remote` over `Local` among them,
+  which joins from package `agentworkspace_test` (`AddBackend`,
+  `AddStarter`).
+
 ## v0.0.4 - 2026-10-25
 
 - Added: an offered server's `Secrets`, the variables of its

@@ -4,7 +4,8 @@ Where an agent's tools act: a file tree, processes, a working directory
 and an environment, behind one interface, so the same read, write, edit
 and bash tools run unchanged against a directory on this machine, a
 container or a remote runtime. The module imports the standard library
-alone; `mcpworkspace`, a module of its own beside it, carries a
+alone, its package `remote` included, which serves a whole workspace
+over HTTP; `mcpworkspace`, a module of its own beside it, carries a
 workspace's processes and files over an MCP connection.
 
 ```go
@@ -194,11 +195,49 @@ for a program that only relays or answers the methods. What the
 connection is, how it is authenticated and whether it is made again are
 the program's.
 
+## Over HTTP: remote
+
+Package `remote` serves any workspace over HTTP and is one at the
+other end: every file operation, write, `Exec` and started process
+crosses the wire on its own, and the tools and their policy stay on the
+client's side (the primitive cut; a sandbox that should run the tools
+themselves is cut at the tool calls instead, as dax's executor is).
+
+```go
+// The server: a plain http.Handler; TLS and the listener are the program's.
+h, err := remote.NewHandler(ws, remote.WithAuthenticator(remote.BearerTokens(map[string]remote.Principal{
+	token: {Name: "agent", Scopes: []remote.Scope{remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec}},
+})))
+defer h.Close() // ends every session's processes
+http.Handle("/", h)
+
+// The client: a Workspace, and a Starter when the server can start and
+// the principal holds exec.
+ws, err := remote.Dial(ctx, "https://host/", remote.WithBearerToken(token))
+defer ws.Close()
+```
+
+Every request is authenticated, whatever its route; with no
+authenticator every request is refused, unless the handler was made
+`WithInsecureNoAuth`, and such a handler answers only a loopback Host.
+A request that looks like a browser page's (an Origin, a cross-site
+`Sec-Fetch-Site`, a body of another type than its route's) is refused
+in every mode. `read` covers the files' reads, `write` writes and
+removes, and `exec` runs anything: `Exec`, the processes and the
+environment, which a client without it is not told. `exec` is never
+implied by `read` or `write`. A client's processes live in a session it
+opens at its first `Start` and renews on a lease (`DefaultLease`); when
+the lease lapses, or the client closes, the server ends every process
+the session started, and a process is reached only through its own
+session, by the principal that opened it. `Exec` streams its output as
+NDJSON frames, and its process ends with the request. Errors keep
+their sentinels across the wire (`ErrOutside`, `fs.ErrNotExist` and the
+rest), and every bound (body sizes, sessions, processes per session, a
+listing) is an exported constant or option. The routes are in the
+package doc.
+
 ## Planned
 
-- `remote`: `Handler(ws)`, an `http.Handler` serving any workspace, and
-  `Dial(url)`, a workspace over it, with `Start`'s pipes on the wire
-  and scoped credentials (read, write, exec).
 - `Container`: a remote workspace whose server runs in a container.
 - The built-in tools over a `Workspace` (`tools/`), when a second
   product wants them, and a persistent shell built on `Start`.

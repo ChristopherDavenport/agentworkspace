@@ -16,17 +16,57 @@ import (
 	"time"
 )
 
-// start starts c in l, failing the test if it cannot, and closes the
+// starter is a Starter the Start tables run on, opened over dir with
+// env.
+type starter struct {
+	name string
+	open func(t *testing.T, dir string, env []string) Starter
+}
+
+// starters are the Starters every Start test runs on. One in a package
+// that imports this one (remote) is added by AddStarter, from package
+// agentworkspace_test.
+var starters = []starter{
+	{"local", func(t *testing.T, dir string, env []string) Starter {
+		l, err := NewLocal(dir, env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { l.Close() })
+		return l
+	}},
+}
+
+// AddStarter adds a Starter to the tables, as AddBackend adds a
+// backend.
+func AddStarter(name string, open func(t *testing.T, dir string, env []string) Starter) {
+	starters = append(starters, starter{name, open})
+}
+
+// eachStarter runs f on every starter, over a fresh directory, with
+// env.
+func eachStarter(t *testing.T, env []string, f func(t *testing.T, s Starter, dir string)) {
+	for _, st := range starters {
+		t.Run(st.name, func(t *testing.T) {
+			dir := t.TempDir()
+			f(t, st.open(t, dir, env), dir)
+		})
+	}
+}
+
+// start starts c in s, failing the test if it cannot, and closes the
 // process when the test ends.
-func start(t *testing.T, ctx context.Context, l *Local, c Command) Process {
+func start(t *testing.T, ctx context.Context, s Starter, c Command) Process {
 	t.Helper()
-	p, err := l.Start(ctx, c)
+	p, err := s.Start(ctx, c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { p.Close() })
 	return p
 }
+
+var pathEnv = []string{"PATH=" + os.Getenv("PATH")}
 
 // within fails the test if f takes longer than d, as a process that
 // was not ended would.
@@ -45,7 +85,10 @@ func within(t *testing.T, d time.Duration, what string, f func()) {
 // answered on its output before the next is written, as an MCP stdio
 // server answers a request.
 func TestStartEchoesThroughThePipes(t *testing.T) {
-	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	eachStarter(t, pathEnv, testStartEchoes)
+}
+
+func testStartEchoes(t *testing.T, l Starter, _ string) {
 	p := start(t, context.Background(), l, Command{Args: []string{"cat"}})
 	out := bufio.NewReader(p.Stdout())
 	within(t, 10*time.Second, "the conversation", func() {
@@ -74,7 +117,10 @@ func TestStartEchoesThroughThePipes(t *testing.T) {
 // workspace, Command's added, and nothing of this process's.
 func TestStartRunsInTheWorkspace(t *testing.T) {
 	t.Setenv("AGENTWORKSPACE_SECRET", "hunter2")
-	l, dir := local(t, []string{"A=1", "PATH=" + os.Getenv("PATH")})
+	eachStarter(t, []string{"A=1", "PATH=" + os.Getenv("PATH")}, testStartRunsInTheWorkspace)
+}
+
+func testStartRunsInTheWorkspace(t *testing.T, l Starter, dir string) {
 	os.Mkdir(filepath.Join(dir, "sub"), 0o755)
 	var stderr bytes.Buffer
 	p := start(t, context.Background(), l, Command{
@@ -106,7 +152,10 @@ func TestStartRunsInTheWorkspace(t *testing.T) {
 // The end of the context kills the process and everything it started:
 // the child that holds the output open dies too, so the output ends.
 func TestStartIsKilledWithItsContext(t *testing.T) {
-	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	eachStarter(t, pathEnv, testStartIsKilledWithItsContext)
+}
+
+func testStartIsKilledWithItsContext(t *testing.T, l Starter, _ string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := start(t, ctx, l, Command{Args: []string{"sh", "-c", "sleep 30 & echo started; wait"}})
 	out := bufio.NewReader(p.Stdout())
@@ -130,7 +179,10 @@ func TestStartIsKilledWithItsContext(t *testing.T) {
 // Command.Timeout ends a started process as the context's deadline
 // does.
 func TestStartTimeout(t *testing.T) {
-	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	eachStarter(t, pathEnv, testStartTimeout)
+}
+
+func testStartTimeout(t *testing.T, l Starter, _ string) {
 	p := start(t, context.Background(), l, Command{Args: []string{"sleep", "30"}, Timeout: 200 * time.Millisecond})
 	within(t, 10*time.Second, "the timeout", func() {
 		if status, err := p.Wait(); status != -1 || !errors.Is(err, context.DeadlineExceeded) {
@@ -142,7 +194,10 @@ func TestStartTimeout(t *testing.T) {
 // Close ends a process that leaves when its input closes at once, and
 // one that does not after the grace period, with what it started.
 func TestStartClose(t *testing.T) {
-	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	eachStarter(t, pathEnv, testStartClose)
+}
+
+func testStartClose(t *testing.T, l Starter, _ string) {
 	ctx := context.Background()
 
 	polite := start(t, ctx, l, Command{Args: []string{"cat"}})
@@ -174,7 +229,10 @@ func TestStartClose(t *testing.T) {
 
 // Signal reaches the process.
 func TestStartSignal(t *testing.T) {
-	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	eachStarter(t, pathEnv, testStartSignal)
+}
+
+func testStartSignal(t *testing.T, l Starter, _ string) {
 	p := start(t, context.Background(), l, Command{Args: []string{"sleep", "30"}})
 	if err := p.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
@@ -190,7 +248,10 @@ func TestStartSignal(t *testing.T) {
 // it: the background child holding the output is killed, so the output
 // ends.
 func TestStartKillsWhatTheProcessLeft(t *testing.T) {
-	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	eachStarter(t, pathEnv, testStartKillsWhatTheProcessLeft)
+}
+
+func testStartKillsWhatTheProcessLeft(t *testing.T, l Starter, _ string) {
 	p := start(t, context.Background(), l, Command{Args: []string{"sh", "-c", "sleep 30 & echo started"}})
 	within(t, 10*time.Second, "the output's end", func() {
 		got, err := io.ReadAll(p.Stdout())
@@ -206,11 +267,10 @@ func TestStartKillsWhatTheProcessLeft(t *testing.T) {
 // The workspace's Close ends what it started, and a closed workspace
 // starts nothing.
 func TestClosingTheWorkspaceEndsItsProcesses(t *testing.T) {
-	dir := t.TempDir()
-	l, err := NewLocal(dir, []string{"PATH=" + os.Getenv("PATH")})
-	if err != nil {
-		t.Fatal(err)
-	}
+	eachStarter(t, pathEnv, testClosingTheWorkspaceEndsItsProcesses)
+}
+
+func testClosingTheWorkspaceEndsItsProcesses(t *testing.T, l Starter, _ string) {
 	ctx := context.Background()
 	var ps []Process
 	for range 2 {
@@ -233,18 +293,32 @@ func TestClosingTheWorkspaceEndsItsProcesses(t *testing.T) {
 
 // Start refuses what it cannot do before starting anything.
 func TestStartRefuses(t *testing.T) {
-	dir, _ := confined(t)
-	l := mustLocal(t, dir)
+	for _, st := range starters {
+		t.Run(st.name, func(t *testing.T) {
+			dir, _ := confined(t)
+			testStartRefuses(t, st.open(t, dir, pathEnv))
+		})
+	}
+}
+
+func testStartRefuses(t *testing.T, l Starter) {
 	ctx := context.Background()
-	for name, c := range map[string]Command{
-		"no command":     {},
-		"a Dir out":      {Args: []string{"true"}, Dir: ".."},
-		"a Dir via link": {Args: []string{"true"}, Dir: "linkdir"},
-		"Stdin bytes":    {Args: []string{"cat"}, Stdin: []byte("x")},
+	for name, c := range map[string]struct {
+		cmd  Command
+		want error // nil: any error
+	}{
+		"no command":     {Command{}, nil},
+		"a Dir out":      {Command{Args: []string{"true"}, Dir: ".."}, ErrOutside},
+		"a Dir via link": {Command{Args: []string{"true"}, Dir: "linkdir"}, ErrOutside},
+		"Stdin bytes":    {Command{Args: []string{"cat"}, Stdin: []byte("x")}, nil},
 	} {
-		if p, err := l.Start(ctx, c); err == nil {
+		p, err := l.Start(ctx, c.cmd)
+		switch {
+		case err == nil:
 			p.Close()
 			t.Errorf("%s: started", name)
+		case c.want != nil && !errors.Is(err, c.want):
+			t.Errorf("%s: %v, want %v", name, err, c.want)
 		}
 	}
 	cctx, cancel := context.WithCancel(ctx)
@@ -275,7 +349,10 @@ func TestStartIsOptional(t *testing.T) {
 
 // Many processes started and ended at once share the workspace safely.
 func TestStartConcurrently(t *testing.T) {
-	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	eachStarter(t, pathEnv, testStartConcurrently)
+}
+
+func testStartConcurrently(t *testing.T, l Starter, _ string) {
 	var wg sync.WaitGroup
 	for i := range 8 {
 		wg.Go(func() {

@@ -112,10 +112,11 @@
 // offers: their list, a server's start, the sessions they run in and
 // the routes of the processes it started so, and nothing else. It does
 // not imply exec, nor exec it, and it needs no read: the info route
-// answers it too, with nothing but the root's last element (Root, and
-// the served descriptor's, are not the host's path to a principal
-// without read), the descriptor without its Host, the bounds and that
-// servers are offered. A principal holding servers
+// answers it too, with nothing but the root's last element, the
+// descriptor without its Host, the bounds and that servers are
+// offered; the client takes a root that is not absolute as withheld,
+// and its Root, and its Served and Descriptor roots, are "", never a
+// partial path. A principal holding servers
 // alone dials, lists and starts the offered servers and talks to them
 // over their pipes, and reads no file (its client's FS, WriteFile and
 // Remove are ErrForbidden), runs no command (no Exec, no Start, no

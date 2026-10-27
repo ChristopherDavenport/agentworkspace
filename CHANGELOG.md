@@ -7,6 +7,14 @@ versions may break the API.
 
 ## Unreleased
 
+- Changed: `Workspace.Root` is absolute, or `""` when the workspace does
+  not tell this side its root, never a partial path (#36). A remote
+  client dialled by a principal without `read` gave the root's last
+  element as its `Root`, `Served().Root` and `Descriptor().Root`; it now
+  gives `""` for each, while the server still sends the last element,
+  so an older client dials as before. RFC 0001 §1 states the rule, and
+  `workspacetest.Run` checks a readable workspace's root is absolute.
+
 - Changed: mcpworkspace carries the thirteen signals remote does (`HUP
   INT QUIT KILL USR1 USR2 PIPE ALRM TERM CONT STOP TSTP WINCH`, the new
   `wire.Signal*` constants), where it carried `INT`, `TERM` and `KILL`

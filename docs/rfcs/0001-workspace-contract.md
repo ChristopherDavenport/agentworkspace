@@ -89,7 +89,14 @@ interpreted as in RFC 2119.
 - **Root**: the absolute path of the workspace's working directory as
   the workspace's own processes see it: the checkout on the agent's
   machine, `/workspace` in a container. It is what the model is told
-  and what the session records as its `cwd`.
+  and what the session records as its `cwd`. A backend MUST give it
+  absolute whenever it knows it. Where the serving side withholds it
+  (remote, to a principal that may not read) the backend MUST give the
+  **withheld** value, which is no path and which a caller can test for
+  (the empty string in Go; a descriptor then writes no `cwd`), and
+  MUST NOT give a partial path in its place: a caller that joins a
+  name with the root, or compares two roots, must not get an answer
+  that is wrong for some principals only (#36).
 - **Name**: a path relative to the root, as [section 2](#2-names-and-confinement)
   defines.
 - **Backend**: an implementation of the workspace: `Local`, a
@@ -624,7 +631,7 @@ lands in session files that a program may publish, so a redactor
 SHOULD know the member.
 
 Over remote, a principal without `read` is told the served descriptor
-without its host, as it is told the root's last element alone.
+without its host and with its root withheld.
 
 A descriptor's members are fixed for the workspace's life: asking
 twice gives the same answer, and a binding MAY cache it.
@@ -732,8 +739,9 @@ does not repeat. In summary:
 `exec` and `servers` imply neither the other; `servers` needs no
 `read`. A principal holding `servers` alone is a server provider and no
 starter, reads no file, runs no command and is told no environment. A
-principal without `read` is told the root's last element alone, not a
-path on the serving side's machine.
+principal without `read` is not told the root: the info route gives
+its last element alone, for a client older than draft 0.3, and a
+client MUST take a root that is not absolute as withheld.
 
 The server says its bounds in the info route, and the client sends no
 more. Exec without a stream gives back at most the output bound of each
@@ -880,14 +888,6 @@ The issues that will add or change a rule here:
 - #31: `connect(port)` ([section 9](#9-ports)).
 - #34: named roots ([section 10](#10-roots)).
 
-Where the code and its doc comments disagree today. This draft does
-not pick a side; each is settled by the issue named, or by a later
-draft:
-
-- **`Workspace.Root`.** Its doc comment says it is the absolute path of
-  the working directory; a remote client dialled by a principal without
-  `read` is told the root's last element alone, so its `Root()`, and
-  its `Served().Root`, are not absolute.
 
 Questions with no issue yet:
 
@@ -916,6 +916,10 @@ Questions with no issue yet:
   `KILL`, `HUP`) every starter carries, the named set of thirteen a
   binding should, and a signal not carried refused as *unsupported*
   (#40). mcpworkspace carries the thirteen, where it carried three.
+- [Section 1](#1-terminology): the root is absolute whenever it is
+  known, and otherwise the withheld value, never a partial path (#36);
+  a remote client takes the last element its info route gives a
+  principal without `read` as withheld.
 - [Section 2](#error-kinds): every wire carries every kind both ways
   (#38). mcpworkspace's files carry the nine, and its process and
   server methods carry them too, as JSON-RPC error `-32011` with a

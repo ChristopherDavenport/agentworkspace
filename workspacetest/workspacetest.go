@@ -223,6 +223,10 @@ func insideWorks(t *testing.T, b Backend) {
 // instance, a remote its endpoint.
 func describes(t *testing.T, d agentworkspace.Descriptor) {
 	t.Helper()
+	// A workspace whose files may be read tells its root, absolute.
+	if !path.IsAbs(d.Root) {
+		t.Errorf("Descriptor.Root = %q, want an absolute path", d.Root)
+	}
 	switch d.Kind {
 	case agentworkspace.KindLocal:
 		if d.Ref != "" || d.Host == "" {

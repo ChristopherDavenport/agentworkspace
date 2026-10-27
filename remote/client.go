@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -283,9 +284,19 @@ func (c *Client) sessionRoute() string {
 	return routeSessions + "/" + c.session
 }
 
-// Root is the served workspace's Root; for a principal without read,
-// whom the server does not tell its path, its last element alone.
-func (c *Client) Root() string { return c.info.Root }
+// Root is the served workspace's Root, or "" for a principal without
+// read, whom the server does not tell it: the info route then gives the
+// root's last element alone, which is no path and is not passed on.
+func (c *Client) Root() string { return absolute(c.info.Root) }
+
+// absolute is root when it is an absolute path, and "" otherwise: a
+// root withheld (RFC 0001 §1).
+func absolute(root string) string {
+	if path.IsAbs(root) {
+		return root
+	}
+	return ""
+}
 
 // Env is the served workspace's Env, a copy, as it was at Dial; empty
 // for a principal without exec, whom the server does not tell it.
@@ -307,12 +318,16 @@ func (c *Client) Reach() agentworkspace.Reach {
 // Descriptor names the remote: KindRemote, the base URL with no
 // userinfo, query or fragment as its Ref, and the served Root.
 func (c *Client) Descriptor() agentworkspace.Descriptor {
-	return agentworkspace.Descriptor{Kind: agentworkspace.KindRemote, Ref: c.base.String(), Root: c.info.Root}
+	return agentworkspace.Descriptor{Kind: agentworkspace.KindRemote, Ref: c.base.String(), Root: c.Root()}
 }
 
 // Served is the served workspace's own Descriptor, its Root as Root
-// gives it.
-func (c *Client) Served() agentworkspace.Descriptor { return c.info.Served.workspace() }
+// gives it: "" when it is withheld.
+func (c *Client) Served() agentworkspace.Descriptor {
+	d := c.info.Served.workspace()
+	d.Root = absolute(d.Root)
+	return d
+}
 
 // Scopes are the scopes the server said the principal holds when it
 // answered Dial, a copy, in the server's order: what the program's

@@ -44,7 +44,10 @@ type Workspace interface {
 	// Root is the absolute path of the working directory as the
 	// workspace's own processes see it: the checkout on this machine,
 	// /workspace in a container. It is what the model is told and what
-	// the session records as its cwd.
+	// the session records as its cwd. It is "" when the workspace does
+	// not tell this side its root (a remote client whose principal may
+	// not read), never a partial path: a caller tests for "" before it
+	// joins a name with it or compares it with another.
 	Root() string
 	// FS reads the workspace's files. Opening a name never blocks: a
 	// FIFO or a device opens, or fails, at once, and a tool checks what
@@ -149,7 +152,7 @@ type Descriptor struct {
 	// describe: a container's or a sandbox's ID, set whenever a restart
 	// gives a new file system.
 	Instance string
-	// Root is Workspace.Root.
+	// Root is Workspace.Root: absolute, or "" when it is withheld.
 	Root string
 }
 

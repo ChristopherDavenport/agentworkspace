@@ -17,12 +17,20 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/lifetime"
 )
 
 // pumpWait is how long a process's end waits for the rest of its
 // standard error to reach Command.Stream, as Local's WaitDelay does: a
 // Stream that does not take it by then is left behind.
 const pumpWait = 5 * time.Second
+
+// openWait is how long Close waits for the stream of standard error to
+// open before it sends the close: no longer than the server keeps a
+// closed process's standard error for a stream that comes after the
+// close. Headers a proxy holds back, or a dead connection, cost a close
+// this much, not the client's timeout.
+const openWait = lifetime.Grace
 
 // Start starts cmd in the served workspace, in the client's session
 // (opened now, if this is the first Start or the last session was
@@ -194,16 +202,16 @@ func (p *process) Signal(sig os.Signal) error {
 // started, as the served workspace's Process.Close does, and releases
 // its streams. It returns once the process has exited, and may be
 // called more than once. With a Command.Stream, the close is sent once
-// the stream of standard error is open (or the client's timeout has
-// passed), so the stream gets what the process writes on its way out
-// even when Close follows Start at once.
+// the stream of standard error is open, or after openWait, so the
+// stream gets what the process writes on its way out even when Close
+// follows Start at once.
 func (p *process) Close() error {
 	p.closeOnce.Do(func() {
 		p.mu.Lock()
 		p.closing = true
 		p.mu.Unlock()
 		if p.opened != nil {
-			t := time.NewTimer(p.c.timeout)
+			t := time.NewTimer(min(p.c.timeout, openWait))
 			select {
 			case <-p.opened:
 			case <-t.C:

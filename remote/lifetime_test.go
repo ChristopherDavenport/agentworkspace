@@ -513,6 +513,11 @@ func TestStandardErrorAskedForAfterTheClose(t *testing.T) {
 	if got, err := stderr(route); err != nil || got != "bye\n" {
 		t.Fatalf("standard error after the close: %q, %v; want %q", got, err, "bye\n")
 	}
+	// Taken once, a closed process's standard error is gone, as every
+	// route of a closed process is.
+	if _, err := stderr(route); !errors.Is(err, ErrNoProcess) {
+		t.Errorf("standard error asked for again after the close: %v, want ErrNoProcess", err)
+	}
 
 	// room starts once the only process's slot is free, within ten
 	// seconds.
@@ -538,5 +543,44 @@ func TestStandardErrorAskedForAfterTheClose(t *testing.T) {
 	room("a start a grace after the close")
 	if _, err := stderr(route); !errors.Is(err, ErrNoProcess) {
 		t.Errorf("standard error a grace after the close: %v, want ErrNoProcess", err)
+	}
+}
+
+// heldHeaders is a ResponseWriter whose Flush sends nothing, as a proxy
+// that holds the headers until the body's first bytes, or a compressing
+// handler that ignores Flush, does.
+type heldHeaders struct{ http.ResponseWriter }
+
+func (heldHeaders) Flush()                        {}
+func (h heldHeaders) Unwrap() http.ResponseWriter { return h.ResponseWriter }
+
+// Close waits for the stream of standard error to open a grace at most,
+// not the client's timeout: behind headers held back until the process
+// writes, which it does only once its close has begun, the close is
+// sent a grace in, and the stream still gets the tail.
+func TestCloseWaitsAGraceForStandardError(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	h, err := NewHandler(l, WithInsecureNoAuth())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(heldHeaders{w}, r)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { h.Close() })
+	ws := dial(t, srv.URL, WithTimeout(30*time.Second))
+	var stream syncBuffer
+	p, err := agentworkspace.Start(context.Background(), ws, agentworkspace.Command{Args: []string{"sh", "-c", "read x; echo bye >&2"}, Stream: &stream})
+	if err != nil {
+		t.Fatal(err)
+	}
+	began := time.Now()
+	within(t, 15*time.Second, "the close", func() { p.Close() })
+	if took := time.Since(began); took < openWait || took > openWait+3*time.Second {
+		t.Errorf("the close took %v, want about %v", took, openWait)
+	}
+	if got := stream.String(); got != "bye\n" {
+		t.Errorf("the stream has %q, want %q", got, "bye\n")
 	}
 }

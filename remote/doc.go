@@ -162,12 +162,13 @@
 // everything it started. A process's standard error, when its start
 // asked for it, is answered as soon as the server has claimed its
 // stream, and Process.Close is sent once the client has that answer
-// (or its timeout has passed), so a Command.Stream gets what the
+// (or after a grace, two seconds), so a Command.Stream gets what the
 // process writes on its way out however soon Close follows Start; the
 // server also serves a closed process's standard error to a stream
 // that comes after the close, until a grace after its exit. Exec's
-// process lives no longer than its request. Handler.Close ends every session's processes and every Exec,
-// and returns once they have ended. Session and process ids are random (crypto/rand's Text), and
+// process lives no longer than its request. Handler.Close ends every
+// session's processes and every Exec, and returns once they have
+// ended. Session and process ids are random (crypto/rand's Text), and
 // a process is reached only through the session that started it, by
 // the principal that opened that: another's reads as no such session.
 //

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"sync"
@@ -48,9 +49,17 @@ type group struct {
 
 // newGroup is the group of the process pid, just started.
 func newGroup(pid int) *group {
-	start, _ := startOf(pid)
+	start, _ := procStart(pid)
 	return &group{pgid: pid, start: start}
 }
+
+// What a group reads the process table with and signals through;
+// tests replace them with a table of their own.
+var (
+	procTable  = processes
+	procStart  = startOf
+	sendSignal = syscall.Kill
+)
 
 // procInfo is what a walk needs of a process.
 type procInfo struct {
@@ -73,7 +82,7 @@ func (g *group) signal(sig syscall.Signal) error {
 		return nil
 	}
 	g.descend(sig, true)
-	return syscall.Kill(-g.pgid, sig)
+	return sendSignal(-g.pgid, sig)
 }
 
 // reap records that the leader has been waited for, killing what is
@@ -93,15 +102,34 @@ func (g *group) reap(kill bool) {
 // first and walking again until a walk finds no more, so that none
 // forks a child the kill would miss: a child whose parent is killed
 // before it is found is given to another parent, and found no more.
+//
+// A walk reads the table before it signals, so a descendant that exits
+// in between can have its ID taken by another process, which the stop
+// then reaches. Once the stops are sent, each process stopped by its
+// own ID or its own group's is read again, and one whose start time
+// no longer matches is continued: it is not a descendant, and the
+// kill's walk, which reads start times again, passes it by.
 func (g *group) kill(leader bool) {
-	syscall.Kill(-g.pgid, syscall.SIGSTOP)
+	sendSignal(-g.pgid, syscall.SIGSTOP)
+	stopped := map[int]uint64{}
 	for range 8 {
-		if g.descend(syscall.SIGSTOP, leader) == 0 {
+		added, sent := g.descend(syscall.SIGSTOP, leader)
+		maps.Copy(stopped, sent)
+		if added == 0 {
 			break
 		}
 	}
+	for target, start := range stopped {
+		pid := target
+		if pid < 0 {
+			pid = -pid
+		}
+		if now, ok := procStart(pid); ok && now != start {
+			sendSignal(target, syscall.SIGCONT)
+		}
+	}
 	g.descend(syscall.SIGKILL, leader)
-	syscall.Kill(-g.pgid, syscall.SIGKILL)
+	sendSignal(-g.pgid, syscall.SIGKILL)
 }
 
 // descend sends sig to every descendant of the leader that left its
@@ -114,15 +142,17 @@ func (g *group) kill(leader bool) {
 // its own group, as one that called setsid or setpgid does, is sent sig
 // by that group, so what it starts there is too; any other alone. It
 // never signals this process or its group. It returns how many
-// descendants it found that earlier walks had not.
+// descendants it found that earlier walks had not, and what it
+// signalled: each ID, or a group's as its negative, with the start
+// time the walk read for that process or the group's leader.
 //
 // A descendant that is not stopped can exit between the walk's read of
 // /proc and the signal, and its ID be given to another process in that
 // moment; the kill stops every descendant first, so it does not race.
-func (g *group) descend(sig syscall.Signal, leader bool) int {
-	ps, ok := processes()
+func (g *group) descend(sig syscall.Signal, leader bool) (int, map[int]uint64) {
+	ps, ok := procTable()
 	if !ok {
-		return 0
+		return 0, nil
 	}
 	in := map[int]bool{}
 	// The leader may have been reaped by now though leader says not, as
@@ -147,7 +177,7 @@ func (g *group) descend(sig syscall.Signal, leader bool) int {
 	self, selfGroup := os.Getpid(), syscall.Getpgrp()
 	found := make(map[int]uint64, len(g.found))
 	added := 0
-	signalled := map[int]bool{}
+	signalled := map[int]uint64{}
 	for pid := range in {
 		p, ok := ps[pid]
 		if !ok || pid == g.pgid || pid == self {
@@ -162,17 +192,17 @@ func (g *group) descend(sig syscall.Signal, leader bool) int {
 		if p.zombie || p.pgrp == g.pgid {
 			continue // the group's own are sent sig by the group
 		}
-		target := pid
+		target, start := pid, p.start
 		if in[p.pgrp] && p.pgrp != selfGroup {
-			target = -p.pgrp
+			target, start = -p.pgrp, ps[p.pgrp].start
 		}
-		if !signalled[target] {
-			signalled[target] = true
-			syscall.Kill(target, sig)
+		if _, ok := signalled[target]; !ok {
+			signalled[target] = start
+			sendSignal(target, sig)
 		}
 	}
 	g.found = found
-	return added
+	return added, signalled
 }
 
 // end climbs the ladder until exited, given how long to wait, reports

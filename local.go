@@ -95,14 +95,15 @@ func WithHost(name string) LocalOption {
 
 // hostOr is name, the system's host name, or, when that is empty, a
 // stable name for this machine: "machine-" and 16 hex digits of a
-// SHA-256 of a label and the machine ID (/etc/machine-id, or D-Bus's),
+// SHA-256 of a label and the machine ID (/etc/machine-id, then
+// /run/machine-id, then D-Bus's, the first that is not empty),
 // never the ID itself, which is meant to be kept private; "localhost"
 // where there is no machine ID either.
 func hostOr(name string) string {
 	if name != "" {
 		return name
 	}
-	for _, f := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+	for _, f := range []string{"/etc/machine-id", "/run/machine-id", "/var/lib/dbus/machine-id"} {
 		if id, err := os.ReadFile(f); err == nil && len(bytes.TrimSpace(id)) > 0 {
 			sum := sha256.Sum256(append([]byte("agentworkspace host\n"), bytes.TrimSpace(id)...))
 			return "machine-" + hex.EncodeToString(sum[:8])

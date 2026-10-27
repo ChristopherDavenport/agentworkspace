@@ -443,12 +443,17 @@ is its own, which it checks at each call by `/proc/self` naming its
 process ID, and `group` when it is not. Before each signal, `Local`
 walks `/proc` by parent links from the process, its group's members and
 what it found before, remembers each descendant, member or not, with
-its start time, and stops them all before it kills them. Between its
-read of `/proc` and an INT or a TERM, a descendant that is not stopped
-can exit and its ID be given to another process, which then gets the
-signal; the start time is checked at the read, not at the send, so
-that window remains for the first two steps. The kill does not race:
-what it signals is stopped first. On macOS it is `group`: `Local` does not read that system's process table
+its start time, and stops them all before it kills them. Every walk
+reads `/proc` before it signals, so a descendant that exits in between
+can have its ID taken by another process, which then gets the signal:
+the start time is checked at the read, not at the send. For an INT or
+a TERM that window remains, and an unrelated process can get the
+signal. For the stop, `Local` reads each stopped process's start time
+again once the stops are sent and continues any that no longer
+matches, so an unrelated process is held stopped only for that moment;
+the KILL that follows reaches only what is stopped and still matches,
+which cannot exit and give up its ID unless something else kills it.
+On macOS it is `group`: `Local` does not read that system's process table
 (`sysctl kern.proc`), so a descendant that left the group outlives the
 end there. On both, a descendant whose parent exited before any signal
 was sent (a daemon's double fork, a job its shell left) is not found.
@@ -577,8 +582,9 @@ uses the system's host name, which two machines can share (two laptops
 of one model), and lets the program name the machine instead
 (`WithHost`, which refuses an empty name). Where the system gives no
 host name, it uses `machine-` and 16 hex digits of a SHA-256 of a label
-and the machine ID (`/etc/machine-id`, or D-Bus's), never the ID
-itself, and `localhost` where there is no machine ID either. A host name
+and the machine ID (the first of `/etc/machine-id`, `/run/machine-id`
+and D-Bus's that is not empty), never the ID itself, and `localhost`
+where there is no machine ID either. A host name
 lands in session files that a program may publish, so a redactor
 SHOULD know the member.
 

@@ -3,9 +3,13 @@ package agentworkspace
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -118,5 +122,36 @@ func TestAnExitBeforeTheContextEndsKeepsItsStatus(t *testing.T) {
 	out, err := l.Exec(ctx, Command{Args: []string{"sh", "-c", "echo hi; sleep 5 & exit 3"}})
 	if err != nil || out == nil || out.ExitCode != 3 || out.Interrupted || string(out.Stdout) != "hi\n" {
 		t.Errorf("Exec = %+v, %v; want status 3, not interrupted", out, err)
+	}
+}
+
+// A stop that reached a process which took a descendant's ID, between
+// the walk's read of the table and the signal, is undone: the process
+// is continued, and the kill passes it by. The table is a fake one, as
+// a real ID cannot be made to be reused on cue.
+func TestAStopThatReachedAReusedIDIsUndone(t *testing.T) {
+	table := map[int]procInfo{
+		100: {ppid: 1, pgrp: 100, start: 1},   // the leader
+		200: {ppid: 100, pgrp: 300, start: 5}, // a descendant that left its group
+	}
+	names := map[syscall.Signal]string{syscall.SIGSTOP: "STOP", syscall.SIGCONT: "CONT", syscall.SIGKILL: "KILL"}
+	var sent []string
+	savedTable, savedStart, savedSend := procTable, procStart, sendSignal
+	t.Cleanup(func() { procTable, procStart, sendSignal = savedTable, savedStart, savedSend })
+	procTable = func() (map[int]procInfo, bool) { return maps.Clone(table), true }
+	procStart = func(pid int) (uint64, bool) { p, ok := table[pid]; return p.start, ok }
+	sendSignal = func(pid int, sig syscall.Signal) error {
+		sent = append(sent, fmt.Sprintf("%s %d", names[sig], pid))
+		if pid == 200 && sig == syscall.SIGSTOP {
+			// 200 exited as the walk read it, and another process,
+			// started later, has its ID.
+			table[200] = procInfo{ppid: 1, pgrp: 200, start: 9}
+		}
+		return nil
+	}
+	g := &group{pgid: 100, start: 1}
+	g.kill(true)
+	if want := []string{"STOP -100", "STOP 200", "CONT 200", "KILL -100"}; !slices.Equal(sent, want) {
+		t.Errorf("signals = %q, want %q", sent, want)
 	}
 }

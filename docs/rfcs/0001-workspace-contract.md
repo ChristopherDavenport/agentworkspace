@@ -402,9 +402,43 @@ names TERM, so a server or a background job gets its chance to clean up
 before KILL. A process that ignores both is killed two graces after the
 ladder begins.
 
-Open: #32 will state that "everything it started" includes the
-descendants that left its process group or session, and how a backend
-that cannot find an orphaned descendant says so.
+**Everything it started.** Ending a process MUST end every process it
+started, directly or through others, whatever process group or session
+it moved to (by `setsid` or `setpgid`, or a shell's job control): each
+step of the ladder reaches them as it reaches the process. Not every
+backend can find them all, so each MUST state its **reach**, how far
+its end of a process goes:
+
+| Reach | What an end reaches |
+| --- | --- |
+| `group` | the process's group alone; a descendant that left it outlives the end |
+| `descendants` | the group, and every descendant found through parent links when a signal is sent, whatever its group or session; one whose parent exited before any signal was sent has been given to another parent, and is not found |
+| `all` | every descendant, orphaned or not, as a backend that ends a PID namespace or a cgroup whole reaches |
+
+A caller MUST NOT take a backend that states no reach to reach `all`.
+A container backend reaches `all` by ending its instance's PID
+namespace.
+
+A backend that walks a process table to find descendants MUST NOT
+signal the program's own process or group. It SHOULD send a descendant
+that leads a group of its own the signal by that group, so what it
+started there goes too, and SHOULD remember what it found with
+something that tells a reused process ID apart, such as its start time.
+Before the last step it SHOULD stop what it found and walk again until
+a walk finds nothing new, so that no descendant forks a child the kill
+would miss: a child whose parent is killed first is given to another
+parent, and found no more.
+
+The reference binding's reach is `descendants` on Linux: before each
+signal, `Local` walks `/proc` by parent links from the process, its
+group's members and what it found before, remembers each descendant
+with its start time, and stops them all before it kills them. On macOS
+it is `group`: `Local` does not read that system's process table
+(`sysctl kern.proc`), so a descendant that left the group outlives the
+end there. On both, a descendant whose parent exited before any signal
+was sent (a daemon's double fork, a job its shell left) is not found.
+remote's info route does not carry the served workspace's reach yet,
+so a remote client states none.
 
 ## 9. Ports
 
@@ -558,6 +592,7 @@ The root module is the reference binding.
 | close | `Workspace.Close()` |
 | starter | `Starter` interface; `Start(ctx, ws, cmd)` refuses a non-starter with `errors.ErrUnsupported` |
 | process | `Process{Stdin, Stdout, Wait, Signal, Close}` |
+| reach | `ReachOf(ws)` → `Reach`: `ReachGroup`, `ReachDescendants`, `ReachAll`, or `""` when the workspace states none; a workspace states it with a `Reach()` method |
 | owner's context | the `ctx` given to `Start` or `StartServer` |
 | server provider | `ServerProvider{Servers, StartServer}`, `Server{Name, Description}`, `ValidServerName`, `ErrNoServer` |
 | offering | `Offer(ws, servers, opts...)` → `*Offering`; `OfferedServer{Server, Command, Secrets}`; `WithOutputFilter(OutputFilter)`; `ErrOutputFilter` |
@@ -683,13 +718,15 @@ The reference suite is Go package `workspacetest`:
 
 | Table | Holds |
 | --- | --- |
-| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt), invalid names |
-| `RunStarter` | a starter: the pipes, the directory and environment, the lifetimes (context, timeout, close, exit, the workspace's close), signals, refusals, concurrency |
+| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names |
+| `RunStarter` | a starter: the pipes, the directory and environment (argv resolution, the environment as given), the lifetimes (context, timeout, close, exit, the workspace's close, a descendant that left the group), signals, refusals, concurrency |
 | `RunServerProvider` | a server provider: the list, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
 | `Confined` | the layout `Run` uses: a workspace beside a directory holding a secret, with links that lead out and one that stays in |
 
 A backend runs the tables from its own tests, as `Local`, remote, the
-tunnel and mcpworkspace do. The tables make real files, links, FIFOs
+tunnel and mcpworkspace do. A case that needs a descendant to leave
+its group is skipped for a backend whose reach is `group`, and where
+`setsid` is not on the `PATH`. The tables make real files, links, FIFOs
 and processes, expect a POSIX shell and the common utilities (`sh`,
 `cat`, `sleep`, `pwd`) on the workspace's `PATH`, and bound every wait,
 so a process that was not ended fails rather than hangs.
@@ -750,8 +787,6 @@ The issues that will add or change a rule here:
 - #30: a container backend: conformance, descriptor, its instance
   ended at close.
 - #31: `connect(port)` ([section 9](#9-ports)).
-- #32: descendants that left the process group or session
-  ([section 8](#8-ending-a-process)).
 - #33: Exec over mcpworkspace's process methods
   ([sections 6](#6-exec) and [14](#mcpworkspace)).
 - #34: named roots ([section 10](#10-roots)).
@@ -760,11 +795,6 @@ Where the code and its doc comments disagree today. This draft does
 not pick a side; each is settled by the issue named, or by a later
 draft:
 
-- **"Everything it started".** The doc comments of `Command.Timeout`,
-  `Starter.Start`, `Process.Signal` and `Process.Close`, and the README
-  for Exec, promise that an end reaches everything the process started;
-  `Local` signals the process group, so a descendant that called
-  `setsid` or `setpgid` outlives it, for Exec and Start alike (#32).
 - **`Descriptor.Ref`.** Its doc comment lists "a host, an instance ID"
   among what `Ref` may hold; agentsession 0.14 gives the host and the
   instance members of their own and says `ref` is absent for `local`
@@ -815,3 +845,6 @@ Questions with no issue yet:
   is ended (#5): INT, then TERM, then KILL, a grace apart, with Close
   closing input first. The reference binding sent TERM then KILL for a
   started process and KILL at once for Exec.
+- [Section 8](#8-ending-a-process): everything a process started
+  includes the descendants that left its group or session (#32), and a
+  backend states its reach (`group`, `descendants`, `all`).

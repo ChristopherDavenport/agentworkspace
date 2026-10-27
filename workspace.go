@@ -153,6 +153,39 @@ type Starter interface {
 	Start(ctx context.Context, cmd Command) (Process, error)
 }
 
+// Reach is how far a Starter's end of a process reaches among what the
+// process started. Every end (Process.Close, the context's, the
+// timeout's, the workspace's Close, and Exec's) is meant to end every
+// process the process started, directly or not, whatever group or
+// session it moved to; a backend that cannot find some of them says
+// which with its Reach, and a caller asks for it with ReachOf.
+type Reach string
+
+const (
+	// ReachGroup is the process's group alone: a descendant that
+	// called setsid or setpgid, or that a shell's job control put in a
+	// group of its own, outlives the end.
+	ReachGroup Reach = "group"
+	// ReachDescendants is the group and every descendant found through
+	// parent links when a signal is sent, whatever its group or
+	// session. A descendant whose parent exited before any signal was
+	// sent has been given to another parent, and is not found.
+	ReachDescendants Reach = "descendants"
+	// ReachAll is every descendant, orphaned or not, as when the
+	// backend ends a PID namespace or a cgroup whole.
+	ReachAll Reach = "all"
+)
+
+// ReachOf says how far ending a process started in ws reaches, as ws
+// says with a Reach method, and "" when ws does not say. "" is not a
+// claim of ReachAll.
+func ReachOf(ws Workspace) Reach {
+	if r, ok := ws.(interface{ Reach() Reach }); ok {
+		return r.Reach()
+	}
+	return ""
+}
+
 // Process is a process started in a workspace. Its methods are safe
 // for concurrent use: one goroutine may read Stdout while another
 // writes Stdin and a third waits.
@@ -169,8 +202,9 @@ type Process interface {
 	// failed; an exit status other than zero is not an error. Wait may
 	// be called any number of times and returns the same each time.
 	Wait() (status int, err error)
-	// Signal sends sig to the process and to everything it started. It
-	// is os.ErrProcessDone once the process has exited.
+	// Signal sends sig to the process and to everything it started, as
+	// far as the workspace's Reach goes. It is os.ErrProcessDone once
+	// the process has exited.
 	Signal(sig os.Signal) error
 	// Close ends the process, if it is still running, and everything it
 	// started, and releases the pipes. It first closes Stdin and gives

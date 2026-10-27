@@ -55,6 +55,7 @@ func RunStarter(t *testing.T, starters ...Starter) {
 		{"Concurrently", path, false, startConcurrently},
 		{"FindsItsProgramOnItsOwnPath", []string{"A=1"}, false, findsItsProgramOnItsOwnPath},
 		{"EnvIsWhatItWasGiven", givenEnv, false, envIsWhatItWasGiven},
+		{"EndsWhatLeftItsGroup", path, false, startEndsWhatLeftItsGroup},
 	} {
 		t.Run(table.name, func(t *testing.T) {
 			if table.secret {
@@ -295,6 +296,24 @@ func startRefuses(t *testing.T, l agentworkspace.Starter) {
 			p.Close()
 		}
 		t.Errorf("a cancelled context: %v", err)
+	}
+}
+
+// Close ends what the process started that left its group, in a
+// session of its own: here a child that called setsid, ignores SIGINT
+// and SIGTERM, and beats into a file until it is killed.
+func startEndsWhatLeftItsGroup(t *testing.T, s agentworkspace.Starter, dir string) {
+	leavesItsGroup(t, s, dir)
+	p := start(t, context.Background(), s, agentworkspace.Command{Args: []string{"sh", "-c", "setsid sh beat.sh & echo started; wait"}})
+	if line, err := bufio.NewReader(p.Stdout()).ReadString('\n'); err != nil || line != "started\n" {
+		t.Fatalf("first line = %q, %v", line, err)
+	}
+	if !beating(t, dir) {
+		t.Fatal("the child that left the group never beat")
+	}
+	within(t, 15*time.Second, "closing it", func() { p.Close() })
+	if beating(t, dir) {
+		t.Error("the child that left the group outlived Close")
 	}
 }
 

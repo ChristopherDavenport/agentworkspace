@@ -22,6 +22,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -317,6 +318,69 @@ func execRuns(t *testing.T, b Backend) {
 		t.Error("a cancelled context ran the command to the end")
 	}
 	execInterrupted(t, ws)
+	execEndsWhatLeftItsGroup(t, dir, ws)
+}
+
+// A timeout ends what the command started that left its group, as
+// startEndsWhatLeftItsGroup's Close does.
+func execEndsWhatLeftItsGroup(t *testing.T, dir string, ws agentworkspace.Workspace) {
+	t.Run("a timeout ends what left the group", func(t *testing.T) {
+		leavesItsGroup(t, ws, dir)
+		var out *agentworkspace.Output
+		var err error
+		within(t, 15*time.Second, "the Exec", func() {
+			out, err = ws.Exec(context.Background(), agentworkspace.Command{Args: []string{"sh", "-c", "setsid sh beat.sh & sleep 30"}, Timeout: time.Second})
+		})
+		if err != nil || !out.TimedOut {
+			t.Fatalf("Exec = %+v, %v; want it timed out", out, err)
+		}
+		if beating(t, dir) {
+			t.Error("the child that left the group outlived the timeout")
+		}
+	})
+}
+
+// beatScript beats into the file beat until it is killed, or for 30
+// seconds, ignoring SIGINT and SIGTERM.
+const beatScript = `trap '' INT TERM HUP
+i=0
+while [ $i -lt 300 ]; do
+	i=$((i+1))
+	echo $i > beat.tmp && mv beat.tmp beat
+	sleep 0.1
+done
+`
+
+// leavesItsGroup writes beat.sh into dir, skipping the test where a
+// child cannot leave its group (no setsid on this PATH) or where ws
+// says its end of a process does not reach one that has.
+func leavesItsGroup(t *testing.T, ws agentworkspace.Workspace, dir string) {
+	t.Helper()
+	if agentworkspace.ReachOf(ws) == agentworkspace.ReachGroup {
+		t.Skip("this workspace's end of a process reaches its group alone")
+	}
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("no setsid here")
+	}
+	os.Remove(filepath.Join(dir, "beat"))
+	if err := os.WriteFile(filepath.Join(dir, "beat.sh"), []byte(beatScript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// beating reports whether beat.sh, run in dir, is still beating: its
+// file changes within a second.
+func beating(t *testing.T, dir string) bool {
+	t.Helper()
+	name := filepath.Join(dir, "beat")
+	first, _ := os.ReadFile(name)
+	for range 10 {
+		time.Sleep(100 * time.Millisecond)
+		if b, _ := os.ReadFile(name); len(b) > 0 && !bytes.Equal(b, first) {
+			return true
+		}
+	}
+	return false
 }
 
 // An Exec whose context ends while it runs ends the command, and what

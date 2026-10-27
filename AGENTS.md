@@ -130,7 +130,8 @@ keeps its rule; one about Local alone stays in the root's tests.
   the host's environment.
 - A started process lives no longer than its owner: `Close`, the
   context's end, `Command.Timeout` and the workspace's `Close` end it
-  and everything it started.
+  and everything it started, with one ladder (SIGINT, SIGTERM,
+  SIGKILL), and a backend states how far that reaches (`Reach`).
 - `Start` is optional (`Starter`), so a workspace that only stores
   files is still a `Workspace`.
 - So is offering MCP servers (`ServerProvider`): a server it starts

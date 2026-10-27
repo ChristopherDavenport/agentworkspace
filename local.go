@@ -25,7 +25,8 @@ import (
 // does, and the policy is what stands in front of it.
 //
 // Local runs on Unix: its processes run in process groups of their
-// own, and its files are opened without blocking.
+// own, and its files are opened without blocking. Ending a process
+// ends its group and, on Linux, the descendants that left it (Reach).
 type Local struct {
 	root *os.Root
 	dir  string // as given, absolute and cleaned
@@ -71,6 +72,13 @@ func (l *Local) Real() string { return l.real }
 // Env is the environment its processes start with, a copy: a caller
 // that changes it changes nothing a later process starts with.
 func (l *Local) Env() []string { return slices.Clone(l.env) }
+
+// Reach is ReachDescendants on Linux, where Local walks /proc for the
+// descendants that left a process's group before it signals, and
+// ReachGroup elsewhere, macOS among them, where it signals the group
+// alone. On either, a descendant whose parent exited before the end
+// began is not found.
+func (l *Local) Reach() Reach { return reach }
 
 // Descriptor names the local machine.
 func (l *Local) Descriptor() Descriptor { return Descriptor{Kind: KindLocal, Root: l.dir} }

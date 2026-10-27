@@ -7,6 +7,24 @@ versions may break the API.
 
 ## Unreleased
 
+- Fixed: on Linux, ending a process `Local` started (`Process.Close`,
+  the context's end, `Command.Timeout`, the workspace's `Close`,
+  `Process.Signal`, and an `Exec` its context or timeout ends) now
+  reaches the descendants that left its process group, by `setsid`,
+  `setpgid` or a shell's job control, which outlived it before (#32).
+  Before each signal `Local` walks `/proc` by parent links, sends a
+  descendant that leads a group of its own the signal by that group,
+  and stops them all before it kills them. A descendant whose parent
+  exited before any signal was sent is still not found. On macOS
+  `Local` signals the group alone, as before.
+- Added: `Reach`, `ReachOf` and `(*Local).Reach`, how far a starter's
+  end of a process reaches (`ReachGroup`, `ReachDescendants`,
+  `ReachAll`): `Local` is `ReachDescendants` on Linux and `ReachGroup`
+  elsewhere. RFC 0001 §8 names the capability, and
+  `workspacetest.Run` and `RunStarter` check a `setsid` child is gone
+  after a timeout and a `Close`, skipping a backend whose reach is
+  `ReachGroup`.
+
 - Added: `Output.Interrupted`. When `Exec`'s context ends while the
   command runs, `Local.Exec` now returns the output collected so far,
   with `ExitCode` -1 and `Interrupted`, beside `ctx.Err()`, where it

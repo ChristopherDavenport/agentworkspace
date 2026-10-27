@@ -44,7 +44,9 @@ user can, and the product's policy is what stands in front of it.
 `Exec` runs each command in a process group of its own, so a timeout
 or a cancel ends what it started too; a cancel still returns the output
 so far, marked `Interrupted`, beside the context's error. `Local` runs
-on Linux and macOS.
+on Linux and macOS. On Linux an end also reaches the descendants that
+left the group (`setsid`, a shell's jobs), found through `/proc`; on
+macOS it reaches the group alone. `ReachOf` says which.
 
 [RFC 0001](docs/rfcs/0001-workspace-contract.md) specifies the contract
 every backend keeps, for an implementation in any language: names and

@@ -13,7 +13,7 @@ const modulePath = "github.com/ChristopherDavenport/agentworkspace"
 // remote, the workspace over HTTP, and workspacetest, the conformance
 // tables, with internal/lifetime, what Local and the tables share. A
 // nested module (mcpworkspace, tunnel) is not one of them.
-var rootPackages = []string{modulePath, modulePath + "/remote", modulePath + "/workspacetest", modulePath + "/internal/lifetime"}
+var rootPackages = []string{modulePath, modulePath + "/remote", modulePath + "/workspacetest", modulePath + "/internal/lifetime", modulePath + "/internal/wireerr"}
 
 // TestImportBoundary enforces the module's one dependency rule: every
 // package in it, and every test of one, imports the standard library

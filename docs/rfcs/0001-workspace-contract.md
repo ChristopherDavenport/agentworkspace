@@ -831,6 +831,11 @@ draft:
 
 Questions with no issue yet:
 
+- **Reach over a wire.** remote's info route does not carry the served
+  workspace's reach ([section 8](#8-ending-a-process)), nor does
+  mcpworkspace, so a client of either states none, and a caller cannot
+  tell a served `Local` on macOS from one on Linux.
+
 - **A wire fixture corpus.** A non-Go server is checked only through a
   Go client. A corpus of request and reply exchanges per wire, as
   agenttool keeps for schemas, would let another language check one

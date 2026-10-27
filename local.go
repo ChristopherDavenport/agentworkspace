@@ -216,7 +216,7 @@ func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	g := &group{pgid: cmd.Process.Pid}
+	g := newGroup(cmd.Process.Pid)
 	// The watch ends the command when run ends first. mu orders its
 	// start against Wait's return, so the outcome says which came
 	// first.

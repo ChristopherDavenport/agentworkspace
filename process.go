@@ -37,12 +37,19 @@ var ladder = [...]syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKIL
 // its parent lives: one whose parent exited before any signal was sent
 // has been given to another parent, and is not (see Reach).
 type group struct {
-	pgid int
+	pgid  int
+	start uint64 // the leader's start time; 0 when unknown
 	// mu is held while a signal is sent and while reaped is set, so no
 	// signal goes to the group's ID once its leader is reaped.
 	mu     sync.Mutex
 	reaped bool
 	found  map[int]uint64 // descendants out of the group found so far, by pid, with their start time
+}
+
+// newGroup is the group of the process pid, just started.
+func newGroup(pid int) *group {
+	start, _ := startOf(pid)
+	return &group{pgid: pid, start: start}
 }
 
 // procInfo is what a walk needs of a process.
@@ -111,7 +118,10 @@ func (g *group) descend(sig syscall.Signal, leader bool) int {
 		return 0
 	}
 	in := map[int]bool{}
-	if leader {
+	// The leader may have been reaped by now though leader says not, as
+	// Exec's is before its output is read: its ID is trusted only while
+	// its start time says it is still the leader's.
+	if p, ok := ps[g.pgid]; leader && ok && (g.start == 0 || p.start == g.start) {
 		in[g.pgid] = true
 	}
 	for pid, p := range ps {
@@ -270,7 +280,7 @@ func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 	p := &localProcess{
 		owner:   l,
 		cmd:     cmd,
-		group:   &group{pgid: cmd.Process.Pid},
+		group:   newGroup(cmd.Process.Pid),
 		stdin:   inW,
 		stdout:  outR,
 		done:    make(chan struct{}),

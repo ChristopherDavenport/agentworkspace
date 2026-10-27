@@ -37,6 +37,16 @@ func processes() (map[int]procInfo, bool) {
 	return ps, true
 }
 
+// startOf is pid's start time, and false when it cannot be read.
+func startOf(pid int) (uint64, bool) {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, false
+	}
+	p, ok := parseStat(b)
+	return p.start, ok
+}
+
 // parseStat reads /proc/<pid>/stat (proc_pid_stat(5)): after the
 // command's name, which is in parentheses and may hold anything, the
 // state, the parent, the group, and in the 22nd field the start time.

@@ -10,3 +10,6 @@ const reach = ReachGroup
 
 // processes cannot list the processes here.
 func processes() (map[int]procInfo, bool) { return nil, false }
+
+// startOf cannot read a start time here.
+func startOf(int) (uint64, bool) { return 0, false }

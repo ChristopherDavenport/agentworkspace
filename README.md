@@ -308,11 +308,21 @@ upgrade and everything in it, so there the upgrade carries no bearer
 token or other reusable credential, only what is good for one dial,
 and the application proves the hub itself: the `Hub` adds its headers
 to the 101 (`WithProofHeader`), and `Serve` checks them
-(`WithHubProof`) before it serves anything. The package doc shows an
-HMAC over a nonce as such a proof. It holds against an impostor that
-cannot reach the hub (the `ssh -R` case, with `ExitOnForwardFailure`);
-one that can relays the upgrade to it, so where the hub is reachable,
-use `wss://`.
+(`WithHubProof`) before it serves anything. The package doc, and its
+`HubProof` example, show such a proof: an HMAC under a key both ends
+hold, never sent, over a nonce the hub issues before each upgrade
+(statelessly, MACed under a secret of its own) and takes once within a
+short lifetime, both MACs binding the workspace's name and the run's
+instance id. It holds against an impostor that cannot reach the hub
+(the `ssh -R` case, with `ExitOnForwardFailure`): an upgrade it
+captured is over a nonce no hub issued. It binds no connection, so one
+that can reach the hub relays to it, and where the hub is reachable,
+use `wss://`. One that fetched real nonces before taking the port gets
+a replay within their lifetime for each upgrade it collects, so the
+workspace end stops, rather than dial again, at a hub that fails the
+proof (ending `Serve` from the hook, which otherwise tries again
+within the lease after a connection that served) and after a few
+upgrades in a row left unanswered.
 
 One `remote.Handler` serves every connection, so a session and its
 processes outlive a drop shorter than the lease, and the server's

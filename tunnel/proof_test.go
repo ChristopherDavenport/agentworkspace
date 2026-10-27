@@ -24,9 +24,12 @@ import (
 	"github.com/coder/websocket"
 )
 
-// The tests' proof, as the package doc has it: an HMAC over a nonce the
-// workspace end sends, keyed by a secret both ends hold and never sent.
-// The package ships no proof; these stand in for the application's.
+// The tests' proof: an HMAC over a nonce the workspace end sends, keyed
+// by a secret both ends hold and never sent. It tests the hooks alone;
+// a nonce the workspace end makes up can be replayed through a forward,
+// so the package doc's proof, and its HubProof example, take one the
+// hub issues. The package ships no proof; these stand in for the
+// application's.
 
 // mac is the hex HMAC-SHA256, under key, of label and nonce.
 func mac(key []byte, label, nonce string) string {

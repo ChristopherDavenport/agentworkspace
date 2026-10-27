@@ -6,11 +6,10 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"path"
-	"strings"
 	"syscall"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/wireerr"
 )
 
 // The errors of the wire's own, which the client returns as they are
@@ -140,36 +139,12 @@ func errorOf(root string, err error) wireError {
 	return wireError{Code: codeOther, Message: bounded(scrub(root, err.Error()))}
 }
 
-// scrub is msg with the served root cut from it, a name under it left
-// relative to it and the root itself ".", and every other word that is
-// an absolute path cut to its last element ("/usr/bin/tool" is
-// ".../tool"). What remains is the served workspace's words and the
-// last element of any path in them.
-func scrub(root, msg string) string {
-	if root != "" && root != "/" {
-		msg = strings.ReplaceAll(msg, root+"/", "")
-	}
-	words := strings.Split(msg, " ")
-	for i, w := range words {
-		lead := len(w) - len(strings.TrimLeft(w, `"'(`))
-		core := strings.TrimRight(w[lead:], `"'):,;`)
-		switch {
-		case core == root && root != "":
-			words[i] = w[:lead] + "." + w[lead+len(core):]
-		case len(core) > 1 && core[0] == '/':
-			words[i] = w[:lead] + ".../" + path.Base(core) + w[lead+len(core):]
-		}
-	}
-	return strings.Join(words, " ")
-}
+// scrub is wireerr.Scrub: msg with root cut from it and every other
+// absolute path cut to its last element.
+func scrub(root, msg string) string { return wireerr.Scrub(root, msg) }
 
 // bounded is s cut to MaxErrorBytes and made valid UTF-8.
-func bounded(s string) string {
-	if len(s) > MaxErrorBytes {
-		s = s[:MaxErrorBytes]
-	}
-	return strings.ToValidUTF8(s, "?")
-}
+func bounded(s string) string { return wireerr.Bounded(s, MaxErrorBytes) }
 
 // err is e as the client's error: its code's sentinel, wrapped with
 // the server's words, or those words alone for a code it does not

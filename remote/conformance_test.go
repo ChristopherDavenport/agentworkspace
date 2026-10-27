@@ -19,10 +19,10 @@ import (
 
 func TestConformance(t *testing.T) {
 	workspacetest.Run(t,
-		workspacetest.Backend{Name: "remote", Links: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+		workspacetest.Backend{Name: "remote", Links: true, Wire: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
 			return served(t, local(t, dir, pathEnv()))
 		}},
-		workspacetest.Backend{Name: "remote, no links", Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+		workspacetest.Backend{Name: "remote, no links", Wire: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
 			return served(t, noLinks{local(t, dir, pathEnv())})
 		}},
 	)

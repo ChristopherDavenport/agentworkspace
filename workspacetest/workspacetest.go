@@ -37,11 +37,14 @@ import (
 
 // Backend is a workspace the tables run on. Open opens one over dir,
 // with PATH alone in its environment, and closes it when the test
-// ends; Links says its FS can read links (an fs.ReadLinkFS).
+// ends; Links says its FS can read links (an fs.ReadLinkFS); Wire says
+// it is the client side of a wire, whose refusals name no path of the
+// serving side's machine (RFC 0001 §15).
 type Backend struct {
 	Name  string
 	Open  func(t *testing.T, dir string) agentworkspace.Workspace
 	Links bool
+	Wire  bool
 }
 
 // Run runs every table a Workspace keeps (confinement, a FIFO, Env,
@@ -59,6 +62,7 @@ func Run(t *testing.T, backends ...Backend) {
 		{"Exec", execRuns},
 		{"NamesThatAreNotValidPaths", namesThatAreNotValidPaths},
 		{"Concurrently", concurrently},
+		{"RefusalsNameNoServedPath", refusalsNameNoServedPath},
 	} {
 		t.Run(table.name, func(t *testing.T) {
 			for _, b := range backends {
@@ -328,10 +332,11 @@ type Execer interface {
 
 // ExecBackend is an Execer the Exec table runs on. Open opens one over
 // a workspace on dir whose environment is env, and closes it when the
-// test ends.
+// test ends; Wire is Backend's.
 type ExecBackend struct {
 	Name string
 	Open func(t *testing.T, dir string, env []string) Execer
+	Wire bool
 }
 
 // RunExec runs the Exec table Run runs (status, streams, Dir, Env,
@@ -344,7 +349,13 @@ func RunExec(t *testing.T, backends ...ExecBackend) {
 		t.Run(b.Name, func(t *testing.T) {
 			dir := t.TempDir()
 			env := []string{"PATH=" + os.Getenv("PATH")}
-			execTable(t, dir, b.Open(t, dir, env), env)
+			ws := b.Open(t, dir, env)
+			execTable(t, dir, ws, env)
+			if b.Wire {
+				t.Run("refusals name no served path", func(t *testing.T) {
+					noServedPath(t, dir, execRefusals(t, dir, ws))
+				})
+			}
 		})
 	}
 }
@@ -577,6 +588,71 @@ func (c *cancelAt) String() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.buf.String()
+}
+
+// A client of a wire is refused with the kind and words that name no
+// path of the serving side's machine but a name in the workspace,
+// relative to its root: neither the workspace's directory nor the one
+// above it crosses in a refusal's text (RFC 0001 §15).
+func refusalsNameNoServedPath(t *testing.T, b Backend) {
+	if !b.Wire {
+		t.Skip("not the client side of a wire")
+	}
+	dir, _ := Confined(t)
+	ws := b.Open(t, dir)
+	ctx := context.Background()
+	refusals := execRefusals(t, dir, ws)
+	_, refusals["open a missing name"] = ws.FS().Open("missing/x")
+	_, refusals["list a file"] = fs.ReadDir(ws.FS(), "inside.txt")
+	_, refusals["read through a link out"] = fs.ReadFile(ws.FS(), "linkfile")
+	refusals["write under a file"] = ws.WriteFile(ctx, "inside.txt/x", []byte("x"), 0o644)
+	refusals["remove a missing name"] = ws.Remove(ctx, "missing")
+	refusals["remove a directory that is not empty"] = ws.Remove(ctx, "sub")
+	noServedPath(t, dir, refusals)
+}
+
+// execRefusals are the refusals of commands that cannot run in a
+// workspace on dir: a missing Dir, a Dir that is a file, a program
+// that is not there by its path or on the PATH.
+func execRefusals(t *testing.T, dir string, ws Execer) map[string]error {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	refusals := map[string]error{}
+	for what, cmd := range map[string]agentworkspace.Command{
+		"a missing Dir":           {Args: []string{"pwd"}, Dir: "missing"},
+		"a Dir that is a file":    {Args: []string{"pwd"}, Dir: "file.txt"},
+		"a missing program":       {Args: []string{"./missing"}},
+		"a program on no PATH":    {Args: []string{"missing-program"}, Env: []string{"PATH=" + dir}},
+		"a program that is a dir": {Args: []string{"./sub"}},
+	} {
+		os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+		_, refusals[what] = ws.Exec(ctx, cmd)
+	}
+	return refusals
+}
+
+// noServedPath fails the test for a refusal that is missing, or whose
+// text names dir or the directory above it.
+func noServedPath(t *testing.T, dir string, refusals map[string]error) {
+	t.Helper()
+	paths := []string{filepath.Dir(dir)}
+	if real, err := filepath.EvalSymlinks(filepath.Dir(dir)); err == nil {
+		paths = append(paths, real)
+	}
+	for what, err := range refusals {
+		if err == nil {
+			t.Errorf("%s: no refusal", what)
+			continue
+		}
+		for _, p := range paths {
+			if strings.Contains(err.Error(), p) {
+				t.Errorf("%s: %q names %s, a path of the serving side's", what, err, p)
+			}
+		}
+	}
 }
 
 // hello writes bin/hello under dir, a program that prints "hello" and

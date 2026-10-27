@@ -278,8 +278,7 @@ const MaxFileBytes = 1 << 20
 // MaxDirEntries bounds one listing, so a reply stays a few megabytes.
 const MaxDirEntries = 10000
 
-// MaxErrorBytes bounds a FileError's message, which is the server's
-// text.
+// MaxErrorBytes bounds a refusal's message.
 const MaxErrorBytes = 512
 
 // The operations of FilesURITemplate.
@@ -297,14 +296,41 @@ var ops = []string{OpStat, OpLstat, OpReadDir, OpReadLink, OpRead}
 // Ops are the operations of FilesURITemplate, as a new slice each call.
 func Ops() []string { return slices.Clone(ops) }
 
-// The kinds of a FileError.
+// The kinds of a refusal, RFC 0001 §2's and the process methods' own
+// (KindNoProcess), which a FileError carries and a refused method's
+// error its Refusal: the client maps each back to its sentinel, so a
+// test for the kind holds on either side.
 const (
-	KindNotExist   = "notexist"
-	KindOutside    = "outside"
-	KindInvalid    = "invalid"
-	KindPermission = "permission"
-	KindOther      = "other"
+	KindOutside     = "outside"     // agentworkspace.ErrOutside
+	KindNotExist    = "notexist"    // fs.ErrNotExist
+	KindExist       = "exist"       // fs.ErrExist
+	KindPermission  = "permission"  // fs.ErrPermission
+	KindInvalid     = "invalid"     // fs.ErrInvalid
+	KindUnsupported = "unsupported" // errors.ErrUnsupported
+	KindProcessDone = "processdone" // os.ErrProcessDone
+	KindClosed      = "closed"      // fs.ErrClosed
+	KindNoServer    = "noserver"    // agentworkspace.ErrNoServer
+	KindNoProcess   = "noprocess"   // an id the session did not start, or closed
+	KindOther       = "other"       // none of these
 )
+
+// Kinds are the kinds but KindOther, in the order a served error is
+// matched (KindOutside first, since a link's refusal may also read as
+// another), as a new slice each call.
+func Kinds() []string {
+	return []string{KindOutside, KindNotExist, KindExist, KindPermission, KindInvalid, KindUnsupported, KindProcessDone, KindClosed, KindNoServer, KindNoProcess}
+}
+
+// CodeRefused is the JSON-RPC error code of a process or server
+// method's refusal (but a servers.start's of a name not offered, which
+// is CodeNoServer), with a Refusal as its data, in the range JSON-RPC
+// leaves to an implementation's server errors.
+const CodeRefused = -32011
+
+// Refusal is the data of a CodeRefused or CodeNoServer error: its kind.
+type Refusal struct {
+	Kind string `json:"kind"`
+}
 
 // FileReply is the JSON of one reply: the field of its op, or Error.
 type FileReply struct {
@@ -323,8 +349,9 @@ type FileInfo struct {
 	ModTime time.Time   `json:"modTime"`
 }
 
-// FileError is a refusal: Kind is one of the Kind constants, Message the
-// server's words.
+// FileError is a refusal: Kind is one of the Kind constants, Message
+// the kind's words, or the served error's with no path of the serving
+// side's machine but a name relative to the workspace's root.
 type FileError struct {
 	Kind    string `json:"kind"`
 	Message string `json:"message"`

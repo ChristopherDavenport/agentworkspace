@@ -90,7 +90,7 @@ func Start(ctx context.Context, c Conn, cmd agentworkspace.Command) (agentworksp
 		Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: cmd.Timeout.Milliseconds(), Stderr: cmd.Stream != nil,
 	}})
 	if err != nil {
-		return nil, fmt.Errorf("start %s: %w", cmd.Args[0], err)
+		return nil, fmt.Errorf("start %s: %w", cmd.Args[0], fromWire(err))
 	}
 	return attach(ctx, c, res.ID, cmd.Stream), nil
 }
@@ -239,7 +239,7 @@ func (p *process) waitFor() {
 		return
 	default:
 		// The connection is lost, and the process with it.
-		err = p.c.Err(err)
+		err = p.c.Err(fromWire(err))
 	}
 	p.finish(r, err)
 }
@@ -286,7 +286,7 @@ func (p *process) Signal(sig os.Signal) error {
 	defer cancel()
 	r, err := mcp.CallCustomMethod[*SignalParams, *SignalResult](ctx, p.c.Session, wire.MethodSignal, &SignalParams{SignalArgs: wire.SignalArgs{ID: p.id, Signal: name}})
 	if err != nil {
-		return p.c.Err(err)
+		return p.c.Err(fromWire(err))
 	}
 	if r.Done {
 		return os.ErrProcessDone
@@ -301,7 +301,7 @@ func (p *process) interrupt() error {
 	defer cancel()
 	_, err := mcp.CallCustomMethod[*IDParams, *EmptyResult](ctx, p.c.Session, wire.MethodCancel, &IDParams{ProcessID: wire.ProcessID{ID: p.id}})
 	if err != nil && !notFound(err) {
-		return p.c.Err(err)
+		return p.c.Err(fromWire(err))
 	}
 	return nil
 }
@@ -322,7 +322,7 @@ func (p *process) Close() error {
 		r, err := mcp.CallCustomMethod[*IDParams, *ExitResult](ctx, p.c.Session, wire.MethodClose, &IDParams{ProcessID: wire.ProcessID{ID: p.id}})
 		cancel()
 		if err != nil {
-			p.closeErr = p.c.Err(err)
+			p.closeErr = p.c.Err(fromWire(err))
 			p.cancel()
 		}
 		p.finish(r, err)
@@ -355,7 +355,7 @@ func (w *stdin) Write(b []byte) (int, error) {
 	for len(b) > 0 {
 		k := min(len(b), w.p.maxWrite)
 		if _, err := mcp.CallCustomMethod[*WriteParams, *EmptyResult](w.p.ctx, w.p.c.Session, wire.MethodWrite, &WriteParams{WriteArgs: wire.WriteArgs{ID: w.p.id, Data: b[:k]}}); err != nil {
-			return n, w.p.c.Err(err)
+			return n, w.p.c.Err(fromWire(err))
 		}
 		n += k
 		b = b[k:]
@@ -374,7 +374,7 @@ func (w *stdin) Close() error {
 	ctx, cancel := context.WithTimeout(w.p.ctx, requestTimeout)
 	defer cancel()
 	if _, err := mcp.CallCustomMethod[*IDParams, *EmptyResult](ctx, w.p.c.Session, wire.MethodCloseStdin, &IDParams{ProcessID: wire.ProcessID{ID: w.p.id}}); err != nil {
-		return w.p.c.Err(err)
+		return w.p.c.Err(fromWire(err))
 	}
 	return nil
 }
@@ -405,7 +405,7 @@ func (r *stdout) Read(b []byte) (int, error) {
 			if r.p.ctx.Err() != nil && !r.p.lost() {
 				return 0, os.ErrClosed
 			}
-			return 0, r.p.c.Err(err)
+			return 0, r.p.c.Err(fromWire(err))
 		}
 		if len(res.Data) > len(b) {
 			return 0, fmt.Errorf("mcpworkspace: a read of %d bytes gave %d", len(b), len(res.Data))

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"slices"
@@ -19,7 +20,6 @@ import (
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/mcpworkspace/wire"
-	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -31,12 +31,16 @@ const outputBytes = 64 << 10
 // ErrNoProcess is a process id the session did not start, or closed.
 var ErrNoProcess = errors.New("no such process in this session")
 
+// errNoParams is a method sent no parameters.
+var errNoParams = refuse(fs.ErrInvalid, "no parameters")
+
 // Processes answers the process methods for one workspace, on every
 // server Register is given, keeping each session's processes apart: an
 // id another session started is ErrNoProcess. A session's processes end
 // when it does (its Wait returns), on End, and on Close.
 type Processes struct {
 	ws   agentworkspace.Workspace // an agentworkspace.Starter
+	cfg  serveConfig
 	next atomic.Uint64
 
 	mu      sync.Mutex
@@ -49,32 +53,36 @@ type Processes struct {
 // start fails with errors.ErrUnsupported, so a server whose workspace
 // cannot start a process does better to register none. When ws is also
 // an agentworkspace.ServerProvider, it answers the server methods too,
-// each server it starts a process of the session's like any other.
-func NewProcesses(ws agentworkspace.Workspace) *Processes {
-	return &Processes{ws: ws, tables: map[*mcp.ServerSession]*processTable{}}
+// each server it starts a process of the session's like any other. A
+// refusal carries its kind (wire.Refusal) and a message that names no
+// path of this machine's but a name relative to ws's root, unless
+// WithErrorText says otherwise.
+func NewProcesses(ws agentworkspace.Workspace, opts ...ServeOption) *Processes {
+	return &Processes{ws: ws, cfg: configOf(opts), tables: map[*mcp.ServerSession]*processTable{}}
 }
 
 // Register has srv answer the process methods and, when the workspace
 // offers servers (an agentworkspace.ServerProvider), the server
 // methods.
 func (s *Processes) Register(srv *mcp.Server) error {
+	c, root := s.cfg, s.ws.Root()
 	var servers error
 	if _, ok := s.ws.(agentworkspace.ServerProvider); ok {
 		servers = errors.Join(
-			mcp.AddReceivingCustomMethod(srv, wire.MethodServersList, s.servers),
-			mcp.AddReceivingCustomMethod(srv, wire.MethodServersStart, s.startServer),
+			mcp.AddReceivingCustomMethod(srv, wire.MethodServersList, answering(c, root, s.servers)),
+			mcp.AddReceivingCustomMethod(srv, wire.MethodServersStart, answering(c, root, s.startServer)),
 		)
 	}
 	return errors.Join(
 		servers,
-		mcp.AddReceivingCustomMethod(srv, wire.MethodStart, s.start),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodWrite, s.write),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodRead, s.read),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodCloseStdin, s.closeStdin),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodSignal, s.signal),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodWait, s.wait),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodClose, s.close),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodCancel, s.cancel),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodStart, answering(c, root, s.start)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodWrite, answering(c, root, s.write)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodRead, answering(c, root, s.read)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodCloseStdin, answering(c, root, s.closeStdin)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodSignal, answering(c, root, s.signal)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodWait, answering(c, root, s.wait)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodClose, answering(c, root, s.close)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodCancel, answering(c, root, s.cancel)),
 	)
 }
 
@@ -139,7 +147,7 @@ func (s *Processes) table(ss *mcp.ServerSession) (*processTable, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
-		return nil, errors.New("the server is stopping")
+		return nil, refuse(fs.ErrClosed, "the server is stopping")
 	}
 	if t, ok := s.tables[ss]; ok {
 		return t, nil
@@ -170,7 +178,7 @@ func (s *Processes) lookup(ss *mcp.ServerSession, id string) (*started, error) {
 			return sp, nil
 		}
 	}
-	return nil, fmt.Errorf("process %q: %w", id, ErrNoProcess)
+	return nil, refuse(ErrNoProcess, "process %q: %s", id, ErrNoProcess)
 }
 
 // close ends every process in t and refuses another.
@@ -199,13 +207,13 @@ func (sp *started) close() {
 func (s *Processes) start(_ context.Context, ss *mcp.ServerSession, p *StartParams) (*StartResult, error) {
 	switch {
 	case p == nil || len(p.Args) == 0 || p.Args[0] == "":
-		return nil, errors.New("no command")
+		return nil, refuse(fs.ErrInvalid, "no command")
 	case p.TimeoutMs < 0:
-		return nil, errors.New("a negative timeout")
+		return nil, refuse(fs.ErrInvalid, "a negative timeout")
 	}
 	for _, e := range p.Env {
 		if !strings.Contains(e, "=") {
-			return nil, fmt.Errorf("environment entry %q is not NAME=value", e)
+			return nil, refuse(fs.ErrInvalid, "environment entry %q is not NAME=value", e)
 		}
 	}
 	cmd := agentworkspace.Command{Args: p.Args, Dir: p.Dir, Env: p.Env, Timeout: time.Duration(p.TimeoutMs) * time.Millisecond}
@@ -232,24 +240,17 @@ func (s *Processes) servers(ctx context.Context, _ *mcp.ServerSession, _ *Server
 func (s *Processes) startServer(_ context.Context, ss *mcp.ServerSession, p *ServerStartParams) (*StartResult, error) {
 	switch {
 	case p == nil:
-		return nil, errors.New("no server name")
+		return nil, refuse(fs.ErrInvalid, "no server name")
 	case !agentworkspace.ValidServerName(p.Name):
 		// No workspace offers a server called so.
-		return nil, &jsonrpc.Error{Code: wire.CodeNoServer, Message: agentworkspace.ErrNoServer.Error() + ": a name agentworkspace.ValidServerName refuses"}
+		return nil, refuse(agentworkspace.ErrNoServer, "%s: a name agentworkspace.ValidServerName refuses", agentworkspace.ErrNoServer)
 	}
 	sp := s.ws.(agentworkspace.ServerProvider)
-	res, err := s.launch(ss, p.Stderr, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {
+	// A server not offered is CodeNoServer, and an OutputFilter's
+	// failure its words alone (refused).
+	return s.launch(ss, p.Stderr, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {
 		return sp.StartServer(ctx, p.Name, stderr)
 	})
-	switch {
-	case errors.Is(err, agentworkspace.ErrNoServer):
-		return nil, &jsonrpc.Error{Code: wire.CodeNoServer, Message: err.Error()}
-	case errors.Is(err, agentworkspace.ErrOutputFilter):
-		// Its words alone: the panic's value it wraps may hold a secret
-		// the filter was given.
-		return nil, errors.New(agentworkspace.ErrOutputFilter.Error())
-	}
-	return res, err
 }
 
 // launch starts a process in ss's table with run, which is handed the
@@ -272,9 +273,9 @@ func (s *Processes) launch(ss *mcp.ServerSession, stderr bool, run func(context.
 	defer t.mu.Unlock()
 	switch {
 	case t.closed:
-		return nil, errors.New("the session is ending")
+		return nil, refuse(fs.ErrClosed, "the session is ending")
 	case len(t.procs) >= wire.MaxProcesses:
-		return nil, fmt.Errorf("%d processes are open in this session, the most there may be; close one first", wire.MaxProcesses)
+		return nil, refuse(nil, "%d processes are open in this session, the most there may be; close one first", wire.MaxProcesses)
 	}
 	// A context of its own, which a cancel ends.
 	ctx, cancel := context.WithCancel(t.ctx)
@@ -301,10 +302,10 @@ func (s *Processes) launch(ss *mcp.ServerSession, stderr bool, run func(context.
 
 func (s *Processes) write(_ context.Context, ss *mcp.ServerSession, p *WriteParams) (*EmptyResult, error) {
 	if p == nil {
-		return nil, errors.New("no parameters")
+		return nil, errNoParams
 	}
 	if len(p.Data) > wire.MaxWriteBytes {
-		return nil, fmt.Errorf("a write of %d bytes; at most %d", len(p.Data), wire.MaxWriteBytes)
+		return nil, refuse(fs.ErrInvalid, "a write of %d bytes; at most %d", len(p.Data), wire.MaxWriteBytes)
 	}
 	sp, err := s.lookup(ss, p.ID)
 	if err != nil {
@@ -322,7 +323,7 @@ func (s *Processes) write(_ context.Context, ss *mcp.ServerSession, p *WritePara
 
 func (s *Processes) read(ctx context.Context, ss *mcp.ServerSession, p *ReadParams) (*ReadResult, error) {
 	if p == nil {
-		return nil, errors.New("no parameters")
+		return nil, errNoParams
 	}
 	sp, err := s.lookup(ss, p.ID)
 	if err != nil {
@@ -334,10 +335,10 @@ func (s *Processes) read(ctx context.Context, ss *mcp.ServerSession, p *ReadPara
 		b = sp.stdout
 	case 2:
 		if b = sp.stderr; b == nil {
-			return nil, errors.New("standard error was not asked for at the start")
+			return nil, refuse(fs.ErrInvalid, "standard error was not asked for at the start")
 		}
 	default:
-		return nil, fmt.Errorf("fd %d: want 1 or 2", p.FD)
+		return nil, refuse(fs.ErrInvalid, "fd %d: want 1 or 2", p.FD)
 	}
 	n := p.Max
 	if n <= 0 || n > wire.MaxReadBytes {
@@ -352,7 +353,7 @@ func (s *Processes) read(ctx context.Context, ss *mcp.ServerSession, p *ReadPara
 
 func (s *Processes) closeStdin(_ context.Context, ss *mcp.ServerSession, p *IDParams) (*EmptyResult, error) {
 	if p == nil {
-		return nil, errors.New("no parameters")
+		return nil, errNoParams
 	}
 	sp, err := s.lookup(ss, p.ID)
 	if err != nil {
@@ -368,7 +369,7 @@ func (s *Processes) closeStdin(_ context.Context, ss *mcp.ServerSession, p *IDPa
 
 func (s *Processes) signal(_ context.Context, ss *mcp.ServerSession, p *SignalParams) (*SignalResult, error) {
 	if p == nil {
-		return nil, errors.New("no parameters")
+		return nil, errNoParams
 	}
 	sig, ok := wire.SignalOf(p.Signal)
 	if !ok {
@@ -389,7 +390,7 @@ func (s *Processes) signal(_ context.Context, ss *mcp.ServerSession, p *SignalPa
 
 func (s *Processes) wait(ctx context.Context, ss *mcp.ServerSession, p *IDParams) (*ExitResult, error) {
 	if p == nil {
-		return nil, errors.New("no parameters")
+		return nil, errNoParams
 	}
 	sp, err := s.lookup(ss, p.ID)
 	if err != nil {
@@ -405,7 +406,7 @@ func (s *Processes) wait(ctx context.Context, ss *mcp.ServerSession, p *IDParams
 
 func (s *Processes) close(_ context.Context, ss *mcp.ServerSession, p *IDParams) (*ExitResult, error) {
 	if p == nil {
-		return nil, errors.New("no parameters")
+		return nil, errNoParams
 	}
 	s.mu.Lock()
 	t := s.tables[ss]
@@ -418,7 +419,7 @@ func (s *Processes) close(_ context.Context, ss *mcp.ServerSession, p *IDParams)
 		t.mu.Unlock()
 	}
 	if sp == nil {
-		return nil, fmt.Errorf("process %q: %w", p.ID, ErrNoProcess)
+		return nil, refuse(ErrNoProcess, "process %q: %s", p.ID, ErrNoProcess)
 	}
 	sp.close()
 	r := sp.result()
@@ -433,7 +434,7 @@ func (s *Processes) close(_ context.Context, ss *mcp.ServerSession, p *IDParams)
 // was canceled.
 func (s *Processes) cancel(_ context.Context, ss *mcp.ServerSession, p *IDParams) (*EmptyResult, error) {
 	if p == nil {
-		return nil, errors.New("no parameters")
+		return nil, errNoParams
 	}
 	sp, err := s.lookup(ss, p.ID)
 	if err != nil {
@@ -559,7 +560,7 @@ func (b *outputBuffer) take(ctx context.Context, n int, gone <-chan struct{}) ([
 		case <-ctx.Done():
 			return nil, false, ctx.Err()
 		case <-gone:
-			return nil, false, errors.New("the process was closed")
+			return nil, false, refuse(fs.ErrClosed, "the process was closed")
 		}
 	}
 }

@@ -155,26 +155,27 @@ A refusal has one of these kinds, which every binding maps to and from
 its own vocabulary so that a caller can test for the kind on either
 side of a wire:
 
-| Kind | Meaning | Go | remote code |
-| --- | --- | --- | --- |
-| outside | the name leaves the workspace | `ErrOutside` | `outside` |
-| not-exist | nothing has the name | `fs.ErrNotExist` | `not_exist` |
-| exist | something already has the name | `fs.ErrExist` | `exist` |
-| permission | the operation is not permitted | `fs.ErrPermission` | `permission` |
-| invalid | the name or argument is malformed | `fs.ErrInvalid` | `invalid` |
-| unsupported | this workspace cannot do the operation | `errors.ErrUnsupported` | `unsupported` |
-| process-done | the process has exited | `os.ErrProcessDone` | `process_done` |
-| closed | the workspace or the handle is closed | `fs.ErrClosed` | `closed` |
-| no-server | no server is offered by that name | `ErrNoServer` | `no_server` |
+| Kind | Meaning | Go | remote code | mcpworkspace kind |
+| --- | --- | --- | --- | --- |
+| outside | the name leaves the workspace | `ErrOutside` | `outside` | `outside` |
+| not-exist | nothing has the name | `fs.ErrNotExist` | `not_exist` | `notexist` |
+| exist | something already has the name | `fs.ErrExist` | `exist` | `exist` |
+| permission | the operation is not permitted | `fs.ErrPermission` | `permission` | `permission` |
+| invalid | the name or argument is malformed | `fs.ErrInvalid` | `invalid` | `invalid` |
+| unsupported | this workspace cannot do the operation | `errors.ErrUnsupported` | `unsupported` | `unsupported` |
+| process-done | the process has exited | `os.ErrProcessDone` | `process_done` | `processdone` |
+| closed | the workspace or the handle is closed | `fs.ErrClosed` | `closed` | `closed` |
+| no-server | no server is offered by that name | `ErrNoServer` | `no_server` | `noserver` |
 
 *outside* is matched before any other kind, since a link's refusal may
-also read as another.
+also read as another. Every binding over a wire MUST carry every kind
+both ways, for every operation it carries, so a test for the kind holds
+on the client side as on the serving side; a wire MAY add kinds of its
+own (remote's `limit`, both wires' no-process), and a refusal of none
+of these is *other*.
 
-Over remote, a mapped refusal's message is the system's or the kind's
-words, never the served error's own text, which may name a path on the
-serving side's machine. mcpworkspace's file kinds are a subset of this
-table, and its messages are the served error's text; both differences
-are listed under [open questions](#19-open-questions).
+A refusal's message is governed by [section 15](#15-security-considerations):
+it names no path of the serving side's machine.
 
 ## 3. Files
 
@@ -666,7 +667,7 @@ the standard library alone.
 | list servers | `agentworkspace/servers.list {} → {servers: [{name, description?}]}` |
 | start a server | `agentworkspace/servers.start {name, stderr?} → {id}`, a process of the session; not offered is JSON-RPC error `-32010` |
 | files | resource template `agentworkspace:///{op}{?path}`, op `stat`, `lstat`, `readdir`, `readlink` or `read`; at most `MaxFileBytes` (1 MiB) a read and `MaxDirEntries` (10000) a listing |
-| error kinds (files) | `notexist`, `outside`, `invalid`, `permission`, `other` |
+| error kinds | a file's in its reply's `error {kind, message}`; a method's as JSON-RPC error `-32011` (`-32010` for no-server) with data `{kind}`: every kind of [section 2](#error-kinds), `noprocess` and `other` |
 
 The process and server methods are custom JSON-RPC methods, never
 tools: a tool would be offered to the model of any harness connected
@@ -733,10 +734,23 @@ bounds) are in its package doc.
   or a body of another media type than its route's. One made without
   authentication for a loopback listener answers a loopback `Host`
   alone, so a rebound name is refused.
-- **Paths do not leak over remote.** A mapped error crossing remote
-  carries no path on the serving side's machine, and the root is told
-  in full only to a principal that may read. mcpworkspace does not
-  promise the first (see [open questions](#19-open-questions)).
+- **Refusals name no served path.** A binding over a wire MUST send a
+  refusal as its kind and a message that names no path of the serving
+  side's machine but a name inside the workspace, relative to its root:
+  a refusal of a kind is the kind's words, or the system's for an error
+  number (`ENOSPC`), and any other is the served text with the root cut
+  from it and every other absolute path cut to its last element
+  (`/usr/bin/tool` is `.../tool`). The serving side applies it, so a
+  client cannot opt out; a server MAY send the served text as it is
+  behind an option the program names for debugging, off by default
+  (mcpworkspace's `WithErrorText`). A refusal of the wire's own (a
+  malformed request, a bound) is the server's words. A path on the
+  serving side's machine (a home directory, a mount's layout) would
+  otherwise reach the agent and the model. `workspacetest.Run`'s
+  `RefusalsNameNoServedPath` and `RunExec` check it over every wire's
+  client (#39).
+- **The root over remote** is told in full only to a principal that
+  may read.
 - **Process ids** are random, and a process is reached only through
   the session that started it, by the principal that opened that
   session.
@@ -845,17 +859,6 @@ draft:
   the working directory; a remote client dialled by a principal without
   `read` is told the root's last element alone, so its `Root()`, and
   its `Served().Root`, are not absolute.
-- **Error kinds over mcpworkspace.** remote maps every kind of
-  [section 2](#error-kinds) both ways; mcpworkspace's file errors have
-  five kinds, so *exist*, *unsupported* and *closed* reach its client as
-  `other`, and a test for the kind does not hold there as it does over
-  remote.
-- **Error messages over mcpworkspace.** remote sends a mapped error's
-  kind words alone, so a served error's text, which may name a path on
-  the serving side's machine, never crosses; mcpworkspace's file
-  errors carry the served error's text (at most `MaxErrorBytes`), as
-  `FileError`'s doc says ("the server's words"). Whether the contract
-  requires remote's rule of every wire is open.
 - **Signals.** remote carries thirteen signal names, mcpworkspace
   three, and `Local` any the system has. The contract names no minimum
   set a starter must carry.
@@ -881,6 +884,14 @@ Questions with no issue yet:
   *interrupted*. mcpworkspace gains `process.cancel`, which ends a
   process as its context's end does and leaves it to read, and its
   client sends it when a start's context ends, rather than a close.
+- [Section 2](#error-kinds): every wire carries every kind both ways
+  (#38). mcpworkspace's files carry the nine, and its process and
+  server methods carry them too, as JSON-RPC error `-32011` with a
+  `{kind}` datum.
+- [Section 15](#15-security-considerations): a refusal over any wire
+  names no path of the serving side's machine but a name relative to
+  the root (#39); mcpworkspace sends the served text only under
+  `WithErrorText`.
 
 ## Changes since draft 0.1
 

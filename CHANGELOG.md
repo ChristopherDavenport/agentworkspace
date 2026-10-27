@@ -7,6 +7,27 @@ versions may break the API.
 
 ## Unreleased
 
+- Fixed: mcpworkspace carries every error kind of RFC 0001 §2 both
+  ways (#38). Its files' errors had five kinds, so `fs.ErrExist`,
+  `errors.ErrUnsupported` and `fs.ErrClosed` reached the client as
+  other; its process and server methods' errors carried none. The wire
+  adds `KindExist`, `KindUnsupported`, `KindProcessDone`, `KindClosed`,
+  `KindNoServer` and `KindNoProcess` (`wire.Kinds`), and a method's
+  refusal is JSON-RPC error `wire.CodeRefused` (-32011), or
+  `CodeNoServer`, with a `wire.Refusal{Kind}` as its data, which the
+  client maps back, so `errors.Is` holds as over remote.
+- Changed: a refusal over mcpworkspace names no path of the serving
+  side's machine (#39). A refusal of a kind is the kind's words, or the
+  system's for an errno, and any other is the served text with the
+  workspace's root cut from it and every other absolute path cut to its
+  last element, as remote already did; `WithErrorText`, a new
+  `ServeOption` of `ServeFiles` and `NewProcesses` (both now variadic),
+  sends the text as it is, for debugging. The server's own refusals
+  (a malformed request, a bound) keep their words. RFC 0001 §15 states
+  the rule for every wire; `workspacetest.Backend.Wire` marks a wire's
+  client, and `Run`'s new `RefusalsNameNoServedPath` checks no served
+  path crosses.
+
 - Fixed: a `remote` client's `Exec` that its context interrupts now
   returns the output the command wrote until its end, where it returned
   none (#5, the wire half). The exec request carries a key the client

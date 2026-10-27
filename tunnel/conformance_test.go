@@ -34,10 +34,10 @@ func tunnelled(t *testing.T, ws agentworkspace.Workspace) agentworkspace.Workspa
 
 func TestConformance(t *testing.T) {
 	workspacetest.Run(t,
-		workspacetest.Backend{Name: "tunnel", Links: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+		workspacetest.Backend{Name: "tunnel", Links: true, Wire: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
 			return tunnelled(t, local(t, dir, pathEnv()))
 		}},
-		workspacetest.Backend{Name: "tunnel, no links", Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+		workspacetest.Backend{Name: "tunnel, no links", Wire: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
 			return tunnelled(t, noLinks{local(t, dir, pathEnv())})
 		}},
 	)

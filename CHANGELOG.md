@@ -10,18 +10,24 @@ versions may break the API.
 - Fixed: a `remote` process closed right after its start no longer
   loses its standard error (#24). Its `Command.Stream` gets everything
   the process wrote, including what it writes on its way out, however
-  soon `Close` follows `Start`. Both ends close the race, and each
-  alone is enough, so a client or a server at v0.0.8 still gets the
-  fix from the other end:
+  soon `Close` follows `Start`. Both ends close the race:
   - the client's `Process.Close` waits for the stream of standard
     error to open (the server's answer to `GET .../stderr`, whose
-    headers it sends as soon as it has claimed the stream, as v0.0.8
-    already did) before it sends the close, bounded by the client's
-    timeout. `Start` waits for nothing more;
+    headers it sends as soon as it has claimed the stream, as every
+    release since v0.0.5 already did) before it sends the close. The
+    wait is capped at a grace (two seconds) or the client's timeout,
+    whichever is shorter, so headers a proxy holds back, or a dead
+    connection, cost each close two seconds, not a timeout. `Start`
+    waits for nothing more. Against a v0.0.8 server this half alone
+    is the fix;
   - the server serves a closed process's standard error to a stream
     that comes after the close, until a grace after the process's
-    exit. Until it is streamed, or that grace passes, the process
-    counts against `WithMaxProcesses`, as a closing one does.
+    exit; once a stream has taken it, another is `no_process`. Until
+    it is streamed, or that grace passes, the process counts against
+    `WithMaxProcesses`, as a closing one does. A v0.0.8 client, which
+    sends the close without waiting, is covered by this half only
+    while its stderr request arrives within that grace after the
+    exit.
 - Fixed: a process's stream or wait that found it just before its
   close took it from the session's table is refused (`no_process`)
   once its streams have ended, where it was served without being

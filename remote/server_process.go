@@ -388,7 +388,10 @@ func (h *Handler) procOf(w http.ResponseWriter, r *http.Request) *proc {
 }
 
 // reach is procOf, reaching a process being closed too when leaving is
-// set: the stderr route's, as standard error is sent to its end.
+// set: the stderr route's, as standard error is sent to its end. A
+// closed process is reached only for a standard error no stream has
+// taken yet; once one has, another is no_process, as every route of a
+// closed process is, not "already streamed".
 func (h *Handler) reach(w http.ResponseWriter, r *http.Request, leaving bool) *proc {
 	s := h.sessionOf(w, r)
 	if s == nil {
@@ -398,7 +401,9 @@ func (h *Handler) reach(w http.ResponseWriter, r *http.Request, leaving bool) *p
 	s.mu.Lock()
 	sp := s.procs[pid]
 	if sp == nil && leaving {
-		sp = s.leaving[pid]
+		if lp := s.leaving[pid]; lp != nil && !lp.streams[2].Load() {
+			sp = lp
+		}
 	}
 	s.mu.Unlock()
 	switch {

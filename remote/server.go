@@ -209,6 +209,7 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 	m.HandleFunc("POST "+routeSessions+"/{sid}/renew", h.needAny(sessionScopes, typed(jsonType, h.renewSession)))
 	m.HandleFunc("DELETE "+routeSessions+"/{sid}", h.needAny(sessionScopes, h.closeSession))
 	m.HandleFunc("POST "+routeSessions+"/{sid}/processes", h.need(ScopeExec, typed(jsonType, h.start)))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/connect", h.need(ScopeExec, typed(jsonType, h.connect)))
 	m.HandleFunc("POST "+routeSessions+"/{sid}/servers/{name}/start", h.need(ScopeServers, typed(jsonType, h.startServer)))
 	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/stdin", h.needAny(sessionScopes, typed(rawType, h.stdin)))
 	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/stdout", h.needAny(sessionScopes, h.stdout))
@@ -513,6 +514,8 @@ func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 		reply.Env = h.ws.Env()
 	}
 	reply.Reach = string(agentworkspace.ReachOf(h.ws))
+	_, connect := h.ws.(agentworkspace.Connector)
+	reply.Connect = connect && p.Has(ScopeExec)
 	writeJSON(w, reply)
 }
 

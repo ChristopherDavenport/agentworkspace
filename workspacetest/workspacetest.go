@@ -21,7 +21,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path"
@@ -63,6 +65,7 @@ func Run(t *testing.T, backends ...Backend) {
 		{"NamesThatAreNotValidPaths", namesThatAreNotValidPaths},
 		{"Concurrently", concurrently},
 		{"RefusalsNameNoServedPath", refusalsNameNoServedPath},
+		{"Connect", connects},
 	} {
 		t.Run(table.name, func(t *testing.T) {
 			for _, b := range backends {
@@ -713,4 +716,97 @@ func namesThatAreNotValidPaths(t *testing.T, b Backend) {
 	if _, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"pwd"}, Dir: "b"}); err == nil {
 		t.Error("Exec ran in a file")
 	}
+}
+
+// A Connector's stream reaches a TCP port on its loopback: what is
+// written arrives, CloseWrite is end of file there, and what the port
+// sends back is read; Forward listens on the loopback alone and
+// carries each connection it accepts the same way; a port out of range
+// is fs.ErrInvalid, and one nothing listens on is refused. The case
+// listens on this machine's loopback, so it holds for a backend whose
+// loopback is the test's; one whose loopback is not (a container's)
+// runs a case of its own. A workspace that is no Connector is skipped.
+func connects(t *testing.T, b Backend) {
+	ws := b.Open(t, t.TempDir())
+	if _, ok := ws.(agentworkspace.Connector); !ok {
+		t.Skip("not an agentworkspace.Connector")
+	}
+	ctx := context.Background()
+	port := Upper(t)
+	c, err := agentworkspace.Connect(ctx, ws, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	within(t, 10*time.Second, "the stream", func() {
+		if _, err := io.WriteString(c, "hello"); err != nil {
+			t.Error(err)
+		}
+		if err := c.CloseWrite(); err != nil {
+			t.Error(err)
+		}
+		if got, err := io.ReadAll(c); string(got) != "HELLO" || err != nil {
+			t.Errorf("the port answered %q, %v", got, err)
+		}
+	})
+	ln, err := agentworkspace.Forward(ctx, ws, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if a, ok := ln.Addr().(*net.TCPAddr); !ok || !a.IP.IsLoopback() {
+		t.Errorf("Forward listens on %v, want the loopback alone", ln.Addr())
+	}
+	within(t, 10*time.Second, "the forwarded stream", func() {
+		nc, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer nc.Close()
+		io.WriteString(nc, "abc")
+		nc.(*net.TCPConn).CloseWrite()
+		if got, err := io.ReadAll(nc); string(got) != "ABC" || err != nil {
+			t.Errorf("the forwarded port answered %q, %v", got, err)
+		}
+	})
+	if _, err := agentworkspace.Connect(ctx, ws, 0); !errors.Is(err, fs.ErrInvalid) {
+		t.Errorf("port 0: %v, want fs.ErrInvalid", err)
+	}
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unused := free.Addr().(*net.TCPAddr).Port
+	free.Close()
+	if c, err := agentworkspace.Connect(ctx, ws, unused); err == nil {
+		c.Close()
+		t.Errorf("a port nothing listens on was connected")
+	}
+}
+
+// Upper listens on this machine's loopback until the test ends, and
+// answers each connection with what it sent, upper-cased, once it has
+// sent all of it; it returns the port.
+func Upper(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				b, _ := io.ReadAll(c)
+				c.Write(bytes.ToUpper(b))
+			}()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
 }

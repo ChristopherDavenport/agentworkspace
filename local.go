@@ -40,11 +40,13 @@ type Local struct {
 	mu     sync.Mutex
 	closed bool
 	procs  map[*localProcess]struct{} // started and not yet closed
+	conns  map[*localConn]struct{}    // connected and not yet closed
 }
 
 var (
 	_ Workspace = (*Local)(nil)
 	_ Starter   = (*Local)(nil)
+	_ Connector = (*Local)(nil)
 )
 
 // NewLocal opens dir as a workspace whose processes start with env and
@@ -75,7 +77,7 @@ func NewLocal(dir string, env []string, opts ...LocalOption) (*Local, error) {
 	if err != nil {
 		real = abs
 	}
-	return &Local{root: root, dir: abs, real: real, env: env, host: host, procs: map[*localProcess]struct{}{}}, nil
+	return &Local{root: root, dir: abs, real: real, env: env, host: host, procs: map[*localProcess]struct{}{}, conns: map[*localConn]struct{}{}}, nil
 }
 
 // A LocalOption changes how NewLocal opens a workspace.
@@ -147,7 +149,14 @@ func (l *Local) Close() error {
 	for p := range l.procs {
 		procs = append(procs, p)
 	}
+	conns := make([]*localConn, 0, len(l.conns))
+	for c := range l.conns {
+		conns = append(conns, c)
+	}
 	l.mu.Unlock()
+	for _, c := range conns {
+		c.Close()
+	}
 	var wg sync.WaitGroup
 	for _, p := range procs {
 		wg.Go(func() { p.Close() })

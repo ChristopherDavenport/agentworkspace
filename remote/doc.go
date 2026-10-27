@@ -37,6 +37,7 @@
 //	POST   /v1/sessions/{s}/renew                either
 //	DELETE /v1/sessions/{s}                      either   ends every process it started
 //	POST   /v1/sessions/{s}/processes            exec     {args, dir, env, timeoutMs, stderr, terminal: {rows, cols}, key} -> {id}, the key
+//	POST   /v1/sessions/{s}/connect              exec     {port, key} -> {id}, the key: a stream to port on the served workspace's loopback, a process of the session whose stdin, stdout and close are the stream's
 //	POST   /v1/sessions/{s}/servers/{n}/start    servers  {stderr, key} -> {id}, the key: the server called n, a process of the session
 //	POST   /v1/sessions/{s}/processes/{p}/stdin  its own  the body, streamed to its input; its end is end of file
 //	GET    /v1/sessions/{s}/processes/{p}/stdout its own  its output, streamed

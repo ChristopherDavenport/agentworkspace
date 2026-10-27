@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/portproc"
 	"github.com/ChristopherDavenport/agentworkspace/mcpworkspace/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -85,6 +86,7 @@ func (s *Processes) Register(srv *mcp.Server) error {
 		mcp.AddReceivingCustomMethod(srv, wire.MethodCancel, answering(c, root, s.cancel)),
 		mcp.AddReceivingCustomMethod(srv, wire.MethodInfo, answering(c, root, s.info)),
 		mcp.AddReceivingCustomMethod(srv, wire.MethodResize, answering(c, root, s.resize)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodConnect, answering(c, root, s.connect)),
 	)
 }
 
@@ -447,6 +449,21 @@ func (s *Processes) cancel(_ context.Context, ss *mcp.ServerSession, p *IDParams
 	}
 	sp.cancel()
 	return &EmptyResult{}, nil
+}
+
+// connect opens a stream to the port in the workspace, a process of the
+// session's.
+func (s *Processes) connect(_ context.Context, ss *mcp.ServerSession, p *ConnectParams) (*StartResult, error) {
+	if p == nil {
+		return nil, errNoParams
+	}
+	return s.launch(ss, false, func(ctx context.Context, _ io.Writer) (agentworkspace.Process, error) {
+		c, err := agentworkspace.Connect(ctx, s.ws, p.Port)
+		if err != nil {
+			return nil, err
+		}
+		return portproc.Process(ctx, c), nil
+	})
 }
 
 // resize changes the size of the process's terminal.

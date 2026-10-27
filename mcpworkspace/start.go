@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/portproc"
 	"github.com/ChristopherDavenport/agentworkspace/mcpworkspace/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -124,6 +126,34 @@ func ProcessInfo(ctx context.Context, cs *mcp.ClientSession) (agentworkspace.Rea
 		reach = ""
 	}
 	return reach, res.Bounds, nil
+}
+
+// Connect opens a stream to port on the loopback of the workspace at the
+// other end of c (agentworkspace.Connector), carried as a process of
+// the session: writes go to the port, CloseWrite ends what is sent,
+// reads are what the port sends, and Close ends the stream. ctx bounds
+// the connecting alone; the stream lives on c, and ends with it. A
+// workspace that cannot connect is errors.ErrUnsupported.
+func Connect(ctx context.Context, c Conn, port int) (agentworkspace.PortConn, error) {
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("mcpworkspace: connect to port %d: want 1 to 65535: %w", port, fs.ErrInvalid)
+	}
+	if err := checkConn(c); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	res, err := mcp.CallCustomMethod[*ConnectParams, *StartResult](sctx, c.Session, wire.MethodConnect, &ConnectParams{ConnectArgs: wire.ConnectArgs{Port: port}})
+	switch {
+	case notFound(err):
+		return nil, fmt.Errorf("connect to port %d: the server does not answer it: %w", port, errors.ErrUnsupported)
+	case err != nil:
+		return nil, fmt.Errorf("connect to port %d: %w", port, fromWire(err))
+	}
+	return portproc.Conn(attach(context.Background(), c, res.ID, nil)), nil
 }
 
 // checkConn refuses a Conn a process cannot be started over.

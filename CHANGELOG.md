@@ -7,6 +7,18 @@ versions may break the API.
 
 ## Unreleased
 
+- Added: `connect(port)` (#31). `Connector`, `PortConn` (a stream with
+  `CloseWrite`), `Connect(ctx, ws, port)` and `Local.Connect`, which
+  dials the port on this machine's loopback, and `Forward(ctx, ws,
+  port)`, a listener on `127.0.0.1` alone that opens one stream per
+  connection it accepts. remote carries a stream as a process of the
+  session, `POST /v1/sessions/{s}/connect {port, key}` under `exec`,
+  then the process routes (the info route's `connect` says it is
+  offered), and its `StarterClient` and `StarterServerClient` are
+  connectors; mcpworkspace as `process.connect {port}` and the process
+  methods (`wire.MethodConnect`, `Connect` over a `Conn`). RFC 0001 §9
+  states it, and `workspacetest.Run`'s `Connect` case checks it.
+
 - Added: terminal mode (#29). `Command.Terminal`, a `TerminalSize`,
   starts a command on a pseudo-terminal of that size as its controlling
   terminal, in a session of its own, its standard error merged into its

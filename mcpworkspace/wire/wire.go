@@ -22,6 +22,7 @@
 //	agentworkspace/process.cancel     {id} -> {}
 //	agentworkspace/process.info       {} -> {reach?, bounds}
 //	agentworkspace/process.resize     {id, rows, cols} -> {}
+//	agentworkspace/process.connect    {port} -> {id}
 //
 // A read is a long poll: it returns as soon as there is output, at most
 // max bytes (at most MaxReadBytes), or end of file, and waits otherwise.
@@ -35,7 +36,11 @@
 // size (agentworkspace.Command.Terminal): fd 1 is the terminal's
 // output, standard error merged into it, and a resize changes its
 // size; a server that cannot give one refuses the start as
-// KindUnsupported. Info says what the server keeps: how far its end of a process reaches
+// KindUnsupported. A connect opens a stream to port on the workspace's
+// loopback, as its own processes reach it, and carries it as a process
+// of the session: a write sends to the port, closeStdin ends what is
+// sent, a read of fd 1 is what the port sends, and a close ends the
+// stream. Info says what the server keeps: how far its end of a process reaches
 // (agentworkspace.Reach's values; absent for a workspace that says
 // none) and its bounds. Each MCP session has its
 // own table of processes, at most MaxProcesses open at once: an id
@@ -101,12 +106,13 @@ const (
 	MethodCancel     = MethodPrefix + "cancel"
 	MethodInfo       = MethodPrefix + "info"
 	MethodResize     = MethodPrefix + "resize"
+	MethodConnect    = MethodPrefix + "connect"
 )
 
 // Methods are the process methods, in the order above, as a new slice
 // each call.
 func Methods() []string {
-	return []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose, MethodCancel, MethodInfo, MethodResize}
+	return []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose, MethodCancel, MethodInfo, MethodResize, MethodConnect}
 }
 
 // ServersPrefix begins every server method.
@@ -271,6 +277,12 @@ type StartArgs struct {
 type TerminalSize struct {
 	Rows uint16 `json:"rows"`
 	Cols uint16 `json:"cols"`
+}
+
+// ConnectArgs is process.connect's parameters; its result is a
+// Started.
+type ConnectArgs struct {
+	Port int `json:"port"`
 }
 
 // ResizeArgs is process.resize's parameters.

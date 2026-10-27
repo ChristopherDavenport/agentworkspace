@@ -138,6 +138,10 @@ type infoReply struct {
 	Scopes []Scope  `json:"scopes"`
 	Env    []string `json:"env,omitempty"` // only to a principal with exec
 	Limits limits   `json:"limits"`
+	// Connect says the principal may connect to a port here: the
+	// served workspace is an agentworkspace.Connector and the principal
+	// holds exec.
+	Connect bool `json:"connect,omitempty"`
 	// Reach is how far the served workspace's end of a process reaches
 	// (agentworkspace.ReachOf), "" for one that says none.
 	Reach string `json:"reach,omitempty"`
@@ -274,6 +278,13 @@ type serverList struct {
 
 type startedReply struct {
 	ID string `json:"id"`
+}
+
+// connectRequest is a connect's body: the port, and the key that names
+// the process the stream is carried as.
+type connectRequest struct {
+	Port int    `json:"port"`
+	Key  string `json:"key,omitempty"`
 }
 
 type signalRequest struct {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/internal/lifetime"
+	"github.com/ChristopherDavenport/agentworkspace/internal/portproc"
 )
 
 // session is one client's: the processes it started, which live no
@@ -447,6 +448,29 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 			cmd.Stream = stderr
 		}
 		return agentworkspace.Start(ctx, h.ws, cmd)
+	})
+}
+
+// connect opens a stream to the request's port in the served workspace
+// (agentworkspace.Connect) as a process of the session, keyed as a
+// start is: its input route sends to the port, its close ends what is
+// sent, its output route is what the port sends, and its close ends
+// the stream.
+func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
+	s := h.sessionOf(w, r)
+	if s == nil {
+		return
+	}
+	var req connectRequest
+	if !decode(w, r, MaxRequestBytes, &req) {
+		return
+	}
+	h.launch(w, s, req.Key, false, &proc{scope: ScopeExec}, func(ctx context.Context, _ io.Writer) (agentworkspace.Process, error) {
+		c, err := agentworkspace.Connect(ctx, h.ws, req.Port)
+		if err != nil {
+			return nil, err
+		}
+		return portproc.Process(ctx, c), nil
 	})
 }
 

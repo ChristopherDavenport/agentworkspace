@@ -7,6 +7,8 @@ package mcpworkspace
 import (
 	"context"
 	"errors"
+	"io"
+	"io/fs"
 	"testing"
 	"time"
 
@@ -81,5 +83,31 @@ func TestTheServersReachCrosses(t *testing.T) {
 	cs, _ = serving(t, s.dir, hidden).connect(t)
 	if reach, _, err := ProcessInfo(context.Background(), cs); err != nil || reach != "" {
 		t.Errorf("ProcessInfo of a workspace that says no reach = %q, %v", reach, err)
+	}
+}
+
+// A connect carries a stream to a port on the workspace's loopback as a
+// process of the session: what is written arrives, CloseWrite is end of
+// file there, and the answer is read.
+func TestAConnectCrosses(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	c := conn(t, cs)
+	pc, err := Connect(context.Background(), c, workspacetest.Upper(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	within(t, 10*time.Second, "the stream", func() {
+		io.WriteString(pc, "hello")
+		if err := pc.CloseWrite(); err != nil {
+			t.Error(err)
+		}
+		if got, err := io.ReadAll(pc); string(got) != "HELLO" || err != nil {
+			t.Errorf("the port answered %q, %v", got, err)
+		}
+	})
+	if _, err := Connect(context.Background(), c, 70000); !errors.Is(err, fs.ErrInvalid) {
+		t.Errorf("port 70000: %v", err)
 	}
 }

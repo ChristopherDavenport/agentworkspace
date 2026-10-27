@@ -18,6 +18,7 @@ import (
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/internal/lifetime"
+	"github.com/ChristopherDavenport/agentworkspace/internal/portproc"
 )
 
 // pumpWait is how long a process's end waits for the rest of its
@@ -50,6 +51,41 @@ const openWait = lifetime.Grace
 // by the key, so nothing runs that no one can name.
 func (s *StarterClient) Start(ctx context.Context, cmd agentworkspace.Command) (agentworkspace.Process, error) {
 	return s.Client.start(ctx, cmd)
+}
+
+// Connect opens a stream to port on the served workspace's loopback
+// (agentworkspace.Connector), carried as a process of the client's
+// session: writes go to the port as its input's stream, reads come
+// from its output's, CloseWrite closes its input and Close closes it.
+// ctx bounds the connecting alone. A served workspace that cannot
+// connect is errors.ErrUnsupported.
+func (s *StarterClient) Connect(ctx context.Context, port int) (agentworkspace.PortConn, error) {
+	return s.Client.connect(ctx, port)
+}
+
+// Connect is StarterClient's.
+func (s *StarterServerClient) Connect(ctx context.Context, port int) (agentworkspace.PortConn, error) {
+	return s.Client.connect(ctx, port)
+}
+
+// connect is Connect, for each client type that may start processes.
+func (c *Client) connect(ctx context.Context, port int) (agentworkspace.PortConn, error) {
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("remote: connect to port %d: want 1 to 65535: %w", port, fs.ErrInvalid)
+	}
+	if !c.info.Connect {
+		return nil, fmt.Errorf("remote: connect to port %d: the served workspace cannot connect to a port: %w", port, errors.ErrUnsupported)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p, err := c.launch(context.WithoutCancel(ctx), fmt.Sprintf("connect to port %d", port), "/connect", nil, func(key string) any {
+		return connectRequest{Port: port, Key: key}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return portproc.Conn(p), nil
 }
 
 // start is Start, for each client type that may start processes.

@@ -521,13 +521,43 @@ mcpworkspace program the reach `process.info` gives
 
 ## 9. Ports
 
-The contract has no port operation at draft 0.1. A process in the
-workspace may listen, and nothing in the contract reaches it from the
-agent's side.
+Connecting is optional, as starting is. **connect(port)** opens one
+bidirectional byte stream to TCP `port` (1 to 65535; any other is
+*invalid*) on the workspace's loopback, as its own processes reach it:
+what is written is sent to the port, a **half-close** ends what is
+sent (the port reads end of file, and the stream may still be read),
+what the port sends is read, and **close** ends the stream. The
+workspace's close ends every stream it opened. A port nothing listens
+on is refused, and a workspace that cannot connect refuses as
+*unsupported* (#31).
 
-Open: #31 will define `connect(port)`, one byte stream to a TCP port on
-the workspace's loopback as its own processes reach it, the wire
-carriers for it, and the scope it takes.
+Connecting is as much power as running a command (a server in the
+workspace may take requests no tool would make), so a wire grants it
+with the scope that grants commands: remote's `exec`.
+
+A binding over a wire carries a stream natively, as a process of the
+session that the connect starts: its input is what is sent and the
+input's close the half-close, its output what is received, and the
+process's close the stream's. remote's is `POST
+/v1/sessions/{s}/connect {port, key} → {id}`, then the process routes;
+mcpworkspace's is `process.connect {port} → {id}`, then the process
+methods. A backend with no native carrier MAY relay a stream through a
+started process (bash's `/dev/tcp`, or a program it ships) as a
+fallback binding of its own; the contract does not require bash, and a
+relay is not a native carrier.
+
+A **forwarder** exposes a port on the agent's machine: it MUST bind the
+loopback alone, never another address, and opens one stream per
+connection it accepts, copying both ways. It is a binding helper over
+connect, not a wire operation.
+
+The reference binding's `Local.Connect` dials `127.0.0.1`, then `::1`;
+`Forward(ctx, ws, port)` is the forwarder, on `127.0.0.1` and a port
+the system picks. `workspacetest.Run`'s `Connect` case checks a
+stream, its half-close, the forwarder's address and the refusals, on a
+port it listens on in the test's own loopback, so it holds for a
+backend whose loopback is the test's; it is skipped for a workspace
+that is no connector.
 
 ## 10. Roots
 
@@ -702,6 +732,7 @@ The root module is the reference binding.
 | owner's context | the `ctx` given to `Start` or `StartServer` |
 | server provider | `ServerProvider{Servers, StartServer}`, `Server{Name, Description, Secrets}`, `ValidServerName`, `ErrNoServer` |
 | offering | `Offer(ws, servers, opts...)` → `*Offering`; `OfferedServer{Server, Command, Secrets}`; `WithOutputFilter(OutputFilter)`; `ErrOutputFilter` |
+| connect | `Connector{Connect(ctx, port)}` → `PortConn{Read, Write, CloseWrite, Close}`; `Connect(ctx, ws, port)` refuses a non-connector with `errors.ErrUnsupported`; `Forward(ctx, ws, port)` → a loopback `net.Listener` |
 | reference backend | `NewLocal(dir, env, opts...)` → `*Local`, over an `os.Root`; `WithHost(name)`; Unix (Linux and macOS) |
 
 ### mcpworkspace
@@ -722,6 +753,7 @@ the standard library alone.
 | close | `process.close {id} → {status, ended?, error?, stderr?}` |
 | cancel (the owner's context ended) | `process.cancel {id} → {}`: the ladder from INT, input left open, the process left to read and wait on |
 | reach, bounds | `process.info {} → {reach?, bounds}` |
+| connect | `process.connect {port} → {id}`, then the process methods: write, closeStdin (the half-close), read fd 1, close |
 | owner | the MCP session: each session has its own process table, at most `MaxProcesses` (32) open; its end ends them |
 | list servers | `agentworkspace/servers.list {} → {servers: [{name, description?, secrets?}]}` |
 | start a server | `agentworkspace/servers.start {name, stderr?} → {id}`, a process of the session; not offered is JSON-RPC error `-32010` |
@@ -756,6 +788,7 @@ does not repeat. In summary:
 | owner | a session, `POST /v1/sessions`, renewed on a lease; its lapse or close ends every process in it | `exec` or `servers` |
 | start | `POST /v1/sessions/{s}/processes`, keyed by the client, a `terminal` optional | `exec` |
 | start a server | `POST /v1/sessions/{s}/servers/{n}/start`, keyed | `servers` |
+| connect | `POST /v1/sessions/{s}/connect {port, key}`, then the process routes; info's `connect` says it is offered | `exec` |
 | pipes, wait, signal, cancel, resize, close | `/v1/sessions/{s}/processes/{p}/…` | the scope it was started under |
 | error kinds | every kind of [section 2](#error-kinds), and the wire's own (`unauthenticated`, `forbidden`, `limit`, `no_session`, `no_process`, `media_type`) | |
 
@@ -787,7 +820,8 @@ bounds) are in its package doc.
   its scopes; without one, every request is refused. A binding MUST
   NOT carry a credential in a URL, an error or a descriptor.
 - **Scopes are capabilities.** `exec` is never implied by another
-  scope. Running commands exposes a running server's environment, and
+  scope, and it is what grants connecting to a port in the workspace
+  ([section 9](#9-ports)); a forwarder binds the loopback alone. Running commands exposes a running server's environment, and
   writing defeats any output filter, so secret holders are offered
   under `servers` alone.
 - **No browser clients.** A remote handler refuses a request carrying
@@ -905,7 +939,6 @@ The issues that will add or change a rule here:
   ([section 13](#13-isolation-statement)); waits for a second product.
 - #30: a container backend: conformance, descriptor, its instance
   ended at close.
-- #31: `connect(port)` ([section 9](#9-ports)).
 - #34: named roots ([section 10](#10-roots)).
 
 
@@ -946,6 +979,11 @@ Questions with no issue yet:
   pseudo-terminal of a given size, standard error merged, a resize, and
   a refusal as *unsupported*, never pipes, where a backend cannot give
   one; both wires carry it.
+- [Section 9](#9-ports): `connect(port)`, a stream with a half-close
+  to a port on the workspace's loopback, carried natively by both wires
+  as a process of the session and granted with `exec`; a forwarder
+  binds the loopback alone; a relay through a started process is a
+  fallback binding, not the contract (#31).
 - [Section 2](#error-kinds): every wire carries every kind both ways
   (#38). mcpworkspace's files carry the nine, and its process and
   server methods carry them too, as JSON-RPC error `-32011` with a

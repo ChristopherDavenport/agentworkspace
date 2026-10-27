@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.10 - 2026-10-26
 
 - Fixed (documentation): the `tunnel` package doc's "Proving the hub"
   recipe had the workspace end make its own nonce, and said a MAC that

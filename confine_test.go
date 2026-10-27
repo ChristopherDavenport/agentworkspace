@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -56,20 +57,32 @@ func (m *mapped) Exec(ctx context.Context, c agentworkspace.Command) (*agentwork
 		env[i] = in(e)
 	}
 	c.Env = env
-	stream := c.Stream
-	var buf bytes.Buffer
-	if stream != nil {
-		c.Stream = &buf
+	if c.Stream != nil {
+		// A pointer, so Local sees one writer for both streams and
+		// keeps their order.
+		c.Stream = &mappedWriter{c.Stream, out}
 	}
 	o, err := m.backing.Exec(ctx, c)
-	if err != nil {
+	if o == nil {
 		return nil, err
 	}
-	if stream != nil {
-		stream.Write(out(buf.Bytes()))
-	}
 	o.Stdout, o.Stderr = out(o.Stdout), out(o.Stderr)
-	return o, nil
+	return o, err
+}
+
+// mappedWriter maps paths back in each write as it passes, so a stream
+// gets the output as it comes. A path split across two writes is not
+// mapped, which the tables' short outputs never do.
+type mappedWriter struct {
+	w   io.Writer
+	out func([]byte) []byte
+}
+
+func (m *mappedWriter) Write(p []byte) (int, error) {
+	if _, err := m.w.Write(m.out(p)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 // noLinks is a workspace whose FS cannot tell a link from what it leads

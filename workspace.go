@@ -64,7 +64,14 @@ type Workspace interface {
 	// provider's key and other secrets out of what it is given is the
 	// program's.
 	Env() []string
-	// Exec runs one command to completion in a fresh process.
+	// Exec runs one command to completion in a fresh process. An exit
+	// status other than zero is an Output, not an error. When
+	// Command.Timeout ends the command, Exec returns its Output with
+	// ExitCode -1 and TimedOut, and no error. When ctx ends first, Exec
+	// ends the command and everything it started, and returns the
+	// output collected so far, with ExitCode -1 and Interrupted, beside
+	// ctx.Err(); a ctx that has ended before the command starts runs
+	// nothing and gives no Output.
 	Exec(ctx context.Context, cmd Command) (*Output, error)
 	// Descriptor is what the session records about where the tools ran.
 	Descriptor() Descriptor
@@ -106,10 +113,15 @@ type Command struct {
 // Output is how a process ended.
 type Output struct {
 	Stdout, Stderr []byte
-	// ExitCode is the process's status; -1 when it was killed.
+	// ExitCode is the process's status; -1 when it was killed, or
+	// ended by its timeout or its context.
 	ExitCode int
 	// TimedOut reports that Command.Timeout ended it.
 	TimedOut bool
+	// Interrupted reports that the end of Exec's context ended it. The
+	// Output is then what the command wrote until its end, returned
+	// beside the context's error.
+	Interrupted bool
 }
 
 // Descriptor is what the session records about a workspace, in its env
@@ -163,8 +175,11 @@ type Process interface {
 	// Close ends the process, if it is still running, and everything it
 	// started, and releases the pipes. It first closes Stdin and gives
 	// the process a moment to exit, as the MCP stdio transport's
-	// shutdown asks, then terminates it, then kills it. It returns once
-	// the process has exited, and may be called more than once.
+	// shutdown asks, then climbs the ladder every end of a process
+	// climbs (the context's, Command.Timeout's, Exec's): it interrupts
+	// them (SIGINT), then terminates them (SIGTERM), then kills them
+	// (SIGKILL), a moment apart. It returns once the process has
+	// exited, and may be called more than once.
 	Close() error
 }
 

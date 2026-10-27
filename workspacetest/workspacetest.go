@@ -25,6 +25,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -315,6 +316,84 @@ func execRuns(t *testing.T, b Backend) {
 	if _, err := ws.Exec(cctx, agentworkspace.Command{Args: []string{"sleep", "5"}}); err == nil {
 		t.Error("a cancelled context ran the command to the end")
 	}
+	execInterrupted(t, ws)
+}
+
+// An Exec whose context ends while it runs ends the command, and what
+// it started, and returns what it wrote until then, with ExitCode -1
+// and Interrupted, beside the context's error: given to a Stream as it
+// came, or kept in the Output.
+func execInterrupted(t *testing.T, ws agentworkspace.Workspace) {
+	cmd := agentworkspace.Command{Args: []string{"sh", "-c", "echo started; echo also >&2; sleep 30 & sleep 30"}}
+	check := func(what string, out *agentworkspace.Output, err error) {
+		t.Helper()
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("%s: err = %v, want context.Canceled", what, err)
+		}
+		if out == nil || out.ExitCode != -1 || !out.Interrupted || out.TimedOut {
+			t.Errorf("%s: Output = %+v, want ExitCode -1 and Interrupted", what, out)
+		}
+	}
+
+	t.Run("kept", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		time.AfterFunc(time.Second, cancel)
+		var out *agentworkspace.Output
+		var err error
+		within(t, 10*time.Second, "the interrupted Exec", func() { out, err = ws.Exec(ctx, cmd) })
+		check("kept", out, err)
+		if ws.Descriptor().Kind == agentworkspace.KindRemote {
+			// remote's wire carries no output past the hang-up yet: #5's
+			// wire change, an exec key and a cancel route, is to come.
+			return
+		}
+		if out != nil && (string(out.Stdout) != "started\n" || string(out.Stderr) != "also\n") {
+			t.Errorf("kept: the output so far = %q, %q", out.Stdout, out.Stderr)
+		}
+	})
+
+	t.Run("streamed", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		stream := &cancelAt{want: "started\nalso\n", cancel: cancel}
+		c := cmd
+		c.Stream = stream
+		var out *agentworkspace.Output
+		var err error
+		within(t, 10*time.Second, "the interrupted Exec", func() { out, err = ws.Exec(ctx, c) })
+		check("streamed", out, err)
+		if got := stream.String(); got != "started\nalso\n" {
+			t.Errorf("streamed: the stream got %q", got)
+		}
+		if out != nil && len(out.Stdout)+len(out.Stderr) != 0 {
+			t.Errorf("streamed: the Output kept %q, %q", out.Stdout, out.Stderr)
+		}
+	})
+}
+
+// cancelAt is a Stream that calls cancel once it has been given want.
+type cancelAt struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	want   string
+	cancel context.CancelFunc
+}
+
+func (c *cancelAt) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.buf.Write(p)
+	if c.buf.String() == c.want {
+		c.cancel()
+	}
+	return len(p), nil
+}
+
+func (c *cancelAt) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
 }
 
 // hello writes bin/hello under dir, a program that prints "hello" and

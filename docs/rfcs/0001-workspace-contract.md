@@ -281,23 +281,40 @@ it ended:
 | Member | Meaning |
 | --- | --- |
 | stdout, stderr | what the process wrote, each in full, when the command had no stream; empty when it had one |
-| exit status | the process's status; −1 when a signal ended it |
+| exit status | the process's status; −1 when a signal ended it, or its timeout or the caller's context did |
 | timed out | the command's timeout ended it |
+| interrupted | the end of the caller's context ended it; the result comes beside the context's error |
 
 - An exit status other than zero is a result, not an error.
-- When the command's timeout ends it, Exec MUST return a result with
-  exit status −1 and *timed out* set, not an error, and MUST end
-  everything the command started.
-- When the caller's context has ended before the command runs, or ends
-  while it runs, Exec returns the context's error and the command does
-  not run to its end. Today it returns no result beside that error.
-- A command that cannot start (no args, a refused dir) is an error, and
-  nothing runs.
+- When the command's timeout ends it, Exec MUST end the command and
+  everything it started ([section 8](#8-ending-a-process)), and MUST
+  return a result with exit status −1 and *timed out* set, not an
+  error.
+- When the caller's context ends while the command runs, Exec MUST end
+  the command and everything it started in the same way, and MUST
+  return a result beside the context's error: the output collected
+  until the command ended, exit status −1 and *interrupted* set. With a
+  stream, the output went to the stream as it came, and the result
+  keeps none, as when the command runs to its end. A caller that
+  interrupts a command still learns what it printed, which a build or a
+  test run has often said by then.
+- When the caller's context has ended before the command runs, Exec
+  returns the context's error, runs nothing, and gives no result.
+- A command that cannot start (no args, a refused dir, a program not
+  found) is an error, and nothing runs.
 
-Open: #5 will state the result of an interrupted command: the output
-collected so far, with exit status −1 and an `interrupted` mark, beside
-the cancellation error, and what a wire must carry so the client gets
-it. Open: #33 will give the mcpworkspace client an Exec composed over
+A binding over a wire MUST deliver an interrupted command's output to
+the client, so its cancellation is a message, not a dropped connection.
+**Pending (#5, the wire half):** remote does not yet. `/v1/exec` sends
+its `{"output"}` frame only at the end, and the client hangs up when its
+context ends, so over remote an interrupted Exec returns −1 and
+*interrupted* with no output kept, beyond what a stream was given. The
+change gives exec a key and a cancel route, as processes already have
+`/cancel`, and the client reads on after it cancels. Until it lands,
+`workspacetest.Run` checks the kept output on every backend but a
+remote one.
+
+Open: #33 will give the mcpworkspace client an Exec composed over
 Start, held to this section.
 
 ## 7. Processes
@@ -352,20 +369,40 @@ end it and everything it started:
 
 When the process exits by itself, what it started MUST go with it.
 
-**Close** first closes the process's input and gives it a moment to
-exit, as the MCP stdio transport's shutdown asks, then terminates it
-(TERM), then kills it (KILL). It returns once the process has exited,
-and MAY be called more than once. The reference binding's moment is two
-seconds at each step (`internal/lifetime.Grace`), and `workspacetest`
-checks against the same value.
+**The ladder.** Every way a process is ended (its close, the end of its
+context, its timeout, the workspace's close, and an Exec's context or
+timeout, [section 6](#6-exec)) MUST send the same signals, in this
+order, to the process and everything it started, and stop once the
+process has exited:
 
-The ladder for the other ways is not stated by the contract today. The
-reference binding, for a started process, sends TERM and then KILL
-after the same grace when the context or the timeout ends it, and for
-Exec sends KILL at once.
+1. INT;
+2. a grace later, TERM;
+3. a grace after that, KILL.
 
-Open: #5 will choose one escalation ladder for every way a process is
-ended. Open: #32 will state that "everything it started" includes the
+When the process exits partway, what it started that is still running
+is killed at once. The grace is the backend's; the reference binding's
+is two seconds at each step (`internal/lifetime.Grace`), and
+`workspacetest` checks against the same value.
+
+**Close** first closes the process's input and gives it a grace to
+exit, as the MCP stdio transport's shutdown asks, and then climbs the
+ladder. It returns once the process has exited, and MAY be called more
+than once. The end of the context and the timeout are interrupts, not a
+shutdown, and begin at the ladder's first step.
+
+The ladder is the same for all of them so that a program behaves one
+way however it is stopped. INT comes first because it is the interrupt
+a terminal's user sends to a foreground job, and the end of a call's
+context is the user's interrupt (agenttool RFC 0001, stopping a call);
+a program that buffers its output or prints a summary writes it on INT,
+which is what an interrupted Exec returns. TERM follows because a job a
+non-interactive shell started in the background ignores INT (POSIX has
+it ignore INT and QUIT) but not TERM, and because the MCP stdio shutdown
+names TERM, so a server or a background job gets its chance to clean up
+before KILL. A process that ignores both is killed two graces after the
+ladder begins.
+
+Open: #32 will state that "everything it started" includes the
 descendants that left its process group or session, and how a backend
 that cannot find an orphaned descendant says so.
 
@@ -516,7 +553,7 @@ The root module is the reference binding.
 | write, remove | `Workspace.WriteFile(ctx, name, data, perm)`, `Workspace.Remove(ctx, name)` |
 | environment | `Workspace.Env()`, a copy |
 | command | `Command{Args, Dir, Env, Stdin, Timeout, Stream}` |
-| exec | `Workspace.Exec(ctx, cmd)` → `*Output{Stdout, Stderr, ExitCode, TimedOut}` |
+| exec | `Workspace.Exec(ctx, cmd)` → `*Output{Stdout, Stderr, ExitCode, TimedOut, Interrupted}`, beside `ctx.Err()` when interrupted |
 | descriptor | `Workspace.Descriptor()` → `Descriptor{Kind, Ref, Root}`; `KindLocal`, `KindContainer`, `KindRemote` |
 | close | `Workspace.Close()` |
 | starter | `Starter` interface; `Start(ctx, ws, cmd)` refuses a non-starter with `errors.ErrUnsupported` |
@@ -646,7 +683,7 @@ The reference suite is Go package `workspacetest`:
 
 | Table | Holds |
 | --- | --- |
-| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec, invalid names |
+| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt), invalid names |
 | `RunStarter` | a starter: the pipes, the directory and environment, the lifetimes (context, timeout, close, exit, the workspace's close), signals, refusals, concurrency |
 | `RunServerProvider` | a server provider: the list, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
 | `Confined` | the layout `Run` uses: a workspace beside a directory holding a secret, with links that lead out and one that stays in |
@@ -703,9 +740,8 @@ The issues that will add or change a rule here:
 
 - #3: the descriptor's `host` and `instance` members, and which kind
   sets which ([section 12](#12-descriptor)).
-- #5: what an interrupted Exec returns, the wire change that carries
-  it, and one escalation ladder ([sections 6](#6-exec) and
-  [8](#8-ending-a-process)).
+- #5, the wire half: remote carrying an interrupted Exec's output, by an
+  exec key and a cancel route ([section 6](#6-exec)).
 - #9: an offered server's isolation, beyond the trust rule
   ([section 13](#13-isolation-statement)); waits for a second product.
 - #23: the `secrets` mark on a listed server
@@ -729,10 +765,6 @@ draft:
   for Exec, promise that an end reaches everything the process started;
   `Local` signals the process group, so a descendant that called
   `setsid` or `setpgid` outlives it, for Exec and Start alike (#32).
-- **Exec's ladder.** `Process.Close` closes input, then sends TERM,
-  then KILL; `Local.Exec` sends KILL at once on a cancel or a timeout,
-  and a started process's context end skips the closing of input. The
-  doc comments state the ladder for Close alone (#5).
 - **`Descriptor.Ref`.** Its doc comment lists "a host, an instance ID"
   among what `Ref` may hold; agentsession 0.14 gives the host and the
   instance members of their own and says `ref` is absent for `local`
@@ -775,3 +807,11 @@ Questions with no issue yet:
   was given and removes nothing; keeping secrets out is the program's
   (#37). `Workspace.Env`'s doc comment no longer says the provider's key
   is already removed.
+- [Section 6](#6-exec): an interrupted Exec (#5) ends what the command
+  started and returns the output so far, with exit status −1 and
+  *interrupted*, beside the context's error. A wire MUST carry it;
+  remote's change is pending.
+- [Section 8](#8-ending-a-process): one ladder for every way a process
+  is ended (#5): INT, then TERM, then KILL, a grace apart, with Close
+  closing input first. The reference binding sent TERM then KILL for a
+  started process and KILL at once for Exec.

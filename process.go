@@ -16,16 +16,90 @@ import (
 )
 
 // grace is how long a process's end waits at each step: for the
-// process to exit after its input closes, and again after SIGTERM,
-// before it is killed. workspacetest checks against the same value.
+// process to exit after its input closes, after SIGINT and after
+// SIGTERM, before it is killed. workspacetest checks against the same
+// value.
 const grace = lifetime.Grace
+
+// ladder is how Local ends a process and what it started, the one way
+// for Exec, a started process's context and timeout, Process.Close and
+// the workspace's Close: SIGINT, the interrupt a terminal's user sends,
+// which lets a program that buffers its output write it; then SIGTERM,
+// which a job a non-interactive shell put in the background does not
+// ignore, as it does SIGINT, and which the MCP stdio transport's
+// shutdown names; then SIGKILL. Each but the last is a grace apart.
+var ladder = [...]syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}
+
+// group is a process Local started as the leader of a process group of
+// its own, and what it started.
+type group struct {
+	pgid int
+	// mu is held while a signal is sent and while reaped is set, so no
+	// signal goes to the group's ID once its leader is reaped.
+	mu     sync.Mutex
+	reaped bool
+}
+
+// signal sends sig to the group while its leader is not yet reaped,
+// and is os.ErrProcessDone after.
+func (g *group) signal(sig syscall.Signal) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.reaped {
+		return os.ErrProcessDone
+	}
+	return syscall.Kill(-g.pgid, sig)
+}
+
+// reap records that the leader has been waited for, killing what is
+// left of the group first when kill is set. Here, as the leader is
+// reaped, the group's ID cannot yet name another group; later it
+// could.
+func (g *group) reap(kill bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if kill {
+		syscall.Kill(-g.pgid, syscall.SIGKILL)
+	}
+	g.reaped = true
+}
+
+// end climbs the ladder until exited, given how long to wait, reports
+// the leader gone; the last step waits for nothing.
+func (g *group) end(exited func(time.Duration) bool) {
+	for i, sig := range ladder {
+		g.signal(sig)
+		if i == len(ladder)-1 || exited(grace) {
+			return
+		}
+	}
+}
+
+// closedWithin reports whether ch is closed within d.
+func closedWithin(ch <-chan struct{}, d time.Duration) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ch:
+		return true
+	case <-t.C:
+		return false
+	}
+}
 
 // Start runs a command in its own process group, with pipes for its
 // standard input and output, and returns at once. Its standard error
 // goes to Command.Stream, or nowhere. The process, and everything it
 // started, is ended by Process.Close, by the end of ctx, by
-// Command.Timeout, or by the workspace's Close; when it exits by
-// itself, anything left in its group is killed.
+// Command.Timeout, or by the workspace's Close, each with Local's
+// ladder (SIGINT, SIGTERM, SIGKILL, a grace apart), which Close
+// begins by closing the process's input; when it exits by itself,
+// anything left in its group is killed.
 func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 	if c.Stdin != nil {
 		return nil, errors.New("agentworkspace: Start takes no Command.Stdin; write to Process.Stdin")
@@ -104,7 +178,7 @@ func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 	p := &localProcess{
 		owner:   l,
 		cmd:     cmd,
-		pgid:    cmd.Process.Pid,
+		group:   &group{pgid: cmd.Process.Pid},
 		stdin:   inW,
 		stdout:  outR,
 		done:    make(chan struct{}),
@@ -133,14 +207,9 @@ func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 type localProcess struct {
 	owner  *Local
 	cmd    *exec.Cmd
-	pgid   int
+	group  *group
 	stdin  *os.File // the write end
 	stdout *os.File // the read end
-
-	// reap is held across the reaping's group kill and while a signal is
-	// sent, so no signal goes to the group's ID after reaped is set.
-	reap   sync.Mutex
-	reaped bool
 
 	mu     sync.Mutex
 	ending error // the context's error, once the context began ending it
@@ -166,18 +235,7 @@ func (p *localProcess) Signal(sig os.Signal) error {
 	if !ok {
 		return fmt.Errorf("agentworkspace: cannot send %v", sig)
 	}
-	return p.signal(s)
-}
-
-// signal sends sig to the process group while its leader is not yet
-// reaped, and is os.ErrProcessDone after.
-func (p *localProcess) signal(sig syscall.Signal) error {
-	p.reap.Lock()
-	defer p.reap.Unlock()
-	if p.reaped {
-		return os.ErrProcessDone
-	}
-	return syscall.Kill(-p.pgid, sig)
+	return p.group.signal(s)
 }
 
 func (p *localProcess) Close() error {
@@ -196,12 +254,8 @@ func (p *localProcess) Close() error {
 // until copied is closed.
 func (p *localProcess) wait(errR *os.File, copied chan struct{}) {
 	err := p.cmd.Wait()
-	// Anything the process started goes with it. Here, as it is reaped,
-	// the group's ID cannot yet name another group; later it could.
-	p.reap.Lock()
-	syscall.Kill(-p.pgid, syscall.SIGKILL)
-	p.reaped = true
-	p.reap.Unlock()
+	// Anything the process started goes with it.
+	p.group.reap(true)
 	if errR != nil {
 		// What the group wrote is read to the end, unless something
 		// outside the group holds the pipe open.
@@ -255,9 +309,7 @@ func (p *localProcess) watch(ctx context.Context, cancel context.CancelFunc) {
 
 // end ends the process group, unless the process has exited, when
 // wait already has: politely, by closing the process's input and
-// waiting a moment, when Close asked; then with SIGTERM, then SIGKILL.
-// Signals go to the group only while its leader has not been reaped,
-// so they cannot reach a later group that reused its ID.
+// waiting a moment, when Close asked; then with the ladder.
 func (p *localProcess) end(polite bool) {
 	if polite {
 		p.stdin.Close()
@@ -265,27 +317,9 @@ func (p *localProcess) end(polite bool) {
 			return
 		}
 	}
-	p.signal(syscall.SIGTERM)
-	if p.exited(grace) {
-		return
-	}
-	p.signal(syscall.SIGKILL)
+	p.group.end(p.exited)
 	<-p.done
 }
 
 // exited reports whether the process exits within d.
-func (p *localProcess) exited(d time.Duration) bool {
-	select {
-	case <-p.done:
-		return true
-	default:
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-p.done:
-		return true
-	case <-t.C:
-		return false
-	}
-}
+func (p *localProcess) exited(d time.Duration) bool { return closedWithin(p.done, d) }

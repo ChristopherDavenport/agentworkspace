@@ -159,9 +159,9 @@ func TestClosingTheHandlerEndsEverySession(t *testing.T) {
 	ctx := context.Background()
 	_, a := alone(t, dial(t, url), ctx, "")
 	_, b := alone(t, dial(t, url), ctx, "")
-	// One that ignores its input's end and SIGTERM, whose close takes
-	// both graces, is being closed when the handler is.
-	closing, c := alone(t, dial(t, url), ctx, "trap '' TERM; ")
+	// One that ignores its input's end, SIGINT and SIGTERM, whose close
+	// takes every grace, is being closed when the handler is.
+	closing, c := alone(t, dial(t, url), ctx, "trap '' INT TERM; ")
 	go closing.Close()
 	execed := make(chan error, 1)
 	go func() {
@@ -350,9 +350,9 @@ func TestClosingTheHandlerWaitsForALapse(t *testing.T) {
 	h, url := serve(t, l, WithInsecureNoAuth(), WithLease(lease))
 	var off atomic.Bool
 	ws := dial(t, url, WithHTTPClient(&http.Client{Transport: cut{&off, http.DefaultTransport}}))
-	// It ignores its input's end and SIGTERM, so its end takes both
-	// graces.
-	_, pgid := alone(t, ws, context.Background(), "trap '' TERM; ")
+	// It ignores its input's end, SIGINT and SIGTERM, so its end takes
+	// every grace.
+	_, pgid := alone(t, ws, context.Background(), "trap '' INT TERM; ")
 	off.Store(true)
 	time.Sleep(lease + 300*time.Millisecond) // lapsed, and ending
 	within(t, 15*time.Second, "the handler's close", func() { h.Close() })

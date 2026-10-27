@@ -7,6 +7,22 @@ versions may break the API.
 
 ## Unreleased
 
+- Added: `Output.Interrupted`. When `Exec`'s context ends while the
+  command runs, `Local.Exec` now returns the output collected so far,
+  with `ExitCode` -1 and `Interrupted`, beside `ctx.Err()`, where it
+  returned nil (#5). A `remote` client returns the same `Output`,
+  without the output kept: the wire half of #5 (an exec key and a
+  cancel route, so a hang-up keeps the output) is to come. RFC 0001 §6
+  states the rule, and `workspacetest.Run` checks it.
+- Changed: one ladder ends a process, however it is ended (#5):
+  SIGINT, then SIGTERM two seconds later, then SIGKILL two seconds
+  after that, to the process's group. `Process.Close` still closes the
+  process's input and waits two seconds first. Before, `Local.Exec`
+  sent SIGKILL at once on its context's end or its timeout, and a
+  started process got SIGTERM then SIGKILL, so a process that ignores
+  SIGINT and SIGTERM now takes two seconds longer to end. RFC 0001 §8
+  states the ladder and why.
+
 - Fixed (documentation): `Workspace.Env`'s doc comment said the
   environment had "the provider's key and other credentials already
   removed"; no backend removes anything (#37). It now says a workspace

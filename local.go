@@ -143,24 +143,30 @@ func (l *Local) Remove(_ context.Context, name string) error {
 	return outside(name, l.root.Remove(name))
 }
 
-// Exec runs a command in its own process group, so a timeout or a
-// cancel kills what it started too, and waits at most two seconds for
-// output a killed child's children still hold open.
+// Exec runs a command in its own process group. When ctx ends, or
+// Command.Timeout, before the command does, Exec ends it and what it
+// started with Local's ladder (SIGINT, then SIGTERM, then SIGKILL, a
+// grace apart; see Process) and returns the output so far, with
+// ExitCode -1 and Interrupted or TimedOut. It waits at most two seconds
+// past the command's exit for output its children still hold open.
 func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	dir, env, prog, err := l.prepare(c)
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	run := ctx // the caller's, bounded by the timeout
 	if c.Timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
+		run, cancel = context.WithTimeout(ctx, c.Timeout)
 		defer cancel()
 	}
-	cmd := exec.CommandContext(ctx, prog, c.Args[1:]...)
+	cmd := exec.Command(prog, c.Args[1:]...)
 	cmd.Args[0] = c.Args[0]
 	cmd.Dir, cmd.Env = dir, env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = waitDelay
 	if c.Stdin != nil {
 		cmd.Stdin = bytes.NewReader(c.Stdin)
@@ -171,14 +177,51 @@ func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	} else {
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	}
-	err = cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	g := &group{pgid: cmd.Process.Pid}
+	// The watch ends the command when run ends first. mu orders its
+	// start against Wait's return, so the outcome says which came
+	// first.
+	var (
+		mu     sync.Mutex
+		waited bool
+		cause  error // the caller's error, or the timeout's when it is nil
+		ending bool
+	)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-run.Done():
+		}
+		mu.Lock()
+		if waited {
+			mu.Unlock()
+			return
+		}
+		ending, cause = true, ctx.Err()
+		mu.Unlock()
+		g.end(func(d time.Duration) bool { return closedWithin(done, d) })
+	}()
+	err = cmd.Wait()
+	mu.Lock()
+	waited = true
+	mu.Unlock()
+	close(done)
+	// Ended, what is left of the group goes; a command that exited by
+	// itself keeps what it left running.
+	g.reap(ending)
 	out := &Output{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 	switch {
-	case c.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded):
+	case ending && cause != nil:
+		out.ExitCode, out.Interrupted = -1, true
+		return out, cause
+	case ending:
 		out.ExitCode, out.TimedOut = -1, true
 		return out, nil
-	case ctx.Err() != nil:
-		return nil, ctx.Err()
 	case err == nil:
 		return out, nil
 	}

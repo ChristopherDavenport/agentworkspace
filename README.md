@@ -42,7 +42,9 @@ through an `os.Root`, so a link that leads out is refused rather than
 followed. Its processes are not confined: a shell reaches whatever the
 user can, and the product's policy is what stands in front of it.
 `Exec` runs each command in a process group of its own, so a timeout
-or a cancel kills what it started too. `Local` runs on Linux and macOS.
+or a cancel ends what it started too; a cancel still returns the output
+so far, marked `Interrupted`, beside the context's error. `Local` runs
+on Linux and macOS.
 
 [RFC 0001](docs/rfcs/0001-workspace-contract.md) specifies the contract
 every backend keeps, for an implementation in any language: names and
@@ -73,9 +75,10 @@ transport := &mcp.IOTransport{Reader: p.Stdout(), Writer: p.Stdin()}
 
 A process lives no longer than its owner. `Close` closes its input and
 gives it a moment to leave, as the MCP stdio shutdown asks, then sends
-SIGTERM, then SIGKILL; the context's end, `Command.Timeout` and the
-workspace's `Close` end it too; each ends everything it started, and
-when it exits by itself what it left running goes with it. `Starter` is
+SIGINT, SIGTERM and SIGKILL, a moment apart; the context's end,
+`Command.Timeout` and the workspace's `Close` end it too, with the same
+signals, as an interrupted `Exec` does; each ends everything it
+started, and when it exits by itself what it left running goes with it. `Starter` is
 an interface of its own, beside `Workspace` as `fs.ReadLinkFS` is beside
 `fs.FS`, so a workspace that only stores files, or a runtime that runs
 one command at a time, is still a `Workspace`.

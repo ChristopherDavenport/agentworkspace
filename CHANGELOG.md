@@ -5,6 +5,18 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added (documentation): RFC 0001, the workspace contract
+  (`docs/rfcs/0001-workspace-contract.md`), draft 0.1. It states what
+  the module already promises (names and confinement, files, the
+  environment, commands, Exec, processes and how they end, offered
+  servers, the descriptor) with MUST/SHOULD wording, the Go,
+  mcpworkspace, remote and tunnel bindings as tables, and
+  `workspacetest` as the conformance suite. Rules the open issues will
+  add are marked "Open: #N", and the places where the code and its doc
+  comments disagree are listed as open questions. No API changes.
+
 ## v0.0.10 - 2026-10-26
 
 - Fixed (documentation): the `tunnel` package doc's "Proving the hub"

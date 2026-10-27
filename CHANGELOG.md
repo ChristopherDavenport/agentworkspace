@@ -7,6 +7,12 @@ versions may break the API.
 
 ## Unreleased
 
+- Changed: `Local` builds a process's environment itself, the
+  workspace's with `Command.Env` over it name by name, each name once
+  with the last value given it, rather than leave a repeated name to
+  `os/exec` (#41). What a process sees is unchanged; the rule is now
+  the contract's (RFC 0001 §4), and `workspacetest.Run` checks it.
+
 - Fixed: `Local.Exec` and `Local.Start` find a bare program name on the
   `PATH` of the environment the process starts with (the workspace's,
   then the command's), as execvp(3) does, and no longer on the `PATH`

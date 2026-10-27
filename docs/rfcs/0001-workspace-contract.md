@@ -213,6 +213,18 @@ workspace adds nothing to and removes nothing from what it is given.
 See [open questions](#19-open-questions) on the doc comment that reads
 otherwise.
 
+**A process's environment.** A process starts with the workspace's
+environment with the command's entries ([section 5](#5-commands)) over
+it, name by name. An entry's name is what comes before its first `=`.
+An entry of the command replaces the workspace's entry of the same
+name, and a later entry of either replaces an earlier one of the same
+name. Each name MUST appear once in what the process receives, with
+the last value given it; where in the list it appears is not part of
+the contract. A backend MUST apply this rule itself rather than rely on
+what its process API does with a repeated name, which differs between
+systems. A binding over a wire passes the command's entries as given,
+and the serving side's workspace applies the rule.
+
 A binding over a wire tells the environment only to a principal that
 may run commands (remote's `exec` scope); to any other it is empty.
 
@@ -224,7 +236,7 @@ A **command** is one process to run:
 | --- | --- |
 | args | argv; MUST NOT be empty, and an empty one is refused before anything starts |
 | dir | a name of a directory, relative to the root; empty is the root. A dir that leaves the workspace, by name or through a link, is refused as *outside*; one that is not a directory is refused |
-| env | entries added to the workspace's environment, after it |
+| env | entries over the workspace's environment, name by name ([section 4](#4-environment)) |
 | stdin | the bytes of standard input for Exec; none when absent. Start refuses it: a started process's input is its pipe |
 | timeout | ends the process, and everything it started, after this long; zero is no limit but the owner's |
 | stream | where the output the caller is not otherwise given goes as it arrives: for Exec, standard output and standard error interleaved; for Start, standard error. Absent discards it (Start) or keeps it in the result (Exec) |
@@ -747,9 +759,6 @@ draft:
 
 Questions with no issue yet:
 
-- **Duplicate environment entries.** The command's environment is
-  added after the workspace's; which entry a process sees when both set
-  one name is Go's (`os/exec` keeps the last), not stated.
 - **A wire fixture corpus.** A non-Go server is checked only through a
   Go client. A corpus of request and reply exchanges per wire, as
   agenttool keeps for schemas, would let another language check one
@@ -760,3 +769,6 @@ Questions with no issue yet:
 - [Section 5](#5-commands): argv resolution (#4). A bare `args[0]` is
   looked up in the `PATH` of the process's own environment, absolute
   entries alone; with no `PATH` it is not found.
+- [Section 4](#4-environment): a process's environment (#41). The
+  command's entries are over the workspace's name by name, and each
+  name reaches the process once, with the last value given it.

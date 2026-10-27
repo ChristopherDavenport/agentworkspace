@@ -43,6 +43,32 @@ func TestEnvIsACopy(t *testing.T) {
 	}
 }
 
+// A process's environment is the workspace's with the command's over
+// it, name by name: each name once, where it first appears, with the
+// last value given it.
+func TestProcessEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ws, cmd []string
+		want    []string
+	}{
+		{"neither", nil, nil, []string{}},
+		{"the command's added", []string{"A=1"}, []string{"B=2"}, []string{"A=1", "B=2"}},
+		{"the command's over the workspace's", []string{"A=1", "PATH=/bin", "C=3"}, []string{"PATH=/usr/bin"}, []string{"A=1", "PATH=/usr/bin", "C=3"}},
+		{"the last of the command's", nil, []string{"A=1", "A=2"}, []string{"A=2"}},
+		{"the workspace's own repeated", []string{"A=1", "A=2"}, nil, []string{"A=2"}},
+		{"an empty value is a value", []string{"A=1"}, []string{"A="}, []string{"A="}},
+		{"a value with an =", []string{"A=1"}, []string{"A=b=c"}, []string{"A=b=c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := processEnv(tc.ws, tc.cmd)
+			if got == nil || !slices.Equal(got, tc.want) {
+				t.Errorf("processEnv(%q, %q) = %#v, want %q", tc.ws, tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
+
 // A nil environment is an empty one, never this process's, which holds
 // the credentials Env is built without.
 func TestANilEnvIsEmpty(t *testing.T) {

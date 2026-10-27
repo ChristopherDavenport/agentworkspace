@@ -291,6 +291,17 @@ func execRuns(t *testing.T, b Backend) {
 			}
 		})
 	}
+	// The command's environment is over the workspace's name by name,
+	// and each name reaches the process once.
+	cmd := agentworkspace.Command{Args: []string{"sh", "-c", `env | grep -c '^X='; echo $X; env | grep -c '^PATH='`}, Env: []string{"X=1", "X=2"}}
+	for _, kv := range ws.Env() {
+		if strings.HasPrefix(kv, "PATH=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	if out, err := ws.Exec(ctx, cmd); err != nil || string(out.Stdout) != "1\n2\n1\n" {
+		t.Errorf("a name set twice by the command, and one set by both: %q, %v; want once each, the last value", out.Stdout, err)
+	}
 	var stream bytes.Buffer
 	out, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"sh", "-c", "echo a; echo b >&2"}, Stream: &stream})
 	if err != nil || stream.String() != "a\nb\n" || len(out.Stdout)+len(out.Stderr) != 0 {

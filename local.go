@@ -216,14 +216,32 @@ func (l *Local) prepare(c Command) (dir string, env []string, prog string, err e
 		}
 		dir = filepath.Join(l.dir, c.Dir)
 	}
-	// Never nil, which exec takes as this process's whole environment,
-	// the credentials Env was built without included; slices.Clone of
-	// a nil env would be nil.
-	env = append(append([]string{}, l.env...), c.Env...)
+	env = processEnv(l.env, c.Env)
 	if prog, err = lookPath(c.Args[0], env); err != nil {
 		return "", nil, "", err
 	}
 	return dir, env, prog, nil
+}
+
+// processEnv is the environment a process starts with: the
+// workspace's, with the command's over it name by name. Each name is
+// there once, where it first appears, with the last value given it, so
+// what the process sees is this rule's and not os/exec's. It is never
+// nil, which exec takes as this process's whole environment, the
+// credentials the workspace's was built without included.
+func processEnv(ws, cmd []string) []string {
+	env := make([]string, 0, len(ws)+len(cmd))
+	at := make(map[string]int, len(ws)+len(cmd))
+	for _, kv := range slices.Concat(ws, cmd) {
+		name, _, _ := strings.Cut(kv, "=")
+		if i, ok := at[name]; ok {
+			env[i] = kv
+			continue
+		}
+		at[name] = len(env)
+		env = append(env, kv)
+	}
+	return env
 }
 
 // lookPath finds the program a command runs as execvp(3) does, but on
@@ -242,7 +260,7 @@ func lookPath(name string, env []string) (string, error) {
 	var pathList string
 	for _, kv := range env {
 		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
-			pathList = v // the last one is the one the process sees
+			pathList = v
 		}
 	}
 	if name != "" {

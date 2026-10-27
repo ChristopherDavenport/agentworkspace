@@ -82,7 +82,9 @@ type Command struct {
 	// Dir is relative to Root; "" is Root. A Dir that leaves the
 	// workspace, by name or through a link, is ErrOutside.
 	Dir string
-	// Env is added to Workspace.Env.
+	// Env is over Workspace.Env, name by name: an entry replaces the
+	// workspace's of the same name, and a later entry an earlier one,
+	// so each name reaches the process once.
 	Env []string
 	// Stdin is the process's standard input; nil is none. Start refuses
 	// it: a started process's input is Process.Stdin.

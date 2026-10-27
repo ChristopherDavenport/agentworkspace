@@ -7,6 +7,14 @@ versions may break the API.
 
 ## Unreleased
 
+- Fixed (documentation): `Workspace.Env`'s doc comment said the
+  environment had "the provider's key and other credentials already
+  removed"; no backend removes anything (#37). It now says a workspace
+  reports what it was given, nothing added or removed, and that keeping
+  credentials out is the program's. RFC 0001 §4 states the rule, and
+  `workspacetest.RunStarter` checks that `Env` is what the workspace
+  was given.
+
 - Changed: `Local` builds a process's environment itself, the
   workspace's with `Command.Env` over it name by name, each name once
   with the last value given it, rather than leave a repeated name to

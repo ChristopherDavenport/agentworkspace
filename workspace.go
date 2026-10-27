@@ -59,7 +59,10 @@ type Workspace interface {
 	// Remove deletes a file or an empty directory.
 	Remove(ctx context.Context, name string) error
 	// Env is the environment every process in the workspace starts
-	// with, the provider's key and other credentials already removed.
+	// with: what the workspace was given, a copy, with nothing added or
+	// removed. A workspace keeps no credential out of it; leaving the
+	// provider's key and other secrets out of what it is given is the
+	// program's.
 	Env() []string
 	// Exec runs one command to completion in a fresh process.
 	Exec(ctx context.Context, cmd Command) (*Output, error)

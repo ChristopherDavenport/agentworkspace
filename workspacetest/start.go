@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -53,6 +54,7 @@ func RunStarter(t *testing.T, starters ...Starter) {
 		{"ClosingTheWorkspaceEndsItsProcesses", path, false, closingTheWorkspaceEndsItsProcesses},
 		{"Concurrently", path, false, startConcurrently},
 		{"FindsItsProgramOnItsOwnPath", []string{"A=1"}, false, findsItsProgramOnItsOwnPath},
+		{"EnvIsWhatItWasGiven", givenEnv, false, envIsWhatItWasGiven},
 	} {
 		t.Run(table.name, func(t *testing.T) {
 			if table.secret {
@@ -293,6 +295,23 @@ func startRefuses(t *testing.T, l agentworkspace.Starter) {
 			p.Close()
 		}
 		t.Errorf("a cancelled context: %v", err)
+	}
+}
+
+// givenEnv is an environment with a name that holds a credential, as a
+// program that left it in would give it.
+var givenEnv = []string{"A=1", "ANTHROPIC_API_KEY=sk-not-a-key", "PATH=" + os.Getenv("PATH")}
+
+// Env reports the environment the workspace was given, nothing added
+// and nothing removed, a credential included: keeping one out is the
+// program's, and the process sees it too.
+func envIsWhatItWasGiven(t *testing.T, s agentworkspace.Starter, _ string) {
+	if got := s.Env(); !slices.Equal(got, givenEnv) {
+		t.Errorf("Env = %q, want what it was given, %q", got, givenEnv)
+	}
+	out, err := s.Exec(context.Background(), agentworkspace.Command{Args: []string{"sh", "-c", "echo $ANTHROPIC_API_KEY"}})
+	if err != nil || string(out.Stdout) != "sk-not-a-key\n" {
+		t.Errorf("the process saw %q, %v", out.Stdout, err)
 	}
 }
 

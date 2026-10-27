@@ -207,11 +207,14 @@ constructed with, and nothing else:
 - the environment a caller is given MUST be a copy: changing it changes
   nothing a later process starts with.
 
-Removing the program's own credentials (the model provider's key, a
-token) before it constructs a workspace is the program's duty; a
-workspace adds nothing to and removes nothing from what it is given.
-See [open questions](#19-open-questions) on the doc comment that reads
-otherwise.
+A workspace MUST report the environment it was given, and MUST start
+its processes with it, adding nothing and removing nothing: not the
+model provider's key, not a token, not a name that looks like a secret.
+Keeping the program's own credentials out of a workspace is the
+program's duty, done before it constructs the workspace, and a reader
+of the environment MUST NOT take it as screened. A backend that offers
+to remove entries does so only by an option the program names, and
+reports what is left.
 
 **A process's environment.** A process starts with the workspace's
 environment with the command's entries ([section 5](#5-commands)) over
@@ -738,10 +741,6 @@ draft:
   the working directory; a remote client dialled by a principal without
   `read` is told the root's last element alone, so its `Root()`, and
   its `Served().Root`, are not absolute.
-- **`Workspace.Env`.** Its doc comment says the environment has "the
-  provider's key and other credentials already removed"; no backend
-  removes anything. `NewLocal` keeps what it is given, and its own doc
-  comment makes the removal the product's.
 - **Error kinds over mcpworkspace.** remote maps every kind of
   [section 2](#error-kinds) both ways; mcpworkspace's file errors have
   five kinds, so *exist*, *unsupported* and *closed* reach its client as
@@ -772,3 +771,7 @@ Questions with no issue yet:
 - [Section 4](#4-environment): a process's environment (#41). The
   command's entries are over the workspace's name by name, and each
   name reaches the process once, with the last value given it.
+- [Section 4](#4-environment): a workspace reports the environment it
+  was given and removes nothing; keeping secrets out is the program's
+  (#37). `Workspace.Env`'s doc comment no longer says the provider's key
+  is already removed.

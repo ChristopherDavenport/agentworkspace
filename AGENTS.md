@@ -79,7 +79,12 @@ interface.
   `WithHeader`); proving the hub to the workspace end, where TLS does
   not, is the application's too, through a hook at each end
   (`WithProofHeader` on the 101, `WithHubProof` before anything is
-  served). The scopes are the workspace end's (`WithScopes`,
+  served). The package doc's recipe for that proof, and its `HubProof`
+  example, are dax's (`internal/authn/proof.go`): a nonce the hub
+  issues and takes once, never one the workspace end makes, which an
+  impostor behind a forward can replay; keep them in step with it and
+  honest about what is left (no channel binding, replays of real nonces
+  within their lifetime). The scopes are the workspace end's (`WithScopes`,
   required). One `remote.Handler` serves every reconnect, so sessions
   outlive a drop shorter than the lease; HTTP/2 pings notice a dead
   tunnel at both ends. Its connection window is all its streams'

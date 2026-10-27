@@ -5,6 +5,33 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Fixed (documentation): the `tunnel` package doc's "Proving the hub"
+  recipe had the workspace end make its own nonce, and said a MAC that
+  reached an impostor could not be replayed to the hub later. Behind
+  `ssh -R` it can: the impostor takes the port, collects an upgrade,
+  and replays it through the forward once that is back, over a nonce
+  the hub has never seen (#25). The recipe now has the hub issue the
+  nonce, before each upgrade, in answer to a plain GET the program's
+  handler beside the `Hub` serves: statelessly (its age on the hub's
+  monotonic clock from a random offset, random bytes, and its MAC
+  under a secret the hub makes at start, never the shared key), taken
+  over a nonce the hub issued, within a short lifetime, once (a
+  bounded cache of taken nonces). Both MACs cover a per-direction
+  label, the workspace name the hub enrolls, the nonce and an instance
+  id, so a proof for one hub does not pass at another with the same
+  key. It says what is left: no channel binding, and an impostor that
+  fetched real nonces before taking the port gets a replay within
+  their lifetime per upgrade it collects; so the workspace end stops,
+  rather than dial again, after `ErrHubProof` in every phase and after
+  a few upgrades in a row a hub would have answered and did not, and
+  on a nonce answer that rules a hub out. The recipe is now a
+  compiled, offline example (`Example_hubProof`), and `WithHubProof`'s
+  doc says to end `Serve` from the hook (cancel its context), since
+  `Serve` tries again within the lease after a connection that served.
+  No API changes.
+
 ## v0.0.9 - 2026-10-26
 
 - Fixed: a `remote` process closed right after its start no longer

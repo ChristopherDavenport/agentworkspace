@@ -77,51 +77,66 @@
 // whose TLS binds the connection.
 //
 // Over ws://, whatever the upgrade carries reaches an impostor before
-// the proof is checked, so it carries nothing the impostor could use
-// again: no bearer token, no key, only what is good for one dial. An
-// HMAC over a nonce, keyed by a secret both ends hold, is one such
-// proof. The workspace end sends a fresh nonce and its own MAC under
-// the key, which the enrollment checks, and the hub answers with its
-// MAC of the same nonce. The two MACs are of different labels, so an
-// impostor cannot answer with the one it was sent; and the enrollment
-// refuses a nonce it has seen, or one too old (a time in it), so the
-// workspace's MAC that reached an impostor cannot be replayed to the
-// hub later (relayed at once, it can, as above).
+// the proof is checked, so it carries nothing the hub would take from
+// it later: no bearer token, no key, only a proof good for one upgrade
+// at one hub. An HMAC keyed by a secret both ends hold, never sent,
+// over a nonce the hub issues, is one such proof; the package's
+// HubProof example has it in code.
 //
-//	// mac is the hex HMAC-SHA256, under key, of label and nonce.
-//	mac := func(key []byte, label, nonce string) string {
-//		m := hmac.New(sha256.New, key)
-//		m.Write([]byte(label + "\x00" + nonce))
-//		return hex.EncodeToString(m.Sum(nil))
-//	}
+//   - Before each upgrade the workspace end asks the hub for a nonce,
+//     with a plain GET of the hub's URL that the program's handler
+//     beside the Hub answers (the Hub takes upgrades alone). The hub
+//     keeps nothing for it: the nonce is the time it was issued, on the
+//     hub's monotonic clock from a random offset (so it does not say
+//     when the hub started), random bytes, and the hub's MAC of both
+//     under a secret it makes at its start, never the shared key.
+//   - The upgrade carries the nonce, an instance id the workspace end
+//     makes once for its run, and its MAC under the key of a label, the
+//     workspace's name as the hub enrolls it, the nonce and the
+//     instance id. The enrollment takes it only over a nonce the hub
+//     issued (its own MAC), within a short lifetime by the hub's clock
+//     (30 seconds, say; the other host's clock does not matter), and
+//     once: it keeps the nonces it has taken until they expire, a
+//     bounded number, and none it has not.
+//   - The hub's 101 carries its MAC, under another label, of the same
+//     name, nonce and instance id (WithProofHeader), which the
+//     workspace end checks before it serves anything (WithHubProof).
 //
-//	// The workspace end: a nonce for each upgrade, and the hub's
-//	// answer checked before anything is served.
-//	err := tunnel.Serve(ctx, "ws://127.0.0.1:7000/tunnel", ws,
-//		tunnel.WithScopes(remote.ScopeRead, remote.ScopeWrite, remote.ScopeExec),
-//		tunnel.WithHeader(func(context.Context) (http.Header, error) {
-//			nonce := strconv.FormatInt(time.Now().Unix(), 10) + "." + rand.Text()
-//			return http.Header{
-//				"X-Workspace": {id},
-//				"X-Nonce":     {nonce},
-//				"X-Proof":     {mac(key, "workspace", nonce)},
-//			}, nil
-//		}),
-//		tunnel.WithHubProof(func(req *http.Request, resp *http.Response) error {
-//			want := mac(key, "hub", req.Header.Get("X-Nonce"))
-//			if !hmac.Equal([]byte(resp.Header.Get("X-Hub-Proof")), []byte(want)) {
-//				return errors.New("the hub's proof does not match")
-//			}
-//			return nil
-//		}))
+// What that proves, with an impostor holding the port behind ssh -R: it
+// learns no key; it cannot answer with the MAC it was sent, whose label
+// is the workspace's; and the upgrade it captured is over a nonce it
+// handed out, which the hub did not issue, so the hub refuses it when
+// it is replayed through the forward once that is back. Nor does a
+// proof for one hub pass at another that holds the same key: the name,
+// and each hub's own secret, are in it.
 //
-//	// The hub: the enrollment checks the workspace's MAC (and refuses
-//	// a stale or replayed nonce), and the proof answers with the hub's.
-//	hub, err := tunnel.NewHub(
-//		tunnel.WithEnrollment(enroll),
-//		tunnel.WithProofHeader(func(r *http.Request, name string) (http.Header, error) {
-//			return http.Header{"X-Hub-Proof": {mac(keyOf(name), "hub", r.Header.Get("X-Nonce"))}}, nil
-//		}))
+// What it leaves. There is no channel binding: an impostor that can
+// reach the hub while it holds the port relays the GET and the upgrade
+// at once and passes, as above. And one that fetched nonces from the
+// hub while the forward was up, then takes the port after a drop, can
+// hand them out and replay each upgrade it collects within that
+// nonce's lifetime. To keep that to as few upgrades as can be, the
+// workspace end:
+//
+//   - stops, rather than dial again, at a hub that fails the proof,
+//     at the first dial and after one that connected alike. Serve
+//     returns ErrHubProof from a first dial, but tries again within the
+//     lease after a connection that served, so the program ends Serve
+//     from its WithHubProof hook, by cancelling Serve's context;
+//   - stops, too, after a few upgrades in a row (three, say) that went
+//     out over a nonce and got no answer a hub gives (a 101, 401, 403
+//     or 503): a hub does not take an upgrade and drop it, an impostor
+//     collecting them does;
+//   - at the nonce's GET, dials again on no answer, or on one a hub
+//     gives for a while (a 5xx, 429 or 408), and stops at one that
+//     rules a hub out (a 200 without a nonce, a redirect, which it does
+//     not follow, a 401, 403 or 404).
+//
+// After such a stop, waiting out the nonce's lifetime, or restarting the
+// hub (a new secret, so no nonce it issued is known), before the
+// forward comes back defeats whatever upgrade an impostor captured. The
+// key was never sent, so it need not be rotated unless it may have
+// leaked some other way.
 //
 // # Reconnecting
 //

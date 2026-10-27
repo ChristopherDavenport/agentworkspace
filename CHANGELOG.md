@@ -18,6 +18,14 @@ versions may break the API.
   `no_process`. An exec without a key is ended by a hang-up, as before.
   `workspacetest.Run` now checks the kept output over remote and tunnel
   too. RFC 0001 §6 states the rule for every wire.
+- Added: mcpworkspace's `agentworkspace/process.cancel {id}`
+  (`wire.MethodCancel`), which ends a process as the end of its start's
+  context does and leaves it in the session's table, so its output is
+  read to the end and its wait says `canceled`. Fixed: the end of a
+  `Start`'s context, over mcpworkspace, sent a close, which closes the
+  input and waits two seconds before the ladder; it now sends a cancel,
+  the ladder from SIGINT at once, as RFC 0001 §8 asks, and then the
+  close. A server without the method is sent the close alone.
 
 - Added: `Descriptor.Host` and `Descriptor.Instance`, agentsession
   0.14's `workspace.host` and `workspace.instance` (#3). `Local` sets

@@ -74,6 +74,7 @@ func (s *Processes) Register(srv *mcp.Server) error {
 		mcp.AddReceivingCustomMethod(srv, wire.MethodSignal, s.signal),
 		mcp.AddReceivingCustomMethod(srv, wire.MethodWait, s.wait),
 		mcp.AddReceivingCustomMethod(srv, wire.MethodClose, s.close),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodCancel, s.cancel),
 	)
 }
 
@@ -120,7 +121,8 @@ type processTable struct {
 // started is a process the server started.
 type started struct {
 	p       agentworkspace.Process
-	writeMu sync.Mutex // one write at a time, and the close of stdin after them
+	cancel  context.CancelFunc // ends the context it was started under
+	writeMu sync.Mutex         // one write at a time, and the close of stdin after them
 	stdout  *outputBuffer
 	stderr  *outputBuffer // nil when the session did not ask for it
 	gone    chan struct{} // closed when the process is closed, ending the polls
@@ -191,6 +193,7 @@ func (sp *started) close() {
 	sp.goneOne.Do(func() { close(sp.gone) })
 	sp.p.Close()
 	<-sp.exited
+	sp.cancel()
 }
 
 func (s *Processes) start(_ context.Context, ss *mcp.ServerSession, p *StartParams) (*StartResult, error) {
@@ -273,11 +276,14 @@ func (s *Processes) launch(ss *mcp.ServerSession, stderr bool, run func(context.
 	case len(t.procs) >= wire.MaxProcesses:
 		return nil, fmt.Errorf("%d processes are open in this session, the most there may be; close one first", wire.MaxProcesses)
 	}
-	proc, err := run(t.ctx, stream)
+	// A context of its own, which a cancel ends.
+	ctx, cancel := context.WithCancel(t.ctx)
+	proc, err := run(ctx, stream)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	sp.p = proc
+	sp.p, sp.cancel = proc, cancel
 	go sp.stdout.fill(proc.Stdout(), sp.gone)
 	go func() {
 		status, err := proc.Wait()
@@ -420,6 +426,21 @@ func (s *Processes) close(_ context.Context, ss *mcp.ServerSession, p *IDParams)
 		r.Stderr = sp.stderr.rest()
 	}
 	return r, nil
+}
+
+// cancel ends the process as the end of its start's context does, and
+// leaves it in the table: its output is read on, and its wait says it
+// was canceled.
+func (s *Processes) cancel(_ context.Context, ss *mcp.ServerSession, p *IDParams) (*EmptyResult, error) {
+	if p == nil {
+		return nil, errors.New("no parameters")
+	}
+	sp, err := s.lookup(ss, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	sp.cancel()
+	return &EmptyResult{}, nil
 }
 
 // result is how the process ended, once it has.

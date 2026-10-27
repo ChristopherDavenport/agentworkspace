@@ -19,11 +19,16 @@
 //	agentworkspace/process.signal     {id, signal: INT|TERM|KILL} -> {done?}
 //	agentworkspace/process.wait       {id} -> {status, ended?, error?}
 //	agentworkspace/process.close      {id} -> {status, ended?, error?, stderr?}
+//	agentworkspace/process.cancel     {id} -> {}
 //
 // A read is a long poll: it returns as soon as there is output, at most
 // max bytes (at most MaxReadBytes), or end of file, and waits otherwise.
 // A wait waits for the process to exit. A close ends the process and
-// gives back the standard error no read took. Each MCP session has its
+// gives back the standard error no read took. A cancel ends it as the
+// end of its start's context does, an interrupt rather than a shutdown:
+// the ladder begins at INT, with its input left open, and the process
+// stays in the table, so its output is read to its end and its wait
+// says EndedCanceled; a cancel of one that has exited changes nothing. Each MCP session has its
 // own table of processes, at most MaxProcesses open at once: an id
 // another session started is refused as one that does not exist. When
 // the session ends, every process it started ends with it.
@@ -84,12 +89,13 @@ const (
 	MethodSignal     = MethodPrefix + "signal"
 	MethodWait       = MethodPrefix + "wait"
 	MethodClose      = MethodPrefix + "close"
+	MethodCancel     = MethodPrefix + "cancel"
 )
 
 // Methods are the process methods, in the order above, as a new slice
 // each call.
 func Methods() []string {
-	return []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose}
+	return []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose, MethodCancel}
 }
 
 // ServersPrefix begins every server method.
@@ -191,8 +197,8 @@ func SignalName(sig syscall.Signal) (string, bool) {
 const (
 	// EndedTimeout is a process the start's timeout ended.
 	EndedTimeout = "timeout"
-	// EndedCanceled is a process the session's end, or the server's,
-	// ended.
+	// EndedCanceled is a process a cancel, the session's end, or the
+	// server's, ended.
 	EndedCanceled = "canceled"
 )
 

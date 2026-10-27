@@ -317,13 +317,75 @@ func envIsACopy(t *testing.T, b Backend) {
 	}
 }
 
+// Execer runs one command to completion, as Workspace.Exec does: what
+// the Exec table needs of a backend, so that a client of a wire that
+// carries Exec but not a whole workspace (mcpworkspace's) is held to
+// it too. An Execer with a Reach method says its reach with it, as a
+// workspace does.
+type Execer interface {
+	Exec(ctx context.Context, cmd agentworkspace.Command) (*agentworkspace.Output, error)
+}
+
+// ExecBackend is an Execer the Exec table runs on. Open opens one over
+// a workspace on dir whose environment is env, and closes it when the
+// test ends.
+type ExecBackend struct {
+	Name string
+	Open func(t *testing.T, dir string, env []string) Execer
+}
+
+// RunExec runs the Exec table Run runs (status, streams, Dir, Env,
+// argv resolution, Stdin, a timeout, an interrupt, a descendant that
+// left the group) on every backend, each a subtest named after the
+// backend. The workspace's root is its Root, when the Execer has one,
+// and otherwise what pwd prints in it.
+func RunExec(t *testing.T, backends ...ExecBackend) {
+	for _, b := range backends {
+		t.Run(b.Name, func(t *testing.T) {
+			dir := t.TempDir()
+			env := []string{"PATH=" + os.Getenv("PATH")}
+			execTable(t, dir, b.Open(t, dir, env), env)
+		})
+	}
+}
+
 // Exec runs to completion: status, streams, Dir, Env, Stdin, a
 // timeout that kills what the command started, a stream, and a cancel.
 func execRuns(t *testing.T, b Backend) {
 	dir := t.TempDir()
+	ws := b.Open(t, dir)
+	execTable(t, dir, ws, ws.Env())
+}
+
+// rootOf is ws's Root, or, for an Execer with none, the directory its
+// commands run in.
+func rootOf(t *testing.T, ws Execer) string {
+	t.Helper()
+	if r, ok := ws.(interface{ Root() string }); ok {
+		return r.Root()
+	}
+	out, err := ws.Exec(context.Background(), agentworkspace.Command{Args: []string{"pwd"}})
+	if err != nil || out.ExitCode != 0 {
+		t.Fatalf("pwd at the root: %+v, %v", out, err)
+	}
+	return strings.TrimSuffix(string(out.Stdout), "\n")
+}
+
+// reachOf is how far ws's end of a process reaches, as it says with a
+// Reach method, or "".
+func reachOf(ws Execer) agentworkspace.Reach {
+	if r, ok := ws.(interface{ Reach() agentworkspace.Reach }); ok {
+		return r.Reach()
+	}
+	return ""
+}
+
+// execTable is the Exec table on ws, a workspace on dir whose
+// environment is env.
+func execTable(t *testing.T, dir string, ws Execer, env []string) {
 	os.Mkdir(filepath.Join(dir, "sub"), 0o755)
 	hello(t, dir)
-	ws := b.Open(t, dir)
+	root := rootOf(t, ws)
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name string
@@ -331,10 +393,10 @@ func execRuns(t *testing.T, b Backend) {
 		want agentworkspace.Output
 	}{
 		{"exit status and both streams", agentworkspace.Command{Args: []string{"sh", "-c", "echo out; echo err >&2; exit 3"}}, agentworkspace.Output{Stdout: []byte("out\n"), Stderr: []byte("err\n"), ExitCode: 3}},
-		{"Dir below the root", agentworkspace.Command{Args: []string{"pwd"}, Dir: "sub"}, agentworkspace.Output{Stdout: []byte(filepath.Join(ws.Root(), "sub") + "\n")}},
+		{"Dir below the root", agentworkspace.Command{Args: []string{"pwd"}, Dir: "sub"}, agentworkspace.Output{Stdout: []byte(filepath.Join(root, "sub") + "\n")}},
 		{"Env added", agentworkspace.Command{Args: []string{"sh", "-c", "echo $X"}, Env: []string{"X=y"}}, agentworkspace.Output{Stdout: []byte("y\n")}},
 		{"Stdin", agentworkspace.Command{Args: []string{"cat"}, Stdin: []byte("in")}, agentworkspace.Output{Stdout: []byte("in")}},
-		{"a bare name on the command's PATH", agentworkspace.Command{Args: []string{"hello"}, Env: []string{"PATH=" + path.Join(ws.Root(), "bin")}}, agentworkspace.Output{Stdout: []byte("hello\n")}},
+		{"a bare name on the command's PATH", agentworkspace.Command{Args: []string{"hello"}, Env: []string{"PATH=" + path.Join(root, "bin")}}, agentworkspace.Output{Stdout: []byte("hello\n")}},
 		{"Timeout kills what it started", agentworkspace.Command{Args: []string{"sh", "-c", "sleep 30 & sleep 30"}, Timeout: 200 * time.Millisecond}, agentworkspace.Output{ExitCode: -1, TimedOut: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -354,7 +416,7 @@ func execRuns(t *testing.T, b Backend) {
 	// The command's environment is over the workspace's name by name,
 	// and each name reaches the process once.
 	cmd := agentworkspace.Command{Args: []string{"sh", "-c", `env | grep -c '^X='; echo $X; env | grep -c '^PATH='`}, Env: []string{"X=1", "X=2"}}
-	for _, kv := range ws.Env() {
+	for _, kv := range env {
 		if strings.HasPrefix(kv, "PATH=") {
 			cmd.Env = append(cmd.Env, kv)
 		}
@@ -362,8 +424,10 @@ func execRuns(t *testing.T, b Backend) {
 	if out, err := ws.Exec(ctx, cmd); err != nil || string(out.Stdout) != "1\n2\n1\n" {
 		t.Errorf("a name set twice by the command, and one set by both: %q, %v; want once each, the last value", out.Stdout, err)
 	}
+	// Both to the stream, in their order; the pause keeps it over a wire
+	// that carries the two apart.
 	var stream bytes.Buffer
-	out, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"sh", "-c", "echo a; echo b >&2"}, Stream: &stream})
+	out, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"sh", "-c", "echo a; sleep 0.2; echo b >&2"}, Stream: &stream})
 	if err != nil || stream.String() != "a\nb\n" || len(out.Stdout)+len(out.Stderr) != 0 {
 		t.Errorf("a stream got %q and the output kept %q %q (%v)", stream.String(), out.Stdout, out.Stderr, err)
 	}
@@ -381,7 +445,7 @@ func execRuns(t *testing.T, b Backend) {
 
 // A timeout ends what the command started that left its group, as
 // startEndsWhatLeftItsGroup's Close does.
-func execEndsWhatLeftItsGroup(t *testing.T, dir string, ws agentworkspace.Workspace) {
+func execEndsWhatLeftItsGroup(t *testing.T, dir string, ws Execer) {
 	t.Run("a timeout ends what left the group", func(t *testing.T) {
 		leavesItsGroup(t, ws, dir)
 		var out *agentworkspace.Output
@@ -412,9 +476,9 @@ done
 // leavesItsGroup writes beat.sh into dir, skipping the test where a
 // child cannot leave its group (no setsid on this PATH) or where ws
 // says its end of a process does not reach one that has.
-func leavesItsGroup(t *testing.T, ws agentworkspace.Workspace, dir string) {
+func leavesItsGroup(t *testing.T, ws Execer, dir string) {
 	t.Helper()
-	if agentworkspace.ReachOf(ws) == agentworkspace.ReachGroup {
+	if reachOf(ws) == agentworkspace.ReachGroup {
 		t.Skip("this workspace's end of a process reaches its group alone")
 	}
 	if _, err := exec.LookPath("setsid"); err != nil {
@@ -445,8 +509,10 @@ func beating(t *testing.T, dir string) bool {
 // it started, and returns what it wrote until then, with ExitCode -1
 // and Interrupted, beside the context's error: given to a Stream as it
 // came, or kept in the Output.
-func execInterrupted(t *testing.T, ws agentworkspace.Workspace) {
-	cmd := agentworkspace.Command{Args: []string{"sh", "-c", "echo started; echo also >&2; sleep 30 & sleep 30"}}
+func execInterrupted(t *testing.T, ws Execer) {
+	// The pause keeps the two in order over a wire that carries them
+	// apart, whose stream is given each as it arrives.
+	cmd := agentworkspace.Command{Args: []string{"sh", "-c", "echo started; sleep 0.2; echo also >&2; sleep 30 & sleep 30"}}
 	check := func(what string, out *agentworkspace.Output, err error) {
 		t.Helper()
 		if !errors.Is(err, context.Canceled) {

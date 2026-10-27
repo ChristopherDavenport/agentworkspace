@@ -76,5 +76,6 @@ func RegisterClient(c *mcp.Client) error {
 		mcp.AddSendingCustomMethod[*SignalParams, *SignalResult](c, wire.MethodSignal),
 		mcp.AddSendingCustomMethod[*IDParams, *ExitResult](c, wire.MethodWait),
 		mcp.AddSendingCustomMethod[*IDParams, *ExitResult](c, wire.MethodClose),
+		mcp.AddSendingCustomMethod[*IDParams, *EmptyResult](c, wire.MethodCancel),
 	)
 }

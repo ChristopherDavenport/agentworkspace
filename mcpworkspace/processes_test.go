@@ -152,6 +152,64 @@ func TestAProcessEndsWithItsContext(t *testing.T) {
 	gone(t, pid)
 }
 
+// trapsINT prints ready, then waits until SIGINT, on which it prints
+// int and exits; it does not read its input.
+var trapsINT = agentworkspace.Command{Args: []string{"sh", "-c", "trap 'echo int; exit 0' INT; echo ready; while :; do sleep 0.1; done"}}
+
+// The end of the start's context is an interrupt, not a shutdown: the
+// ladder begins at INT at once, rather than a grace after the input's
+// close.
+func TestTheContextsEndInterrupts(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	p, err := Start(ctx, conn(t, cs), trapsINT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	if line, _ := bufio.NewReader(p.Stdout()).ReadString('\n'); line != "ready\n" {
+		t.Fatalf("first line %q", line)
+	}
+	begun := time.Now()
+	cancel()
+	if _, err := p.Wait(); !errors.Is(err, context.Canceled) {
+		t.Errorf("wait: %v, want canceled", err)
+	}
+	if d := time.Since(begun); d >= time.Second {
+		t.Errorf("the process took %v to end; INT should have come at once", d)
+	}
+}
+
+// A cancel ends the process as its context's end does and leaves it in
+// the table: its output is read to the end, and its wait says it was
+// canceled. A cancel after it exited changes nothing.
+func TestACancelLeavesTheProcessReadable(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	p := start(t, conn(t, cs), trapsINT)
+	out := bufio.NewReader(p.Stdout())
+	if line, _ := out.ReadString('\n'); line != "ready\n" {
+		t.Fatalf("first line %q", line)
+	}
+	id := wire.ProcessID{ID: idOf(t, p)}
+	ctx := context.Background()
+	if _, err := mcp.CallCustomMethod[*IDParams, *EmptyResult](ctx, cs, wire.MethodCancel, &IDParams{ProcessID: id}); err != nil {
+		t.Fatal(err)
+	}
+	rest, err := io.ReadAll(out)
+	if err != nil || string(rest) != "int\n" {
+		t.Errorf("the rest of the output: %q, %v", rest, err)
+	}
+	r, err := mcp.CallCustomMethod[*IDParams, *ExitResult](ctx, cs, wire.MethodWait, &IDParams{ProcessID: id})
+	if err != nil || r.Ended != wire.EndedCanceled {
+		t.Errorf("wait: %+v, %v; want it canceled", r, err)
+	}
+	if _, err := mcp.CallCustomMethod[*IDParams, *EmptyResult](ctx, cs, wire.MethodCancel, &IDParams{ProcessID: id}); err != nil {
+		t.Errorf("a cancel after the exit: %v", err)
+	}
+}
+
 // A Conn with no Done is refused: the session's close would wait on
 // the process's wait for as long as it ran.
 func TestAConnWithoutDoneIsRefused(t *testing.T) {

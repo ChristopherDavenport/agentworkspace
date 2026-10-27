@@ -63,7 +63,9 @@ type Conn struct {
 // and a read at a time; its standard error, when cmd.Stream is set, is
 // read in the background and written to cmd.Stream as it arrives. It
 // ends with Close, the end of ctx, cmd.Timeout, the end of c.Done or the
-// server's. It lives on c alone: when the connection ends, the server
+// server's. The end of ctx is a cancel, the ladder from its first step,
+// and then a Close; a server that does not answer the cancel method is
+// sent the Close alone. It lives on c alone: when the connection ends, the server
 // ends the process with its session, and the process's requests fail.
 // cmd.Stdin is refused; write to the process's input instead, and a
 // Conn with no Done is refused (see Conn.Done: end it, or close every
@@ -133,6 +135,9 @@ func attach(ctx context.Context, c Conn, id string, stream io.Writer) *process {
 			p.ending = ctx.Err()
 		}
 		p.mu.Unlock()
+		// An interrupt, not a shutdown: the ladder from its first step,
+		// and the close after it.
+		p.interrupt()
 		p.Close()
 	})
 	p.mu.Lock()
@@ -285,6 +290,18 @@ func (p *process) Signal(sig os.Signal) error {
 	}
 	if r.Done {
 		return os.ErrProcessDone
+	}
+	return nil
+}
+
+// interrupt asks the server to end the process as the end of its
+// start's context would. A server without the method is not asked.
+func (p *process) interrupt() error {
+	ctx, cancel := context.WithTimeout(p.ctx, requestTimeout)
+	defer cancel()
+	_, err := mcp.CallCustomMethod[*IDParams, *EmptyResult](ctx, p.c.Session, wire.MethodCancel, &IDParams{ProcessID: wire.ProcessID{ID: p.id}})
+	if err != nil && !notFound(err) {
+		return p.c.Err(err)
 	}
 	return nil
 }

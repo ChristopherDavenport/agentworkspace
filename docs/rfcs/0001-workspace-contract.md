@@ -661,6 +661,7 @@ the standard library alone.
 | signal | `process.signal {id, signal: INT\|TERM\|KILL} → {done?}` |
 | wait | `process.wait {id} → {status, ended?, error?}` |
 | close | `process.close {id} → {status, ended?, error?, stderr?}` |
+| cancel (the owner's context ended) | `process.cancel {id} → {}`: the ladder from INT, input left open, the process left to read and wait on |
 | owner | the MCP session: each session has its own process table, at most `MaxProcesses` (32) open; its end ends them |
 | list servers | `agentworkspace/servers.list {} → {servers: [{name, description?}]}` |
 | start a server | `agentworkspace/servers.start {name, stderr?} → {id}`, a process of the session; not offered is JSON-RPC error `-32010` |
@@ -877,7 +878,9 @@ Questions with no issue yet:
   names its command, cancels it by that name and reads the output so
   far; remote's exec takes a key, answers its header once the key is
   taken, and has a cancel route, and its output frame carries
-  *interrupted*.
+  *interrupted*. mcpworkspace gains `process.cancel`, which ends a
+  process as its context's end does and leaves it to read, and its
+  client sends it when a start's context ends, rather than a close.
 
 ## Changes since draft 0.1
 

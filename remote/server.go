@@ -123,8 +123,9 @@ func WithMaxSessionsPerPrincipal(n int) Option { return func(h *Handler) { h.max
 func WithMaxExecOutputBytes(n int64) Option { return func(h *Handler) { h.maxOutput = n } }
 
 // WithMaxProcesses bounds the processes open at once in one session, a
-// closed one counted until it has exited; the default is
-// DefaultMaxProcesses.
+// closed one counted until it has exited and its streams have ended
+// (one whose standard error was asked for and not streamed, until a
+// grace after its exit); the default is DefaultMaxProcesses.
 func WithMaxProcesses(n int) Option { return func(h *Handler) { h.maxProcesses = n } }
 
 // WithMaxWriteBytes bounds a WriteFile's data and an Exec's stdin; the

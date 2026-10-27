@@ -4,9 +4,13 @@ package tunnel
 // Local dialling it, and the hub's Workspace for it.
 
 import (
+	"bytes"
+	"context"
 	"io/fs"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/remote"
@@ -76,4 +80,42 @@ func TestStarterConformance(t *testing.T) {
 		}
 		return s
 	}})
+}
+
+// A process's standard error reaches its Stream to the end when it is
+// closed at once after its start, over the tunnel as over remote's
+// HTTP/1: Close waits for the stream to open, and what the process
+// writes on its way out is sent before the stream is cut.
+func TestStandardErrorOutlivesAClose(t *testing.T) {
+	s := tunnelled(t, local(t, t.TempDir(), pathEnv())).(agentworkspace.Starter)
+	for i := range 50 {
+		var stream lockedBuffer
+		p, err := s.Start(context.Background(), agentworkspace.Command{Args: []string{"sh", "-c", "read x; echo bye >&2"}, Stream: &stream})
+		if err != nil {
+			t.Fatal(err)
+		}
+		within(t, 10*time.Second, "the close", func() { p.Close() })
+		if got := stream.String(); got != "bye\n" {
+			t.Fatalf("close %d: the stream has %q, want %q", i, got, "bye\n")
+		}
+	}
+}
+
+// lockedBuffer is a bytes.Buffer safe for a stream's writer and the
+// test reading it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

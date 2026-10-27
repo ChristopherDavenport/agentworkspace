@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -444,26 +446,97 @@ func TestOneWaitAtATime(t *testing.T) {
 }
 
 // A process's standard error reaches its Stream to the end when it is
-// closed: what it writes on its way out is sent before the stream is
-// cut. Many times over, as losing it is a race. (The first line, waited
-// for, has the stream open before the close.)
+// closed, even at once after its start: Close waits for the stream to
+// open, and what the process writes on its way out is sent before the
+// stream is cut. Many times over, as losing it is a race.
 func TestStandardErrorOutlivesAClose(t *testing.T) {
 	l, _ := newLocal(t, pathEnv())
 	_, url := serve(t, l, WithInsecureNoAuth())
 	ws := dial(t, url)
 	for i := range 50 {
 		var stream syncBuffer
-		p, err := agentworkspace.Start(context.Background(), ws, agentworkspace.Command{Args: []string{"sh", "-c", "echo hi >&2; read x; echo bye >&2"}, Stream: &stream})
+		p, err := agentworkspace.Start(context.Background(), ws, agentworkspace.Command{Args: []string{"sh", "-c", "read x; echo bye >&2"}, Stream: &stream})
 		if err != nil {
 			t.Fatal(err)
 		}
-		deadline := time.Now().Add(10 * time.Second)
-		for stream.String() == "" && time.Now().Before(deadline) {
-			time.Sleep(time.Millisecond)
-		}
 		within(t, 10*time.Second, "the close", func() { p.Close() })
-		if got := stream.String(); got != "hi\nbye\n" {
-			t.Fatalf("close %d: the stream has %q, want %q", i, got, "hi\nbye\n")
+		if got := stream.String(); got != "bye\n" {
+			t.Fatalf("close %d: the stream has %q, want %q", i, got, "bye\n")
 		}
+	}
+}
+
+// The server keeps a closed process's standard error for a stream that
+// comes after the close, as one from a client that does not wait for
+// its stream before closing does, until a grace after its exit: the
+// process counts against the bound until then, and is gone after.
+func TestStandardErrorAskedForAfterTheClose(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	_, url := serve(t, l, WithInsecureNoAuth(), WithMaxProcesses(1))
+	c := clientOf(dial(t, url))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	sid, err := c.openSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// start starts the command with standard error asked for, and
+	// closes it at once, before any stream: it returns its route.
+	start := func() (string, error) {
+		key := rand.Text()
+		var st startedReply
+		req := startRequest{Args: []string{"sh", "-c", "read x; echo bye >&2"}, Stderr: true, Key: key}
+		if err := c.call(ctx, http.MethodPost, routeSessions+"/"+sid+"/processes", nil, req, &st); err != nil {
+			return "", err
+		}
+		route := routeSessions + "/" + sid + "/processes/" + key
+		var e exitReply
+		if err := c.call(ctx, http.MethodDelete, route, nil, nil, &e); err != nil {
+			t.Fatalf("the close: %v", err)
+		}
+		return route, nil
+	}
+	stderr := func(route string) (string, error) {
+		resp, err := c.request(ctx, http.MethodGet, route+"/stderr", nil, nil, "")
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		return string(data), err
+	}
+
+	route, err := start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := stderr(route); err != nil || got != "bye\n" {
+		t.Fatalf("standard error after the close: %q, %v; want %q", got, err, "bye\n")
+	}
+
+	// room starts once the only process's slot is free, within ten
+	// seconds.
+	room := func(what string) string {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			route, err := start()
+			if err == nil {
+				return route
+			}
+			if !errors.Is(err, ErrLimit) || time.Now().After(deadline) {
+				t.Fatalf("%s: %v", what, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	// Never streamed: it counts until a grace after its exit, and is
+	// gone from then on.
+	route = room("a start once the streamed one has ended")
+	if _, err := start(); !errors.Is(err, ErrLimit) {
+		t.Fatalf("a start while one waits for its stream: %v, want ErrLimit", err)
+	}
+	room("a start a grace after the close")
+	if _, err := stderr(route); !errors.Is(err, ErrNoProcess) {
+		t.Errorf("standard error a grace after the close: %v, want ErrNoProcess", err)
 	}
 }

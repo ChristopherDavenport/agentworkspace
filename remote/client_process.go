@@ -104,7 +104,7 @@ func (c *Client) launch(ctx context.Context, what, route string, stream io.Write
 	p.stdin = &stdinPipe{p: p}
 	p.stdout = &stdoutPipe{p: p}
 	if p.stream != nil {
-		p.pumped = make(chan struct{})
+		p.opened, p.pumped = make(chan struct{}), make(chan struct{})
 		var pctx context.Context
 		pctx, p.unpump = context.WithCancel(p.ctx)
 		go p.pump(pctx)
@@ -142,6 +142,7 @@ type process struct {
 	stdin   *stdinPipe
 	stdout  *stdoutPipe
 	stream  io.Writer
+	opened  chan struct{} // closed when the stream of standard error is open, or failed to open; nil without one
 	pumped  chan struct{} // closed when the stream of standard error ends; nil without one
 	unpump  context.CancelFunc
 
@@ -192,12 +193,23 @@ func (p *process) Signal(sig os.Signal) error {
 // Close ends the process, if it is still running, and everything it
 // started, as the served workspace's Process.Close does, and releases
 // its streams. It returns once the process has exited, and may be
-// called more than once.
+// called more than once. With a Command.Stream, the close is sent once
+// the stream of standard error is open (or the client's timeout has
+// passed), so the stream gets what the process writes on its way out
+// even when Close follows Start at once.
 func (p *process) Close() error {
 	p.closeOnce.Do(func() {
 		p.mu.Lock()
 		p.closing = true
 		p.mu.Unlock()
+		if p.opened != nil {
+			t := time.NewTimer(p.c.timeout)
+			select {
+			case <-p.opened:
+			case <-t.C:
+			}
+			t.Stop()
+		}
 		// The server's close waits for the process, a grace or two.
 		ctx, cancel := context.WithTimeout(p.c.ctx, p.c.timeout+10*time.Second)
 		var e exitReply
@@ -335,7 +347,10 @@ func (p *process) finish(e exitReply, failed error) {
 // pump copies standard error to Command.Stream until it ends.
 func (p *process) pump(ctx context.Context) {
 	defer close(p.pumped)
+	// The server sends the headers once it has claimed the stream, so
+	// a response means the stream is open and Close may be sent.
 	resp, err := p.c.request(ctx, http.MethodGet, p.route+"/stderr", nil, nil, "")
+	close(p.opened)
 	if err != nil {
 		return
 	}

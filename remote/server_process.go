@@ -38,11 +38,14 @@ type session struct {
 	mu    sync.Mutex
 	ended bool
 	procs map[string]*proc
-	// closing counts the processes a close took out of procs whose
-	// streams have not all ended yet: they count against
-	// WithMaxProcesses until they have.
-	closing int
-	closed  keyRing // the keys of the processes closed, the latest
+	// leaving holds the processes a close took out of procs whose
+	// streams have not all ended yet, by id: they count against
+	// WithMaxProcesses until they have, and the stderr route still
+	// reaches them, so a stream of standard error asked for after the
+	// close gets what the process wrote on its way out.
+	leaving map[string]*proc
+	closed  keyRing       // the keys of the processes closed, the latest
+	quit    chan struct{} // closed as the session's end begins
 
 	closes sync.WaitGroup // the closes in flight, which end waits for
 
@@ -53,6 +56,9 @@ type session struct {
 // they have ended, as does every call made while the first runs.
 func (s *session) end() {
 	s.endOnce.Do(func() {
+		// No route reaches the session now, so a closed process's
+		// standard error is not waited for.
+		close(s.quit)
 		s.mu.Lock()
 		s.ended = true
 		procs := slices.Collect(maps.Values(s.procs))
@@ -85,10 +91,12 @@ type proc struct {
 	closing chan struct{}      // closed as its close begins: its input's stream is cut
 	closed  chan struct{}      // closed once its close has ended it: its output's stream is cut
 	late    chan struct{}      // closed a grace after closed: its standard error's stream is cut
+	claimed chan struct{}      // closed once its standard error is taken by a stream; nil without one
 
 	smu     sync.Mutex
 	open    int            // its streams being served
 	drained chan struct{}  // closed once open is 0, when someone waits for it
+	sealed  bool           // its streams have ended for good: no more is served
 	streams [3]atomic.Bool // stdin, stdout and stderr taken by a stream
 	waiting atomic.Bool    // a wait is in flight
 
@@ -115,27 +123,37 @@ func (sp *proc) close() {
 	sp.cancel()
 }
 
-// hold counts a stream of the process's as served until release.
-func (sp *proc) hold() {
+// hold counts a stream of the process's as served until release, and
+// reports false, counting nothing, once its streams have ended for good
+// (awaitStreams).
+func (sp *proc) hold() bool {
 	sp.smu.Lock()
+	defer sp.smu.Unlock()
+	if sp.sealed {
+		return false
+	}
 	sp.open++
-	sp.smu.Unlock()
+	return true
 }
 
 func (sp *proc) release() {
 	sp.smu.Lock()
 	sp.open--
 	if sp.open == 0 && sp.drained != nil {
+		sp.sealed = true
 		close(sp.drained)
 		sp.drained = nil
 	}
 	sp.smu.Unlock()
 }
 
-// awaitStreams returns once no stream of the process's is served.
+// awaitStreams returns once no stream of the process's is served, and
+// serves no other from then on: one that found the process before it
+// left the table is refused rather than served uncounted.
 func (sp *proc) awaitStreams() {
 	sp.smu.Lock()
 	if sp.open == 0 {
+		sp.sealed = true
 		sp.smu.Unlock()
 		return
 	}
@@ -233,7 +251,7 @@ func (h *Handler) openSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, stop := context.WithCancel(context.Background())
-	s := &session{id: rand.Text(), owner: principalOf(r).Name, ctx: ctx, stop: stop, procs: map[string]*proc{}}
+	s := &session{id: rand.Text(), owner: principalOf(r).Name, ctx: ctx, stop: stop, procs: map[string]*proc{}, leaving: map[string]*proc{}, quit: make(chan struct{})}
 	h.mu.Lock()
 	owned := 0
 	for _, o := range h.sessions {
@@ -366,12 +384,22 @@ func (h *Handler) closeSession(w http.ResponseWriter, r *http.Request) {
 // for one the session did not start, or one started under a scope the
 // principal does not hold.
 func (h *Handler) procOf(w http.ResponseWriter, r *http.Request) *proc {
+	return h.reach(w, r, false)
+}
+
+// reach is procOf, reaching a process being closed too when leaving is
+// set: the stderr route's, as standard error is sent to its end.
+func (h *Handler) reach(w http.ResponseWriter, r *http.Request, leaving bool) *proc {
 	s := h.sessionOf(w, r)
 	if s == nil {
 		return nil
 	}
+	pid := r.PathValue("pid")
 	s.mu.Lock()
-	sp := s.procs[r.PathValue("pid")]
+	sp := s.procs[pid]
+	if sp == nil && leaving {
+		sp = s.leaving[pid]
+	}
 	s.mu.Unlock()
 	switch {
 	case sp == nil:
@@ -458,6 +486,7 @@ func (h *Handler) launch(w http.ResponseWriter, s *session, key string, stderr b
 	var stream io.Writer
 	if stderr {
 		sp.stderr = newStderrBuffer()
+		sp.claimed = make(chan struct{})
 		stream = sp.stderr
 	}
 	// The session is held across the start, which returns at once, so
@@ -475,10 +504,10 @@ func (h *Handler) launch(w http.ResponseWriter, s *session, key string, stderr b
 		// The same start again: its reply was lost.
 		writeJSON(w, startedReply{ID: key})
 		return
-	case s.closed.set[key]:
+	case s.closed.set[key] || s.leaving[key] != nil:
 		writeError(w, wireError{Code: codeNoProcess, Message: "the process this key started is closed"})
 		return
-	case len(s.procs)+s.closing >= h.maxProcesses:
+	case len(s.procs)+len(s.leaving) >= h.maxProcesses:
 		writeError(w, wireError{Code: codeLimit, Message: fmt.Sprintf("%d processes are open or closing in this session, the most there may be; close one first", h.maxProcesses)})
 		return
 	}
@@ -527,16 +556,22 @@ func (h *Handler) servers(w http.ResponseWriter, r *http.Request) {
 }
 
 // take claims one of a process's streams for the request, refusing (and
-// answering) a second.
+// answering) a second, or any once the process's streams have ended.
 // The stream is counted as served (hold) until the handler releases
 // it.
 func take(w http.ResponseWriter, sp *proc, fd int) bool {
-	if sp.streams[fd].CompareAndSwap(false, true) {
-		sp.hold()
-		return true
+	if !sp.streams[fd].CompareAndSwap(false, true) {
+		writeError(w, wireError{Code: codeInvalid, Message: fmt.Sprintf("%s is already streamed", [3]string{"standard input", "standard output", "standard error"}[fd])})
+		return false
 	}
-	writeError(w, wireError{Code: codeInvalid, Message: fmt.Sprintf("%s is already streamed", [3]string{"standard input", "standard output", "standard error"}[fd])})
-	return false
+	if !sp.hold() {
+		writeError(w, wireError{Code: codeNoProcess, Message: ErrNoProcess.Error()})
+		return false
+	}
+	if fd == 2 {
+		close(sp.claimed)
+	}
+	return true
 }
 
 // stdin copies the request's body to the process's input as it arrives
@@ -594,9 +629,13 @@ func (h *Handler) stdout(w http.ResponseWriter, r *http.Request) {
 }
 
 // stderr streams what the process wrote to its standard error, which
-// the server holds (StderrBytes of it) until it is read.
+// the server holds (StderrBytes of it) until it is read. It reaches a
+// process being closed too, until a grace after its exit, so a client
+// whose stream comes after its close still gets the tail. The headers
+// are sent as soon as the stream is claimed: a client that has them
+// knows the stream is open, and may close the process.
 func (h *Handler) stderr(w http.ResponseWriter, r *http.Request) {
-	sp := h.procOf(w, r)
+	sp := h.reach(w, r, true)
 	if sp == nil {
 		return
 	}
@@ -643,7 +682,10 @@ func (h *Handler) wait(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer sp.waiting.Store(false)
-	sp.hold()
+	if !sp.hold() {
+		writeError(w, wireError{Code: codeNoProcess, Message: ErrNoProcess.Error()})
+		return
+	}
 	defer sp.release()
 	select {
 	case <-sp.exited:
@@ -692,7 +734,10 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 // how it ended. The handler's Close waits for it, as it is out of the
 // session's table while it ends; it counts against WithMaxProcesses,
 // and the session's end waits for it, until its streams have all
-// ended.
+// ended. One whose standard error was asked for and not yet streamed
+// stays reachable by the stderr route until it is, or for a grace
+// after its exit, so a stream that comes after the close is not
+// refused.
 func (h *Handler) closeProcess(w http.ResponseWriter, r *http.Request) {
 	s := h.sessionOf(w, r)
 	if s == nil {
@@ -710,7 +755,7 @@ func (h *Handler) closeProcess(w http.ResponseWriter, r *http.Request) {
 	if sp != nil && principalOf(r).Has(sp.scope) {
 		delete(s.procs, pid)
 		s.closed.add(pid)
-		s.closing++
+		s.leaving[pid] = sp
 		s.closes.Add(1)
 	}
 	s.mu.Unlock()
@@ -726,9 +771,16 @@ func (h *Handler) closeProcess(w http.ResponseWriter, r *http.Request) {
 		// close is answered.
 		go func() {
 			defer s.closes.Done()
+			if sp.claimed != nil {
+				select {
+				case <-sp.claimed:
+				case <-sp.late:
+				case <-s.quit:
+				}
+			}
 			sp.awaitStreams()
 			s.mu.Lock()
-			s.closing--
+			delete(s.leaving, pid)
 			s.mu.Unlock()
 		}()
 	}()

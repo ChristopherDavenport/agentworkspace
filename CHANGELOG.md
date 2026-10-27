@@ -5,6 +5,28 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Fixed: a `remote` process closed right after its start no longer
+  loses its standard error (#24). Its `Command.Stream` gets everything
+  the process wrote, including what it writes on its way out, however
+  soon `Close` follows `Start`. Both ends close the race, and each
+  alone is enough, so a client or a server at v0.0.8 still gets the
+  fix from the other end:
+  - the client's `Process.Close` waits for the stream of standard
+    error to open (the server's answer to `GET .../stderr`, whose
+    headers it sends as soon as it has claimed the stream, as v0.0.8
+    already did) before it sends the close, bounded by the client's
+    timeout. `Start` waits for nothing more;
+  - the server serves a closed process's standard error to a stream
+    that comes after the close, until a grace after the process's
+    exit. Until it is streamed, or that grace passes, the process
+    counts against `WithMaxProcesses`, as a closing one does.
+- Fixed: a process's stream or wait that found it just before its
+  close took it from the session's table is refused (`no_process`)
+  once its streams have ended, where it was served without being
+  counted against the stream arithmetic.
+
 ## v0.0.8 - 2026-10-26
 
 - Added: `remote.Client.Scopes`, on the `remote.Workspace` interface

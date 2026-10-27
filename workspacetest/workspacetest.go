@@ -22,6 +22,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -261,6 +262,7 @@ func envIsACopy(t *testing.T, b Backend) {
 func execRuns(t *testing.T, b Backend) {
 	dir := t.TempDir()
 	os.Mkdir(filepath.Join(dir, "sub"), 0o755)
+	hello(t, dir)
 	ws := b.Open(t, dir)
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -272,6 +274,7 @@ func execRuns(t *testing.T, b Backend) {
 		{"Dir below the root", agentworkspace.Command{Args: []string{"pwd"}, Dir: "sub"}, agentworkspace.Output{Stdout: []byte(filepath.Join(ws.Root(), "sub") + "\n")}},
 		{"Env added", agentworkspace.Command{Args: []string{"sh", "-c", "echo $X"}, Env: []string{"X=y"}}, agentworkspace.Output{Stdout: []byte("y\n")}},
 		{"Stdin", agentworkspace.Command{Args: []string{"cat"}, Stdin: []byte("in")}, agentworkspace.Output{Stdout: []byte("in")}},
+		{"a bare name on the command's PATH", agentworkspace.Command{Args: []string{"hello"}, Env: []string{"PATH=" + path.Join(ws.Root(), "bin")}}, agentworkspace.Output{Stdout: []byte("hello\n")}},
 		{"Timeout kills what it started", agentworkspace.Command{Args: []string{"sh", "-c", "sleep 30 & sleep 30"}, Timeout: 200 * time.Millisecond}, agentworkspace.Output{ExitCode: -1, TimedOut: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -300,6 +303,18 @@ func execRuns(t *testing.T, b Backend) {
 	cancel()
 	if _, err := ws.Exec(cctx, agentworkspace.Command{Args: []string{"sleep", "5"}}); err == nil {
 		t.Error("a cancelled context ran the command to the end")
+	}
+}
+
+// hello writes bin/hello under dir, a program that prints "hello" and
+// is on no PATH but one that names that directory.
+func hello(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bin", "hello"), []byte("#!/bin/sh\necho hello\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 

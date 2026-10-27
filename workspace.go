@@ -71,7 +71,13 @@ type Workspace interface {
 
 // Command is one process to run.
 type Command struct {
-	// Args is argv; Args[0] is resolved in the workspace.
+	// Args is argv. Args[0] with no slash is looked up as execvp(3)
+	// does, on the PATH of the environment the process starts with
+	// (Workspace.Env, then Env), as the workspace's own processes see
+	// the file system, never on this process's: a relative PATH entry,
+	// the empty one included, is skipped, and with no PATH the name is
+	// not found. One with a slash is used as it is, relative to Dir.
+	// The process gets Args[0] as given.
 	Args []string
 	// Dir is relative to Root; "" is Root. A Dir that leaves the
 	// workspace, by name or through a link, is ErrOutside.

@@ -30,7 +30,7 @@ func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 	if c.Stdin != nil {
 		return nil, errors.New("agentworkspace: Start takes no Command.Stdin; write to Process.Stdin")
 	}
-	dir, env, err := l.prepare(c)
+	dir, env, prog, err := l.prepare(c)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,8 @@ func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 			return nil, err
 		}
 	}
-	cmd := exec.Command(c.Args[0], c.Args[1:]...)
+	cmd := exec.Command(prog, c.Args[1:]...)
+	cmd.Args[0] = c.Args[0]
 	cmd.Dir, cmd.Env = dir, env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin, cmd.Stdout = inR, outW

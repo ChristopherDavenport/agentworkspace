@@ -7,6 +7,15 @@ versions may break the API.
 
 ## Unreleased
 
+- Fixed: `Local.Exec` and `Local.Start` find a bare program name on the
+  `PATH` of the environment the process starts with (the workspace's,
+  then the command's), as execvp(3) does, and no longer on the `PATH`
+  of the program holding the workspace (#4). A relative `PATH` entry,
+  the empty one included, is skipped, and with no `PATH` a bare name is
+  not found, so a workspace built with an environment that has no
+  `PATH` now runs only programs named with a slash. RFC 0001 §5 states
+  the rule, and `workspacetest.Run` and `RunStarter` check it.
+
 - Added (documentation): RFC 0001, the workspace contract
   (`docs/rfcs/0001-workspace-contract.md`), draft 0.1. It states what
   the module already promises (names and confinement, files, the

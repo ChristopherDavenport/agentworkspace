@@ -34,7 +34,7 @@ func TestEnvIsACopy(t *testing.T) {
 	if got := l.Env(); !slices.Equal(got, []string{"A=1"}) {
 		t.Errorf("Env after a caller changed its copy = %q", got)
 	}
-	out, err := l.Exec(context.Background(), Command{Args: []string{"sh", "-c", "echo $A$B"}})
+	out, err := l.Exec(context.Background(), Command{Args: []string{"/bin/sh", "-c", "echo $A$B"}})
 	if err != nil {
 		t.Fatal(err)
 	}

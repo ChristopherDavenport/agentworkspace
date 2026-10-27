@@ -147,7 +147,7 @@ func (l *Local) Remove(_ context.Context, name string) error {
 // cancel kills what it started too, and waits at most two seconds for
 // output a killed child's children still hold open.
 func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
-	dir, env, err := l.prepare(c)
+	dir, env, prog, err := l.prepare(c)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,8 @@ func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
 		defer cancel()
 	}
-	cmd := exec.CommandContext(ctx, c.Args[0], c.Args[1:]...)
+	cmd := exec.CommandContext(ctx, prog, c.Args[1:]...)
+	cmd.Args[0] = c.Args[0]
 	cmd.Dir, cmd.Env = dir, env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
@@ -193,32 +194,74 @@ func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 // children, killed or not, still hold open.
 const waitDelay = 2 * time.Second
 
-// prepare checks a command and returns the directory it runs in and its
-// whole environment.
-func (l *Local) prepare(c Command) (dir string, env []string, err error) {
+// prepare checks a command and returns the directory it runs in, its
+// whole environment and the program it runs.
+func (l *Local) prepare(c Command) (dir string, env []string, prog string, err error) {
 	if len(c.Args) == 0 {
-		return "", nil, errors.New("agentworkspace: no command")
+		return "", nil, "", errors.New("agentworkspace: no command")
 	}
 	dir = l.dir
 	if c.Dir != "" {
 		if !filepath.IsLocal(c.Dir) {
-			return "", nil, fmt.Errorf("%w: %s", ErrOutside, c.Dir)
+			return "", nil, "", fmt.Errorf("%w: %s", ErrOutside, c.Dir)
 		}
 		// Through the root, so a link that leads out is refused as a
 		// name that does.
 		fi, err := l.root.Stat(c.Dir)
 		if err != nil {
-			return "", nil, outside(c.Dir, err)
+			return "", nil, "", outside(c.Dir, err)
 		}
 		if !fi.IsDir() {
-			return "", nil, fmt.Errorf("%s is not a directory", c.Dir)
+			return "", nil, "", fmt.Errorf("%s is not a directory", c.Dir)
 		}
 		dir = filepath.Join(l.dir, c.Dir)
 	}
 	// Never nil, which exec takes as this process's whole environment,
 	// the credentials Env was built without included; slices.Clone of
 	// a nil env would be nil.
-	return dir, append(append([]string{}, l.env...), c.Env...), nil
+	env = append(append([]string{}, l.env...), c.Env...)
+	if prog, err = lookPath(c.Args[0], env); err != nil {
+		return "", nil, "", err
+	}
+	return dir, env, prog, nil
+}
+
+// lookPath finds the program a command runs as execvp(3) does, but on
+// the PATH of env, the environment the process starts with, rather
+// than this process's, which is what exec.LookPath reads. A name with
+// a slash is used as it is, relative to the command's Dir. A bare name
+// is looked for in each absolute entry of PATH in turn; a relative
+// entry, the empty one included, is skipped, so a file written into
+// the workspace cannot stand in for a program (exec.ErrDot's hazard).
+// With no PATH a bare name is not found: there is no default, since a
+// container's would differ from this machine's.
+func lookPath(name string, env []string) (string, error) {
+	if strings.Contains(name, "/") {
+		return name, nil
+	}
+	var pathList string
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			pathList = v // the last one is the one the process sees
+		}
+	}
+	if name != "" {
+		for _, d := range filepath.SplitList(pathList) {
+			if !filepath.IsAbs(d) {
+				continue
+			}
+			if p := filepath.Join(d, name); executable(p) {
+				return p, nil
+			}
+		}
+	}
+	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+}
+
+// executable reports whether p is a file this process may execute.
+func executable(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir() && syscall.Access(p, 1 /* X_OK */) == nil
 }
 
 // localFS is the root's files, opened without blocking.

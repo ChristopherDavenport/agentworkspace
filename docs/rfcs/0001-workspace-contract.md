@@ -1,6 +1,6 @@
 # RFC 0001: Workspace Contract
 
-Status: draft 0.1
+Status: draft 0.2
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding; `Local` is the reference backend, and
@@ -21,8 +21,9 @@ runs a process for longer than one call with pipes to it, and the
 This document states what the Go module already promises in its doc
 comments and package docs, with the module as the reference binding
 and its two wires, `remote` (HTTP) and `mcpworkspace` (MCP), as
-bindings given against it. At draft 0.1 it adds no rule that the code
-or its doc comments do not already state. Where an open issue will add or change a rule, the section
+bindings given against it. Draft 0.1 added no rule that the code or
+its doc comments did not already state; draft 0.2 settles the issues
+listed under [changes since draft 0.1](#changes-since-draft-01). Where an open issue will add or change a rule, the section
 says so in an **Open** note naming the issue, and the rule is written
 when that issue lands. Where the code and its doc comments disagree,
 the disagreement is listed under [open questions](#19-open-questions)
@@ -232,11 +233,30 @@ The process runs at the root, or at dir, as the workspace's own
 processes see it, with the workspace's environment and then the
 command's.
 
-**Argv resolution.** The doc comment says `args[0]` is "resolved in the
-workspace" and says no more. Open: #4 will state how a name without a
-slash is looked up (in the process's own `PATH`, as the workspace sees
-the file system), what an environment without `PATH` finds, and whether
-relative `PATH` entries are searched.
+**Argv resolution.** The program a command runs is found as POSIX
+`execvp` finds it, over the process's own environment:
+
+- When `args[0]` contains a `/`, it names the program, relative to dir
+  when it is not absolute.
+- When it contains none, it MUST be looked up in the `PATH` of the
+  environment the process starts with (the workspace's, with the
+  command's over it, [section 4](#4-environment)), as the workspace's
+  own processes see the file system, and never in the `PATH` of the
+  program that holds the workspace. Each entry is tried in order, and
+  the first executable file of that name runs.
+- Only absolute entries are searched. A relative entry, the empty one
+  included, MUST be skipped, not resolved against dir: otherwise a file
+  written into the workspace could stand in for a program (Go's
+  `exec.ErrDot` refuses the same).
+- With no `PATH`, a bare name is not found. A backend MUST NOT supply a
+  default, since a container's default differs from the host's.
+- A name not found is an error, and nothing runs. The process gets
+  `args[0]` as given, whatever the lookup found.
+
+`workspacetest` holds it: `Run` runs a bare name found only on the
+command's `PATH`, and `RunStarter`, over a workspace with no `PATH`,
+finds nothing for a bare name, an empty `PATH` or a relative entry, and
+runs a name with a slash relative to dir.
 
 ## 6. Exec
 
@@ -668,7 +688,6 @@ The issues that will add or change a rule here:
 
 - #3: the descriptor's `host` and `instance` members, and which kind
   sets which ([section 12](#12-descriptor)).
-- #4: argv resolution ([section 5](#5-commands)).
 - #5: what an interrupted Exec returns, the wire change that carries
   it, and one escalation ladder ([sections 6](#6-exec) and
   [8](#8-ending-a-process)).
@@ -690,9 +709,6 @@ Where the code and its doc comments disagree today. This draft does
 not pick a side; each is settled by the issue named, or by a later
 draft:
 
-- **Argv resolution.** `Command.Args`'s doc says `args[0]` "is resolved
-  in the workspace"; `Local.Exec` and `Local.Start` look it up on the
-  `PATH` of the agent's process, not the workspace's environment (#4).
 - **"Everything it started".** The doc comments of `Command.Timeout`,
   `Starter.Start`, `Process.Signal` and `Process.Close`, and the README
   for Exec, promise that an end reaches everything the process started;
@@ -738,3 +754,9 @@ Questions with no issue yet:
   Go client. A corpus of request and reply exchanges per wire, as
   agenttool keeps for schemas, would let another language check one
   without Go.
+
+## Changes since draft 0.1
+
+- [Section 5](#5-commands): argv resolution (#4). A bare `args[0]` is
+  looked up in the `PATH` of the process's own environment, absolute
+  entries alone; with no `PATH` it is not found.

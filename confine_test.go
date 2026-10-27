@@ -21,9 +21,9 @@ import (
 
 // mapped stands in for a container: its processes and its files see
 // the working directory as /workspace, whatever directory on this
-// machine holds it. Paths in a command's arguments are mapped in, and
-// paths in its output mapped back, as a container's mount does. It is
-// not a Starter.
+// machine holds it. Paths in a command's arguments and environment
+// are mapped in, and paths in its output mapped back, as a container's
+// mount does. It is not a Starter.
 type mapped struct {
 	backing *agentworkspace.Local
 	dir     string // the directory on this machine
@@ -51,6 +51,11 @@ func (m *mapped) Exec(ctx context.Context, c agentworkspace.Command) (*agentwork
 		args[i] = in(a)
 	}
 	c.Args = args
+	env := make([]string, len(c.Env))
+	for i, e := range c.Env {
+		env[i] = in(e)
+	}
+	c.Env = env
 	stream := c.Stream
 	var buf bytes.Buffer
 	if stream != nil {

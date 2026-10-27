@@ -43,7 +43,7 @@ type group struct {
 	// signal goes to the group's ID once its leader is reaped.
 	mu     sync.Mutex
 	reaped bool
-	found  map[int]uint64 // descendants out of the group found so far, by pid, with their start time
+	found  map[int]uint64 // descendants found so far, in the group or out of it, by pid, with their start time
 }
 
 // newGroup is the group of the process pid, just started.
@@ -107,11 +107,18 @@ func (g *group) kill(leader bool) {
 // descend sends sig to every descendant of the leader that left its
 // group: a process whose parent is the leader (while leader says it is
 // not reaped), a member of the group, a descendant found before, or one
-// of these, and so on down. A descendant that leads its own group, as
-// one that called setsid or setpgid does, is sent sig by that group, so
-// what it starts there is too; any other alone. It never signals this
-// process or its group. It returns how many descendants it found that
-// earlier walks had not.
+// of these, and so on down. It remembers every descendant it finds, the
+// group's members among them, with its start time, so a later walk
+// finds one that left the group after this one, though its parent has
+// exited, and does not take a reused ID for it. A descendant that leads
+// its own group, as one that called setsid or setpgid does, is sent sig
+// by that group, so what it starts there is too; any other alone. It
+// never signals this process or its group. It returns how many
+// descendants it found that earlier walks had not.
+//
+// A descendant that is not stopped can exit between the walk's read of
+// /proc and the signal, and its ID be given to another process in that
+// moment; the kill stops every descendant first, so it does not race.
 func (g *group) descend(sig syscall.Signal, leader bool) int {
 	ps, ok := processes()
 	if !ok {
@@ -143,15 +150,17 @@ func (g *group) descend(sig syscall.Signal, leader bool) int {
 	signalled := map[int]bool{}
 	for pid := range in {
 		p, ok := ps[pid]
-		if !ok || p.pgrp == g.pgid || pid == self {
-			continue // the group's own are sent sig by the group
+		if !ok || pid == g.pgid || pid == self {
+			continue
 		}
+		// A member of the group is remembered too: one that leaves
+		// it later, and whose parent then exits, is found by this.
 		if start, ok := g.found[pid]; !ok || start != p.start {
 			added++
 		}
 		found[pid] = p.start
-		if p.zombie {
-			continue
+		if p.zombie || p.pgrp == g.pgid {
+			continue // the group's own are sent sig by the group
 		}
 		target := pid
 		if in[p.pgrp] && p.pgrp != selfGroup {
@@ -283,6 +292,7 @@ func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 		group:   newGroup(cmd.Process.Pid),
 		stdin:   inW,
 		stdout:  outR,
+		reaped:  make(chan struct{}),
 		done:    make(chan struct{}),
 		closing: make(chan struct{}),
 		ended:   make(chan struct{}),
@@ -314,10 +324,12 @@ type localProcess struct {
 	stdout *os.File // the read end
 
 	mu     sync.Mutex
-	ending error // the context's error, once the context began ending it
+	exited bool  // the process has been reaped
+	ending error // the context's error, once the context began ending it before the process exited
 	status int
 	err    error
 
+	reaped    chan struct{} // closed once the process has exited and been reaped
 	done      chan struct{} // closed once the process has exited and status and err are set
 	closing   chan struct{} // closed by Close
 	closeOnce sync.Once
@@ -356,6 +368,10 @@ func (p *localProcess) Close() error {
 // until copied is closed.
 func (p *localProcess) wait(errR *os.File, copied chan struct{}) {
 	err := p.cmd.Wait()
+	p.mu.Lock()
+	p.exited = true
+	p.mu.Unlock()
+	close(p.reaped)
 	// Anything the process started goes with it.
 	p.group.reap(true)
 	if errR != nil {
@@ -397,9 +413,7 @@ func (p *localProcess) watch(ctx context.Context, cancel context.CancelFunc) {
 	select {
 	case <-ctx.Done():
 		p.mu.Lock()
-		select {
-		case <-p.done:
-		default:
+		if !p.exited {
 			p.ending = ctx.Err()
 		}
 		p.mu.Unlock()
@@ -415,13 +429,13 @@ func (p *localProcess) watch(ctx context.Context, cancel context.CancelFunc) {
 func (p *localProcess) end(polite bool) {
 	if polite {
 		p.stdin.Close()
-		if p.exited(grace) {
+		if p.exitsWithin(grace) {
 			return
 		}
 	}
-	p.group.end(p.exited)
+	p.group.end(p.exitsWithin)
 	<-p.done
 }
 
-// exited reports whether the process exits within d.
-func (p *localProcess) exited(d time.Duration) bool { return closedWithin(p.done, d) }
+// exitsWithin reports whether the process exits within d.
+func (p *localProcess) exitsWithin(d time.Duration) bool { return closedWithin(p.reaped, d) }

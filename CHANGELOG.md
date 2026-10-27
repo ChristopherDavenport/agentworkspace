@@ -10,8 +10,9 @@ versions may break the API.
 - Added: `Descriptor.Host` and `Descriptor.Instance`, agentsession
   0.14's `workspace.host` and `workspace.instance` (#3). `Local` sets
   `Host` to the system's host name, or to `WithHost`'s, a new
-  `LocalOption` of `NewLocal` for machines that share one, and leaves
-  `Ref` empty. `remote` carries both in the served descriptor (`Served`),
+  `LocalOption` of `NewLocal` for machines that share one (it refuses
+  an empty name), or, where the system gives none, to a stable name
+  hashed from the machine ID; it leaves `Ref` empty. `remote` carries both in the served descriptor (`Served`),
   without the host to a principal lacking `read`. `Descriptor.Ref`'s
   doc no longer lists a host or an instance among what it holds, and
   `Workspace`'s says its methods are safe for concurrent use. RFC 0001
@@ -25,13 +26,15 @@ versions may break the API.
   `setpgid` or a shell's job control, which outlived it before (#32).
   Before each signal `Local` walks `/proc` by parent links, sends a
   descendant that leads a group of its own the signal by that group,
-  and stops them all before it kills them. A descendant whose parent
-  exited before any signal was sent is still not found. On macOS
-  `Local` signals the group alone, as before.
+  remembers every descendant it finds (the group's members too, so one
+  that leaves the group later is still found) by its start time, and
+  stops them all before it kills them. A descendant whose parent
+  exited before any signal was sent is still not found. On macOS, or
+  where `/proc` is not this process's, `Local` signals the group alone.
 - Added: `Reach`, `ReachOf` and `(*Local).Reach`, how far a starter's
   end of a process reaches (`ReachGroup`, `ReachDescendants`,
-  `ReachAll`): `Local` is `ReachDescendants` on Linux and `ReachGroup`
-  elsewhere. RFC 0001 §8 names the capability, and
+  `ReachAll`): `Local` is `ReachDescendants` on Linux while `/proc` is
+  its own, asked at each call, and `ReachGroup` otherwise. RFC 0001 §8 names the capability, and
   `workspacetest.Run` and `RunStarter` check a `setsid` child is gone
   after a timeout and a `Close`, skipping a backend whose reach is
   `ReachGroup`.
@@ -39,7 +42,9 @@ versions may break the API.
 - Added: `Output.Interrupted`. When `Exec`'s context ends while the
   command runs, `Local.Exec` now returns the output collected so far,
   with `ExitCode` -1 and `Interrupted`, beside `ctx.Err()`, where it
-  returned nil (#5). A `remote` client returns the same `Output`,
+  returned nil (#5). A context that ends after the command exited, while
+  a child it left holds its output open, leaves its exit status, for
+  `Exec` and for a started process's `Wait` alike. A `remote` client returns the same `Output`,
   without the output kept: the wire half of #5 (an exec key and a
   cancel route, so a hang-up keeps the output) is to come. RFC 0001 §6
   states the rule, and `workspacetest.Run` checks it.

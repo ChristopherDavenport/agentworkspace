@@ -3,8 +3,11 @@ package agentworkspace
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -53,8 +56,12 @@ func NewLocal(dir string, env []string, opts ...LocalOption) (*Local, error) {
 		o(&cfg)
 	}
 	host := cfg.host
+	if cfg.hostSet && host == "" {
+		return nil, errors.New("agentworkspace: WithHost needs a name: a local Descriptor always names its host")
+	}
 	if !cfg.hostSet {
-		host, _ = os.Hostname()
+		name, _ := os.Hostname()
+		host = hostOr(name)
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -81,9 +88,27 @@ type localConfig struct {
 
 // WithHost names this machine in the Descriptor, in place of the
 // system's host name, which two machines a session may move between can
-// share. Empty leaves Host unset.
+// share. NewLocal refuses an empty name.
 func WithHost(name string) LocalOption {
 	return func(c *localConfig) { c.host, c.hostSet = name, true }
+}
+
+// hostOr is name, the system's host name, or, when that is empty, a
+// stable name for this machine: "machine-" and 16 hex digits of a
+// SHA-256 of a label and the machine ID (/etc/machine-id, or D-Bus's),
+// never the ID itself, which is meant to be kept private; "localhost"
+// where there is no machine ID either.
+func hostOr(name string) string {
+	if name != "" {
+		return name
+	}
+	for _, f := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+		if id, err := os.ReadFile(f); err == nil && len(bytes.TrimSpace(id)) > 0 {
+			sum := sha256.Sum256(append([]byte("agentworkspace host\n"), bytes.TrimSpace(id)...))
+			return "machine-" + hex.EncodeToString(sum[:8])
+		}
+	}
+	return "localhost"
 }
 
 // Root is the directory, absolute and cleaned.
@@ -97,16 +122,17 @@ func (l *Local) Real() string { return l.real }
 // that changes it changes nothing a later process starts with.
 func (l *Local) Env() []string { return slices.Clone(l.env) }
 
-// Reach is ReachDescendants on Linux, where Local walks /proc for the
-// descendants that left a process's group before it signals, and
-// ReachGroup elsewhere, macOS among them, where it signals the group
-// alone. On either, a descendant whose parent exited before the end
-// began is not found.
-func (l *Local) Reach() Reach { return reach }
+// Reach is ReachDescendants on Linux while /proc is this process's,
+// where Local walks it for the descendants that left a process's group
+// before it signals, and ReachGroup otherwise (no /proc, an empty one,
+// another PID namespace's, or macOS), where it signals the group alone.
+// It is asked of /proc at each call. On either, a descendant whose
+// parent exited before the end began is not found.
+func (l *Local) Reach() Reach { return reachNow() }
 
 // Descriptor names the local machine: KindLocal, no Ref, Host the
-// system's host name as NewLocal found it (or WithHost's), and the
-// root.
+// system's host name as NewLocal found it (or WithHost's, or hostOr's
+// fallback when the system gives none), and the root.
 func (l *Local) Descriptor() Descriptor {
 	return Descriptor{Kind: KindLocal, Host: l.host, Root: l.dir}
 }
@@ -180,11 +206,13 @@ func (l *Local) Remove(_ context.Context, name string) error {
 }
 
 // Exec runs a command in its own process group. When ctx ends, or
-// Command.Timeout, before the command does, Exec ends it and what it
+// Command.Timeout, before the command exits, Exec ends it and what it
 // started with Local's ladder (SIGINT, then SIGTERM, then SIGKILL, a
 // grace apart; see Process) and returns the output so far, with
-// ExitCode -1 and Interrupted or TimedOut. It waits at most two seconds
-// past the command's exit for output its children still hold open.
+// ExitCode -1 and Interrupted or TimedOut; one that ends after the
+// command exited leaves its status as it was. It waits at most two
+// seconds past the command's exit for output its children still hold
+// open.
 func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	dir, env, prog, err := l.prepare(c)
 	if err != nil {
@@ -203,53 +231,99 @@ func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	cmd.Args[0] = c.Args[0]
 	cmd.Dir, cmd.Env = dir, env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = waitDelay
-	if c.Stdin != nil {
-		cmd.Stdin = bytes.NewReader(c.Stdin)
-	}
+	// Pipes of its own, not exec's, so that the wait returns as the
+	// command exits, whatever still holds its output open: its status
+	// is known then, and an end that comes after it does not take it
+	// for an interrupt. The output is read on for a waitDelay at most.
 	var stdout, stderr bytes.Buffer
-	if c.Stream != nil {
-		cmd.Stdout, cmd.Stderr = c.Stream, c.Stream
-	} else {
-		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	}
-	if err := cmd.Start(); err != nil {
+	var copies []copier
+	var mine, theirs []*os.File // the ends this process keeps, and the child's
+	fail := func(err error) (*Output, error) {
+		closeFiles(mine)
+		closeFiles(theirs)
 		return nil, err
 	}
+	var inW *os.File
+	if c.Stdin != nil {
+		r, w, err := os.Pipe()
+		if err != nil {
+			return fail(err)
+		}
+		cmd.Stdin, inW = r, w
+		mine, theirs = append(mine, w), append(theirs, r)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		return fail(err)
+	}
+	mine, theirs = append(mine, outR), append(theirs, outW)
+	cmd.Stdout = outW
+	if c.Stream != nil {
+		// One pipe for both, so the stream gets them in their order.
+		cmd.Stderr = outW
+		copies = append(copies, copier{outR, c.Stream})
+	} else {
+		errR, errW, err := os.Pipe()
+		if err != nil {
+			return fail(err)
+		}
+		mine, theirs = append(mine, errR), append(theirs, errW)
+		cmd.Stderr = errW
+		copies = append(copies, copier{outR, &stdout}, copier{errR, &stderr})
+	}
+	if err := cmd.Start(); err != nil {
+		return fail(err)
+	}
+	closeFiles(theirs)
+	defer closeFiles(mine)
 	g := newGroup(cmd.Process.Pid)
+	copied, copyErr := copyAll(copies)
+	if inW != nil {
+		go func() {
+			inW.Write(c.Stdin)
+			inW.Close()
+		}()
+	}
 	// The watch ends the command when run ends first. mu orders its
-	// start against Wait's return, so the outcome says which came
+	// start against the command's exit, so the outcome says which came
 	// first.
 	var (
 		mu     sync.Mutex
-		waited bool
+		exited bool
 		cause  error // the caller's error, or the timeout's when it is nil
 		ending bool
 	)
-	done := make(chan struct{})
+	reaped := make(chan struct{})
 	go func() {
 		select {
-		case <-done:
+		case <-reaped:
 			return
 		case <-run.Done():
 		}
 		mu.Lock()
-		if waited {
+		if exited {
 			mu.Unlock()
 			return
 		}
 		ending, cause = true, ctx.Err()
 		mu.Unlock()
-		g.end(func(d time.Duration) bool { return closedWithin(done, d) })
+		g.end(func(d time.Duration) bool { return closedWithin(reaped, d) })
 	}()
 	err = cmd.Wait()
 	mu.Lock()
-	waited = true
+	exited = true
 	mu.Unlock()
-	close(done)
+	close(reaped)
 	// Ended, what is left of the group goes; a command that exited by
 	// itself keeps what it left running.
 	g.reap(ending)
+	cut := !closedWithin(copied, waitDelay)
+	if cut {
+		for _, cp := range copies {
+			cp.r.Close()
+		}
+		<-copied
+	}
 	out := &Output{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 	switch {
 	case ending && cause != nil:
@@ -258,15 +332,57 @@ func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	case ending:
 		out.ExitCode, out.TimedOut = -1, true
 		return out, nil
-	case err == nil:
-		return out, nil
+	case *copyErr != nil:
+		return nil, *copyErr
 	}
 	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		out.ExitCode = ee.ExitCode()
-		return out, nil
+	if err != nil && !errors.As(err, &ee) {
+		return nil, err
 	}
-	return nil, err
+	out.ExitCode = cmd.ProcessState.ExitCode()
+	if cut && out.ExitCode == 0 {
+		// As os/exec says it: the output was cut short.
+		return nil, exec.ErrWaitDelay
+	}
+	return out, nil
+}
+
+// copier copies a pipe's read end to a writer.
+type copier struct {
+	r *os.File
+	w io.Writer
+}
+
+// copyAll copies each pipe until its end, and closes the channel it
+// returns once all have ended. A writer that fails is not written
+// again, but its pipe is still drained, so the process does not block
+// on a full one; the first failure is in *err once the channel closes.
+func copyAll(copies []copier) (<-chan struct{}, *error) {
+	done := make(chan struct{})
+	var first error
+	var once sync.Once
+	var wg sync.WaitGroup
+	for _, cp := range copies {
+		wg.Go(func() {
+			_, err := io.Copy(cp.w, cp.r)
+			if err != nil && !errors.Is(err, os.ErrClosed) { // closed is Exec cutting the read short
+				once.Do(func() { first = err })
+				io.Copy(io.Discard, cp.r)
+			}
+		})
+	}
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done, &first
+}
+
+// closeFiles closes each file.
+func closeFiles(fs []*os.File) {
+	for _, f := range fs {
+		f.Close()
+	}
 }
 
 // waitDelay is how long a process's end waits for output that its

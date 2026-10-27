@@ -293,7 +293,10 @@ it ended:
 - When the caller's context ends while the command runs, Exec MUST end
   the command and everything it started in the same way, and MUST
   return a result beside the context's error: the output collected
-  until the command ended, exit status −1 and *interrupted* set. With a
+  until the command ended, exit status −1 and *interrupted* set. A
+  context that ends after the command itself exited, while a child it
+  left still holds its output open, interrupts nothing: the result
+  keeps the command's own exit status. With a
   stream, the output went to the stream as it came, and the result
   keeps none, as when the command runs to its end. A caller that
   interrupts a command still learns what it printed, which a build or a
@@ -422,18 +425,30 @@ namespace.
 A backend that walks a process table to find descendants MUST NOT
 signal the program's own process or group. It SHOULD send a descendant
 that leads a group of its own the signal by that group, so what it
-started there goes too, and SHOULD remember what it found with
-something that tells a reused process ID apart, such as its start time.
+started there goes too. It SHOULD remember every descendant it found,
+the members of the process's own group among them, with something that
+tells a reused process ID apart, such as its start time, and look again
+for each at every later signal: a member that leaves the group after a
+walk, and whose parent then exits, is found by nothing else. Its reach
+is what its table gives at the time it is asked: one that cannot read
+a table of its own processes (none mounted, an empty one, another PID
+namespace's) reaches the group alone, and says so.
 Before the last step it SHOULD stop what it found and walk again until
 a walk finds nothing new, so that no descendant forks a child the kill
 would miss: a child whose parent is killed first is given to another
 parent, and found no more.
 
-The reference binding's reach is `descendants` on Linux: before each
-signal, `Local` walks `/proc` by parent links from the process, its
-group's members and what it found before, remembers each descendant
-with its start time, and stops them all before it kills them. On macOS
-it is `group`: `Local` does not read that system's process table
+The reference binding's reach is `descendants` on Linux while `/proc`
+is its own, which it checks at each call by `/proc/self` naming its
+process ID, and `group` when it is not. Before each signal, `Local`
+walks `/proc` by parent links from the process, its group's members and
+what it found before, remembers each descendant, member or not, with
+its start time, and stops them all before it kills them. Between its
+read of `/proc` and an INT or a TERM, a descendant that is not stopped
+can exit and its ID be given to another process, which then gets the
+signal; the start time is checked at the read, not at the send, so
+that window remains for the first two steps. The kill does not race:
+what it signals is stopped first. On macOS it is `group`: `Local` does not read that system's process table
 (`sysctl kern.proc`), so a descendant that left the group outlives the
 end there. On both, a descendant whose parent exited before any signal
 was sent (a daemon's double fork, a job its shell left) is not found.
@@ -557,9 +572,13 @@ written into ref.
   `http://<name>.tunnel.invalid` as ref, a host that resolves nowhere.
 
 What host holds is the binding's choice, as long as it tells the
-machines apart. The reference binding's `Local` uses the system's host
-name, which two machines can share (two laptops of one model), and
-lets the program name the machine instead (`WithHost`). A host name
+machines apart and is never empty. The reference binding's `Local`
+uses the system's host name, which two machines can share (two laptops
+of one model), and lets the program name the machine instead
+(`WithHost`, which refuses an empty name). Where the system gives no
+host name, it uses `machine-` and 16 hex digits of a SHA-256 of a label
+and the machine ID (`/etc/machine-id`, or D-Bus's), never the ID
+itself, and `localhost` where there is no machine ID either. A host name
 lands in session files that a program may publish, so a redactor
 SHOULD know the member.
 

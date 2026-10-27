@@ -8,15 +8,34 @@ import (
 	"strconv"
 )
 
-// reach is how far Local's end of a process reaches here: /proc names
-// every process's parent, so a walk finds the descendants that left the
-// group while their parents live.
-const reach = ReachDescendants
+// procRoot is where the process table is read; tests point it elsewhere.
+var procRoot = "/proc"
+
+// reachNow is how far Local's end of a process reaches here, now: while
+// /proc is this process's (its self link names this process's ID, so
+// it is a table of this PID namespace), a walk finds the descendants
+// that left the group while their parents live; without one (none
+// mounted, an empty one, another namespace's) the group alone.
+func reachNow() Reach {
+	if procIsOurs() {
+		return ReachDescendants
+	}
+	return ReachGroup
+}
+
+// procIsOurs reports whether procRoot lists this process as itself.
+func procIsOurs() bool {
+	self, err := os.Readlink(procRoot + "/self")
+	return err == nil && self == strconv.Itoa(os.Getpid())
+}
 
 // processes reads every process this one can see from /proc, and
-// reports false when it cannot read /proc at all.
+// reports false when /proc is not this process's to read.
 func processes() (map[int]procInfo, bool) {
-	ents, err := os.ReadDir("/proc")
+	if !procIsOurs() {
+		return nil, false
+	}
+	ents, err := os.ReadDir(procRoot)
 	if err != nil {
 		return nil, false
 	}
@@ -26,7 +45,7 @@ func processes() (map[int]procInfo, bool) {
 		if err != nil {
 			continue
 		}
-		b, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		b, err := os.ReadFile(procRoot + "/" + e.Name() + "/stat")
 		if err != nil {
 			continue // gone since the listing
 		}
@@ -39,7 +58,7 @@ func processes() (map[int]procInfo, bool) {
 
 // startOf is pid's start time, and false when it cannot be read.
 func startOf(pid int) (uint64, bool) {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	b, err := os.ReadFile(procRoot + "/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
 		return 0, false
 	}

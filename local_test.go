@@ -84,7 +84,6 @@ func TestLocalDescriptorNamesTheHost(t *testing.T) {
 	}{
 		{"the system's", nil, hostname},
 		{"WithHost", []LocalOption{WithHost("build-7")}, "build-7"},
-		{"WithHost empty", []LocalOption{WithHost("")}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l, err := NewLocal(dir, nil, tc.opts...)

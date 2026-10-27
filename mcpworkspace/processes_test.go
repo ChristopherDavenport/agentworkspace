@@ -130,8 +130,8 @@ func TestClosingAProcessKillsIt(t *testing.T) {
 	if err := q.Signal(syscall.SIGTERM); !errors.Is(err, os.ErrProcessDone) {
 		t.Errorf("signal after exit: %v", err)
 	}
-	if err := q.Signal(syscall.SIGHUP); err == nil {
-		t.Error("SIGHUP was sent")
+	if err := q.Signal(syscall.Signal(63)); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("a signal the wire has no name for: %v, want it unsupported", err)
 	}
 }
 
@@ -445,8 +445,8 @@ func TestTheProcessMethodsAreBounded(t *testing.T) {
 			_, err := mcp.CallCustomMethod[*ReadParams, *ReadResult](ctx, cs, wire.MethodRead, &ReadParams{ReadArgs: wire.ReadArgs{ID: id, FD: 3}})
 			return err
 		},
-		"HUP": func() error {
-			_, err := mcp.CallCustomMethod[*SignalParams, *SignalResult](ctx, cs, wire.MethodSignal, &SignalParams{SignalArgs: wire.SignalArgs{ID: id, Signal: "HUP"}})
+		"SEGV": func() error {
+			_, err := mcp.CallCustomMethod[*SignalParams, *SignalResult](ctx, cs, wire.MethodSignal, &SignalParams{SignalArgs: wire.SignalArgs{ID: id, Signal: "SEGV"}})
 			return err
 		},
 		"no command": func() error {

@@ -216,18 +216,34 @@ func startClose(t *testing.T, l agentworkspace.Starter, _ string) {
 	}
 }
 
-// Signal reaches the process.
+// Signal reaches the process, for each of RFC 0001 §7's required set,
+// and a signal the starter does not carry is errors.ErrUnsupported.
 func startSignal(t *testing.T, l agentworkspace.Starter, _ string) {
-	p := start(t, context.Background(), l, agentworkspace.Command{Args: []string{"sleep", "30"}})
-	if err := p.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	within(t, 10*time.Second, "the signalled process", func() {
-		if status, err := p.Wait(); status != -1 || err != nil {
-			t.Errorf("Wait = %d, %v; want -1, nil", status, err)
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL, syscall.SIGHUP} {
+		// exec, so that sleep is the process the signal reaches, and its
+		// default action ends it, where a shell would ignore INT.
+		p := start(t, context.Background(), l, agentworkspace.Command{Args: []string{"sh", "-c", "echo; exec sleep 30"}})
+		readLine(t, p)
+		if err := p.Signal(sig); err != nil {
+			t.Fatalf("%v: %v", sig, err)
 		}
-	})
+		within(t, 10*time.Second, "the signalled process", func() {
+			if status, err := p.Wait(); status != -1 || err != nil {
+				t.Errorf("%v: Wait = %d, %v; want -1, nil", sig, status, err)
+			}
+		})
+	}
+	p := start(t, context.Background(), l, agentworkspace.Command{Args: []string{"sleep", "30"}})
+	if err := p.Signal(notASignal{}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("a signal no starter carries: %v, want errors.ErrUnsupported", err)
+	}
 }
+
+// notASignal is an os.Signal no starter carries.
+type notASignal struct{}
+
+func (notASignal) Signal()        {}
+func (notASignal) String() string { return "not a signal" }
 
 // When the process exits by itself, what it left running goes with
 // it: the background child holding the output is killed, so the output
@@ -398,4 +414,15 @@ func startConcurrently(t *testing.T, l agentworkspace.Starter, _ string) {
 		})
 	}
 	wg.Wait()
+}
+
+// readLine reads one line of p's output, so that the process has run
+// that far.
+func readLine(t *testing.T, p agentworkspace.Process) {
+	t.Helper()
+	within(t, 10*time.Second, "a line of output", func() {
+		if _, err := bufio.NewReader(p.Stdout()).ReadString('\n'); err != nil {
+			t.Errorf("a line of output: %v", err)
+		}
+	})
 }

@@ -16,7 +16,7 @@
 //	agentworkspace/process.write      {id, data (base64, at most MaxWriteBytes)} -> {}
 //	agentworkspace/process.read       {id, fd: 1|2, max?} -> {data?, eof?}
 //	agentworkspace/process.closeStdin {id} -> {}
-//	agentworkspace/process.signal     {id, signal: INT|TERM|KILL} -> {done?}
+//	agentworkspace/process.signal     {id, signal} -> {done?}
 //	agentworkspace/process.wait       {id} -> {status, ended?, error?}
 //	agentworkspace/process.close      {id} -> {status, ended?, error?, stderr?}
 //	agentworkspace/process.cancel     {id} -> {}
@@ -168,20 +168,48 @@ func DefaultBounds() Bounds {
 // Valid reports whether every bound is positive.
 func (b Bounds) Valid() bool { return b.MaxProcesses > 0 && b.MaxWriteBytes > 0 && b.MaxReadBytes > 0 }
 
-// The signals a process may be sent, by name.
+// The signals a process may be sent, by their POSIX names without the
+// SIG prefix: RFC 0001 §7's required set (INT, TERM, KILL, HUP) and the
+// rest of the set it names, the thirteen remote carries too. A name
+// not among them is refused as KindUnsupported.
 const (
-	SignalINT  = "INT"
-	SignalTERM = "TERM"
-	SignalKILL = "KILL"
+	SignalHUP   = "HUP"
+	SignalINT   = "INT"
+	SignalQUIT  = "QUIT"
+	SignalKILL  = "KILL"
+	SignalUSR1  = "USR1"
+	SignalUSR2  = "USR2"
+	SignalPIPE  = "PIPE"
+	SignalALRM  = "ALRM"
+	SignalTERM  = "TERM"
+	SignalCONT  = "CONT"
+	SignalSTOP  = "STOP"
+	SignalTSTP  = "TSTP"
+	SignalWINCH = "WINCH"
 )
 
 // signals are the signals a process may be sent, by name. Unexported,
 // so that what a server accepts cannot be changed by anyone who imports
-// the package.
-var signals = map[string]syscall.Signal{SignalINT: syscall.SIGINT, SignalTERM: syscall.SIGTERM, SignalKILL: syscall.SIGKILL}
+// the package. The wire carries names, not numbers: a number is the
+// client's platform's, and USR1 is 10 on Linux and 30 on macOS.
+var signals = map[string]syscall.Signal{
+	SignalHUP:   syscall.SIGHUP,
+	SignalINT:   syscall.SIGINT,
+	SignalQUIT:  syscall.SIGQUIT,
+	SignalKILL:  syscall.SIGKILL,
+	SignalUSR1:  syscall.SIGUSR1,
+	SignalUSR2:  syscall.SIGUSR2,
+	SignalPIPE:  syscall.SIGPIPE,
+	SignalALRM:  syscall.SIGALRM,
+	SignalTERM:  syscall.SIGTERM,
+	SignalCONT:  syscall.SIGCONT,
+	SignalSTOP:  syscall.SIGSTOP,
+	SignalTSTP:  syscall.SIGTSTP,
+	SignalWINCH: syscall.SIGWINCH,
+}
 
-// SignalOf is the signal named name on the wire, false for a name that
-// is not INT, TERM or KILL.
+// SignalOf is the signal named name on the wire, false for a name the
+// wire does not carry.
 func SignalOf(name string) (syscall.Signal, bool) {
 	s, ok := signals[name]
 	return s, ok

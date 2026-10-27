@@ -374,7 +374,7 @@ func (s *Processes) signal(_ context.Context, ss *mcp.ServerSession, p *SignalPa
 	}
 	sig, ok := wire.SignalOf(p.Signal)
 	if !ok {
-		return nil, fmt.Errorf("signal %q: want INT, TERM or KILL", p.Signal)
+		return nil, refuse(errors.ErrUnsupported, "no signal named %q is carried", p.Signal)
 	}
 	sp, err := s.lookup(ss, p.ID)
 	if err != nil {

@@ -190,13 +190,13 @@ func TestLocalsErrorsReachTheClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	if err := q.Signal(syscall.Signal(63)); err == nil {
-		t.Error("an unknown signal was sent")
+	if err := q.Signal(syscall.Signal(63)); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("an unknown signal: %v, want it unsupported", err)
 	}
-	if _, code := raw(t, "POST", url+q.(*process).route+"/signal", "", strings.NewReader(`{"signal":"SEGV"}`)); code != codeInvalid {
+	if _, code := raw(t, "POST", url+q.(*process).route+"/signal", "", strings.NewReader(`{"signal":"SEGV"}`)); code != codeUnsupported {
 		t.Errorf("the server took an unknown signal: %q", code)
 	}
-	if _, code := raw(t, "POST", url+q.(*process).route+"/signal", "", strings.NewReader(`{"signal":"15"}`)); code != codeInvalid {
+	if _, code := raw(t, "POST", url+q.(*process).route+"/signal", "", strings.NewReader(`{"signal":"15"}`)); code != codeUnsupported {
 		t.Errorf("the server took a signal's number: %q", code)
 	}
 }

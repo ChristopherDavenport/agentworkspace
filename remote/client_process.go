@@ -181,12 +181,12 @@ func (p *process) Wait() (int, error) {
 // started. A signal the wire does not name is refused.
 func (p *process) Signal(sig os.Signal) error {
 	s, ok := sig.(syscall.Signal)
-	if !ok {
-		return fmt.Errorf("remote: cannot send %v", sig)
+	var name string
+	if ok {
+		name, ok = signalName(s)
 	}
-	name, ok := signalName(s)
 	if !ok {
-		return fmt.Errorf("remote: cannot send %v", sig)
+		return fmt.Errorf("remote: cannot send %v: %w", sig, errors.ErrUnsupported)
 	}
 	select {
 	case <-p.done:

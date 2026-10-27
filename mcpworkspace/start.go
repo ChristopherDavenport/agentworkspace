@@ -300,8 +300,9 @@ func (p *process) Wait() (int, error) {
 	return p.status, p.err
 }
 
-// Signal sends INT, TERM or KILL; any other signal is refused. A process
-// that has exited is os.ErrProcessDone.
+// Signal sends sig by its name on the wire (wire.SignalOf's); a signal
+// the wire has no name for is errors.ErrUnsupported, and nothing is
+// sent. A process that has exited is os.ErrProcessDone.
 func (p *process) Signal(sig os.Signal) error {
 	s, ok := sig.(syscall.Signal)
 	var name string
@@ -309,7 +310,7 @@ func (p *process) Signal(sig os.Signal) error {
 		name, ok = wire.SignalName(s)
 	}
 	if !ok {
-		return fmt.Errorf("mcpworkspace: cannot send %v", sig)
+		return fmt.Errorf("mcpworkspace: cannot send %v: %w", sig, errors.ErrUnsupported)
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, requestTimeout)
 	defer cancel()

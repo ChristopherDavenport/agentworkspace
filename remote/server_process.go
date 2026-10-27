@@ -710,7 +710,7 @@ func (h *Handler) signal(w http.ResponseWriter, r *http.Request) {
 	}
 	sig, ok := signals[req.Signal]
 	if !ok {
-		writeError(w, wireError{Code: codeInvalid, Message: fmt.Sprintf("no signal named %q", bounded(req.Signal))})
+		writeError(w, wireError{Code: codeUnsupported, Message: fmt.Sprintf("no signal named %q is carried", bounded(req.Signal))})
 		return
 	}
 	if err := sp.p.Signal(sig); err != nil {

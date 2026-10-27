@@ -377,7 +377,7 @@ func (p *localProcess) Wait() (int, error) {
 func (p *localProcess) Signal(sig os.Signal) error {
 	s, ok := sig.(syscall.Signal)
 	if !ok {
-		return fmt.Errorf("agentworkspace: cannot send %v", sig)
+		return fmt.Errorf("agentworkspace: cannot send %v: %w", sig, errors.ErrUnsupported)
 	}
 	return p.group.signal(s)
 }

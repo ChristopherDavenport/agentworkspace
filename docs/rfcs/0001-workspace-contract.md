@@ -366,10 +366,21 @@ A process's operations MUST be safe to use at once: one reader of its
 output, one writer of its input and one waiter. A caller that is done
 with a process closes it, even after it exited.
 
-Signals are named on a wire by their POSIX names without the `SIG`
-prefix. remote carries `HUP INT QUIT KILL USR1 USR2 PIPE ALRM TERM CONT
-STOP TSTP WINCH`; mcpworkspace carries `INT TERM KILL`. A binding MUST
-refuse a signal it does not carry rather than send another.
+**Signals.** A signal is named on a wire by its POSIX name without the
+`SIG` prefix. Every starter, and every binding that carries one, MUST
+carry the **required set**, `INT`, `TERM`, `KILL` and `HUP`: the ladder
+of [section 8](#8-ending-a-process) is the first three, and `HUP` is a
+terminal's hang-up, which a caller sends a process that should reload
+or end. The **named set** is the required set and `QUIT USR1 USR2 PIPE
+ALRM CONT STOP TSTP WINCH`; a binding SHOULD carry it whole, and MUST
+use these names for any of it that it carries. A signal a starter or a
+binding does not carry MUST be refused as *unsupported*, and nothing is
+sent: never another signal in its place, and never a number, which
+differs between systems (`USR1` is 10 on Linux and 30 on macOS).
+remote and mcpworkspace carry the named set; `Local` carries whatever
+signal its system has, and refuses one that is not a system signal.
+`workspacetest.RunStarter` sends each of the required set and checks
+a signal no starter carries is refused as *unsupported*.
 
 Open: #29 will add a terminal mode: a process started with a
 pseudo-terminal of a given size as its controlling terminal, a resize,
@@ -676,7 +687,7 @@ the standard library alone.
 | start | `agentworkspace/process.start {args, dir?, env?, timeoutMs?, stderr?} → {id}` |
 | standard input | `process.write {id, data}`, at most `MaxWriteBytes` (1 MiB) each; `process.closeStdin {id}` |
 | standard output, standard error | `process.read {id, fd: 1\|2, max?} → {data?, eof?}`, a long poll, at most `MaxReadBytes` (64 KiB) |
-| signal | `process.signal {id, signal: INT\|TERM\|KILL} → {done?}` |
+| signal | `process.signal {id, signal} → {done?}`, a name of the named set ([section 7](#7-processes)) |
 | wait | `process.wait {id} → {status, ended?, error?}` |
 | close | `process.close {id} → {status, ended?, error?, stderr?}` |
 | cancel (the owner's context ended) | `process.cancel {id} → {}`: the ladder from INT, input left open, the process left to read and wait on |
@@ -877,9 +888,6 @@ draft:
   the working directory; a remote client dialled by a principal without
   `read` is told the root's last element alone, so its `Root()`, and
   its `Served().Root`, are not absolute.
-- **Signals.** remote carries thirteen signal names, mcpworkspace
-  three, and `Local` any the system has. The contract names no minimum
-  set a starter must carry.
 
 Questions with no issue yet:
 
@@ -904,6 +912,10 @@ Questions with no issue yet:
 - [Section 8](#8-ending-a-process): a wire tells its client the
   serving side's reach, and the client states it: remote's info route
   carries `reach`, and mcpworkspace gains `process.info`.
+- [Section 7](#7-processes): a required set of signals (`INT`, `TERM`,
+  `KILL`, `HUP`) every starter carries, the named set of thirteen a
+  binding should, and a signal not carried refused as *unsupported*
+  (#40). mcpworkspace carries the thirteen, where it carried three.
 - [Section 2](#error-kinds): every wire carries every kind both ways
   (#38). mcpworkspace's files carry the nine, and its process and
   server methods carry them too, as JSON-RPC error `-32011` with a

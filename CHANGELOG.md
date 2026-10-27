@@ -7,6 +7,18 @@ versions may break the API.
 
 ## Unreleased
 
+- Changed: mcpworkspace carries the thirteen signals remote does (`HUP
+  INT QUIT KILL USR1 USR2 PIPE ALRM TERM CONT STOP TSTP WINCH`, the new
+  `wire.Signal*` constants), where it carried `INT`, `TERM` and `KILL`
+  (#40). A signal a starter does not carry is now
+  `errors.ErrUnsupported` on every backend: `Local`'s `Signal` of an
+  `os.Signal` that is no `syscall.Signal`, the remote and mcpworkspace
+  clients' of one their wire has no name for, and both servers' of a
+  name they do not know (remote answered `invalid`, mcpworkspace an
+  error of no kind). RFC 0001 §7 names the required set (`INT`, `TERM`,
+  `KILL`, `HUP`), and `workspacetest.RunStarter` sends each and checks
+  the refusal.
+
 - Added: the served workspace's reach crosses both wires. remote's info
   route carries `reach`, and `(*remote.Client).Reach` states it, so
   `agentworkspace.ReachOf` on a remote client is the served one's where

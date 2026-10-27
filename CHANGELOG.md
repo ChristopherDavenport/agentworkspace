@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.9 - 2026-10-26
 
 - Fixed: a `remote` process closed right after its start no longer
   loses its standard error (#24). Its `Command.Stream` gets everything

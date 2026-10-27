@@ -7,6 +7,18 @@ versions may break the API.
 
 ## Unreleased
 
+- Fixed: a `remote` client's `Exec` that its context interrupts now
+  returns the output the command wrote until its end, where it returned
+  none (#5, the wire half). The exec request carries a key the client
+  chooses, the server sends the reply's header once the key is taken,
+  and the new route `POST /v1/exec/{key}/cancel` ends the command as a
+  hang-up does; the client cancels, reads on to the output frame, which
+  now carries `interrupted`, and hangs up only when the cancel is
+  refused or late. A key is its principal's: another's cancel is
+  `no_process`. An exec without a key is ended by a hang-up, as before.
+  `workspacetest.Run` now checks the kept output over remote and tunnel
+  too. RFC 0001 §6 states the rule for every wire.
+
 - Added: `Descriptor.Host` and `Descriptor.Instance`, agentsession
   0.14's `workspace.host` and `workspace.instance` (#3). `Local` sets
   `Host` to the system's host name, or to `WithHost`'s, a new

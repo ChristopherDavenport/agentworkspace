@@ -1,6 +1,6 @@
 # RFC 0001: Workspace Contract
 
-Status: draft 0.2
+Status: draft 0.3
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding; `Local` is the reference backend, and
@@ -23,7 +23,9 @@ comments and package docs, with the module as the reference binding
 and its two wires, `remote` (HTTP) and `mcpworkspace` (MCP), as
 bindings given against it. Draft 0.1 added no rule that the code or
 its doc comments did not already state; draft 0.2 settles the issues
-listed under [changes since draft 0.1](#changes-since-draft-01). Where an open issue will add or change a rule, the section
+listed under [changes since draft 0.1](#changes-since-draft-01), and
+draft 0.3 those under [changes since draft 0.2](#changes-since-draft-02),
+the wires' half. Where an open issue will add or change a rule, the section
 says so in an **Open** note naming the issue, and the rule is written
 when that issue lands. Where the code and its doc comments disagree,
 the disagreement is listed under [open questions](#19-open-questions)
@@ -307,15 +309,19 @@ it ended:
   found) is an error, and nothing runs.
 
 A binding over a wire MUST deliver an interrupted command's output to
-the client, so its cancellation is a message, not a dropped connection.
-**Pending (#5, the wire half):** remote does not yet. `/v1/exec` sends
-its `{"output"}` frame only at the end, and the client hangs up when its
-context ends, so over remote an interrupted Exec returns −1 and
-*interrupted* with no output kept, beyond what a stream was given. The
-change gives exec a key and a cancel route, as processes already have
-`/cancel`, and the client reads on after it cancels. Until it lands,
-`workspacetest.Run` checks the kept output on every backend but a
-remote one.
+the client, so its cancellation is a message, not a dropped connection:
+the client names the command when it sends it, sends a cancel by that
+name when its context ends, and reads on until the outcome, which
+carries the output so far with *interrupted* set. The serving side
+MUST NOT run a cancel's command to its end, and MUST let a client that
+hangs up instead end the command as a cancel does; the output is then
+lost with the connection. A client MAY hang up when the cancel is
+refused or its outcome is late, past the ladder's two graces and the
+grace for output ([section 8](#8-ending-a-process)). A name is the
+principal's: another principal's cancel ends nothing. remote's exec
+carries a key, its reply's header is sent once the key is taken, and
+`POST /v1/exec/{key}/cancel` is the cancel (#5); `workspacetest.Run`
+checks the kept output on every backend, remote and tunnel among them.
 
 Open: #33 will give the mcpworkspace client an Exec composed over
 Start, held to this section.
@@ -682,7 +688,8 @@ does not repeat. In summary:
 | root, descriptor, bounds, environment | `GET /v1/info` | `read` or `servers`; environment only with `exec` |
 | files | `GET /v1/fs/{stat,lstat,readlink,readdir,file}?path=N` | `read` |
 | write, remove | `PUT`, `DELETE /v1/fs/file?path=N` | `write` |
-| exec | `POST /v1/exec`, NDJSON frames back: `{"data"}` for the stream, then one `{"output"}` or `{"error"}` | `exec` |
+| exec | `POST /v1/exec {…, key}`, NDJSON frames back: `{"data"}` for the stream, then one `{"output"}` or `{"error"}`; `output.interrupted` for a cancelled one | `exec` |
+| cancel an exec | `POST /v1/exec/{key}/cancel`, the principal's own key | `exec` |
 | list servers | `GET /v1/servers` | `servers` |
 | owner | a session, `POST /v1/sessions`, renewed on a lease; its lapse or close ends every process in it | `exec` or `servers` |
 | start | `POST /v1/sessions/{s}/processes`, keyed by the client | `exec` |
@@ -817,8 +824,6 @@ conforming client of the old wire cannot read takes a new one.
 
 The issues that will add or change a rule here:
 
-- #5, the wire half: remote carrying an interrupted Exec's output, by an
-  exec key and a cancel route ([section 6](#6-exec)).
 - #9: an offered server's isolation, beyond the trust rule
   ([section 13](#13-isolation-statement)); waits for a second product.
 - #23: the `secrets` mark on a listed server
@@ -865,6 +870,14 @@ Questions with no issue yet:
   Go client. A corpus of request and reply exchanges per wire, as
   agenttool keeps for schemas, would let another language check one
   without Go.
+
+## Changes since draft 0.2
+
+- [Section 6](#6-exec): a wire's cancel (#5, the wire half). A client
+  names its command, cancels it by that name and reads the output so
+  far; remote's exec takes a key, answers its header once the key is
+  taken, and has a cancel route, and its output frame carries
+  *interrupted*.
 
 ## Changes since draft 0.1
 

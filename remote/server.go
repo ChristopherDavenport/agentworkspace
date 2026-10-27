@@ -69,7 +69,14 @@ type Handler struct {
 	// count against the bounds of sessions until then.
 	ending    map[*session]struct{}
 	transfers int // the transfers being served
+	// execs are the Execs running under a key, by their principal's
+	// Name and the key, each the cancel of its context: the exec cancel
+	// route's.
+	execs map[execKey]context.CancelFunc
 }
+
+// execKey names one Exec running: its principal's Name and its key.
+type execKey struct{ owner, key string }
 
 var _ http.Handler = (*Handler)(nil)
 
@@ -169,6 +176,7 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 		maxTransfers:  DefaultMaxTransfers,
 		sessions:      map[string]*session{},
 		ending:        map[*session]struct{}{},
+		execs:         map[execKey]context.CancelFunc{},
 	}
 	for _, o := range opts {
 		if o != nil {
@@ -195,6 +203,7 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 	m.HandleFunc("PUT "+routeFile, h.need(ScopeWrite, typed(rawType, h.transfer(h.write))))
 	m.HandleFunc("DELETE "+routeFile, h.need(ScopeWrite, h.remove))
 	m.HandleFunc("POST "+routeExec, h.need(ScopeExec, typed(jsonType, h.transfer(h.exec))))
+	m.HandleFunc("POST "+routeExec+"/{key}/cancel", h.need(ScopeExec, typed(jsonType, h.cancelExec)))
 	m.HandleFunc("GET "+routeServers, h.need(ScopeServers, h.servers))
 	m.HandleFunc("POST "+routeSessions, h.needAny(sessionScopes, typed(jsonType, h.openSession)))
 	m.HandleFunc("POST "+routeSessions+"/{sid}/renew", h.needAny(sessionScopes, typed(jsonType, h.renewSession)))
@@ -714,7 +723,12 @@ func (h *Handler) remove(w http.ResponseWriter, r *http.Request) {
 // exec runs one command under the request's context, so a client that
 // goes ends it and everything it started, as does the handler's Close,
 // and answers in NDJSON frames: Command.Stream's output as it arrives,
-// when the client asked for it, then the Output or the error.
+// when the client asked for it, then the Output or the error. A request
+// with a key can be ended by the exec cancel route instead, as its
+// context's end ends it, and is answered with the Output an interrupted
+// command gives: the client that cancels reads it, where one that hangs
+// up gets nothing. The reply's header is sent once the key is taken, so
+// a client that has it knows a cancel will find the command.
 func (h *Handler) exec(w http.ResponseWriter, r *http.Request) {
 	done, ok := h.track()
 	if !ok {
@@ -733,6 +747,10 @@ func (h *Handler) exec(w http.ResponseWriter, r *http.Request) {
 	if !validTimeout(w, req.TimeoutMs) {
 		return
 	}
+	if req.Key != "" && !validKey(req.Key) {
+		writeError(w, wireError{Code: codeInvalid, Message: "a key that cannot name an exec"})
+		return
+	}
 	cmd := agentworkspace.Command{
 		Args:    req.Args,
 		Dir:     req.Dir,
@@ -740,16 +758,39 @@ func (h *Handler) exec(w http.ResponseWriter, r *http.Request) {
 		Stdin:   req.Stdin,
 		Timeout: time.Duration(req.TimeoutMs) * time.Millisecond,
 	}
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	fr := &frames{enc: json.NewEncoder(w), rc: http.NewResponseController(w)}
-	if req.Stream {
-		cmd.Stream = fr
-	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	defer context.AfterFunc(h.ctx, cancel)()
+	if req.Key != "" {
+		k := execKey{principalOf(r).Name, req.Key}
+		h.mu.Lock()
+		_, taken := h.execs[k]
+		if !taken {
+			h.execs[k] = cancel
+		}
+		h.mu.Unlock()
+		if taken {
+			writeError(w, wireError{Code: codeInvalid, Message: "an exec is running under that key"})
+			return
+		}
+		defer func() {
+			h.mu.Lock()
+			delete(h.execs, k)
+			h.mu.Unlock()
+		}()
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	fr := &frames{enc: json.NewEncoder(w), rc: http.NewResponseController(w)}
+	if req.Key != "" {
+		// The header says the key is taken.
+		w.WriteHeader(http.StatusOK)
+		fr.flush()
+	}
+	if req.Stream {
+		cmd.Stream = fr
+	}
 	out, err := h.ws.Exec(ctx, cmd)
-	if err != nil {
+	if err != nil && (out == nil || !out.Interrupted) {
 		e := errorOf(h.ws.Root(), err)
 		fr.send(execFrame{Error: &e})
 		return
@@ -760,7 +801,27 @@ func (h *Handler) exec(w http.ResponseWriter, r *http.Request) {
 			out.ExitCode, n, h.maxOutput)}})
 		return
 	}
-	fr.send(execFrame{Output: &execOutput{Stdout: out.Stdout, Stderr: out.Stderr, ExitCode: out.ExitCode, TimedOut: out.TimedOut}})
+	fr.send(execFrame{Output: &execOutput{Stdout: out.Stdout, Stderr: out.Stderr, ExitCode: out.ExitCode, TimedOut: out.TimedOut, Interrupted: out.Interrupted}})
+}
+
+// cancelExec ends the Exec r's principal runs under the route's key as
+// its context's end would: the command and what it started are ended,
+// and the Exec's reply carries the Output so far. An Exec that has
+// ended, or that is another principal's, is no_process.
+func (h *Handler) cancelExec(w http.ResponseWriter, r *http.Request) {
+	var req struct{}
+	if !decode(w, r, MaxRequestBytes, &req) {
+		return
+	}
+	h.mu.Lock()
+	cancel := h.execs[execKey{principalOf(r).Name, r.PathValue("key")}]
+	h.mu.Unlock()
+	if cancel == nil {
+		writeError(w, wireError{Code: codeNoProcess, Message: "no exec of this principal runs under that key"})
+		return
+	}
+	cancel()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // frames writes Exec's frames, each flushed as it is written. Its Write
@@ -770,6 +831,15 @@ type frames struct {
 	enc *json.Encoder
 	rc  *http.ResponseController
 	err error
+}
+
+// flush sends what is written so far: the header, before any frame.
+func (f *frames) flush() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err == nil {
+		f.err = f.rc.Flush()
+	}
 }
 
 func (f *frames) send(fr execFrame) error {

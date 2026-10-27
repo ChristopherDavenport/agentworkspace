@@ -30,7 +30,8 @@
 //	GET    /v1/fs/file?path=N                    read     a regular file's content, streamed
 //	PUT    /v1/fs/file?path=N&perm=M             write    the body is the content, at most the write bound; perm's permission bits alone
 //	DELETE /v1/fs/file?path=N                    write
-//	POST   /v1/exec                              exec     NDJSON frames back
+//	POST   /v1/exec                              exec     {args, dir, env, stdin, timeoutMs, stream, key} -> NDJSON frames
+//	POST   /v1/exec/{key}/cancel                 exec     ends the exec running under key as its context's end does; its reply carries the output so far
 //	GET    /v1/servers                           servers  -> {servers: [{name, description}]}, in the served order; unsupported when it is no ServerProvider
 //	POST   /v1/sessions                          either   -> {id, leaseMs}
 //	POST   /v1/sessions/{s}/renew                either
@@ -65,7 +66,12 @@
 // a line: {"data": base64} for Command.Stream's output as it arrives,
 // at most 32 KiB of it a frame, when the request asked for a stream,
 // then one {"output": {...}} or one {"error": {...}}, which is the
-// last. A refusal before the command runs is an HTTP error. A start
+// last. A refusal before the command runs is an HTTP error. An exec
+// with a key (chosen at random, as a start's) is the principal's to
+// cancel by it: the server sends the reply's header once the key is
+// taken, a cancel ends the command and what it started as a hang-up
+// would, and the reply goes on to its output frame, with interrupted
+// set and the output so far, which a hang-up loses. A start
 // carries a key the client chose at random, which becomes the
 // process's id: a start sent again is answered with the same process,
 // one whose reply was lost is closed by its key, and a key whose

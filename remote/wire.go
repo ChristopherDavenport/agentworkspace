@@ -200,6 +200,10 @@ type execRequest struct {
 	// Stream asks for the output as it arrives, in data frames, and
 	// none in the Output.
 	Stream bool `json:"stream,omitempty"`
+	// Key is the client's name for the exec, chosen at random as a
+	// start's is, which the exec cancel route ends it by; without one,
+	// only a hang-up ends it, and the output so far is lost with it.
+	Key string `json:"key,omitempty"`
 }
 
 // execFrame is one line of Exec's NDJSON reply: Command.Stream's
@@ -216,6 +220,8 @@ type execOutput struct {
 	Stderr   []byte `json:"stderr,omitempty"`
 	ExitCode int    `json:"exitCode"`
 	TimedOut bool   `json:"timedOut,omitempty"`
+	// Interrupted says a cancel, or the server's close, ended it.
+	Interrupted bool `json:"interrupted,omitempty"`
 }
 
 // startRequest is a process's start.

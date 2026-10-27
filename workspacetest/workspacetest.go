@@ -465,11 +465,6 @@ func execInterrupted(t *testing.T, ws agentworkspace.Workspace) {
 		var err error
 		within(t, 10*time.Second, "the interrupted Exec", func() { out, err = ws.Exec(ctx, cmd) })
 		check("kept", out, err)
-		if ws.Descriptor().Kind == agentworkspace.KindRemote {
-			// remote's wire carries no output past the hang-up yet: #5's
-			// wire change, an exec key and a cancel route, is to come.
-			return
-		}
 		if out != nil && (string(out.Stdout) != "started\n" || string(out.Stderr) != "also\n") {
 			t.Errorf("kept: the output so far = %q, %q", out.Stdout, out.Stderr)
 		}

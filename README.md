@@ -87,6 +87,19 @@ an interface of its own, beside `Workspace` as `fs.ReadLinkFS` is beside
 `fs.FS`, so a workspace that only stores files, or a runtime that runs
 one command at a time, is still a `Workspace`.
 
+A command started with `Command.Terminal` runs on a pseudo-terminal of
+that size, its standard error merged into its output, and
+`agentworkspace.Resize` changes the size; a backend that cannot give
+one refuses the start with `errors.ErrUnsupported` rather than run it
+on pipes. A workspace that is a `Connector` opens a byte stream to a
+TCP port on its loopback (`agentworkspace.Connect`), and `Forward`
+exposes one on this machine's loopback alone:
+
+```go
+ln, err := agentworkspace.Forward(ctx, ws, 8080) // a dev server in the workspace
+// ln.Addr() is 127.0.0.1:<port>; each connection to it is a stream to 8080 there.
+```
+
 ## Servers a workspace offers
 
 A workspace may hold MCP servers of its own, such as one installed in a
@@ -178,7 +191,10 @@ err := procs.Register(srv)
 err = mcpworkspace.RegisterClient(client)
 // ... then, once it has, with a context that ends with the connection:
 done, end := context.WithCancel(context.Background())
-p, err := mcpworkspace.Start(ctx, mcpworkspace.Conn{Session: cs, Bounds: wire.DefaultBounds(), Done: done}, cmd)
+c := mcpworkspace.Conn{Session: cs, Bounds: wire.DefaultBounds(), Done: done}
+c.Reach, c.Bounds, err = mcpworkspace.ProcessInfo(ctx, cs) // what the server keeps
+p, err := mcpworkspace.Start(ctx, c, cmd)
+out, err := mcpworkspace.Exec(ctx, c, cmd) // Workspace.Exec's rules, over the process methods
 fsys := mcpworkspace.NewFS(mcpworkspace.SessionSource(cs))
 
 // And to hang up: end Done (or close every process) first, since the

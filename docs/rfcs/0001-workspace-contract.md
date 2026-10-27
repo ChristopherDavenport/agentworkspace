@@ -877,10 +877,10 @@ The reference suite is Go package `workspacetest`:
 
 | Table | Holds |
 | --- | --- |
-| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names, the descriptor's members for its kind, concurrent use |
-| `RunStarter` | a starter: the pipes, the directory and environment (argv resolution, the environment as given), the lifetimes (context, timeout, close, exit, the workspace's close, a descendant that left the group), signals, refusals, concurrency |
+| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names, the descriptor's members for its kind and an absolute root, concurrent use, refusals that name no served path over a wire (`Backend.Wire`), connect where offered |
+| `RunStarter` | a starter: the pipes, the directory and environment (argv resolution, the environment as given), the lifetimes (context, timeout, close, exit, the workspace's close, a descendant that left the group), the required signals and the refusal of others, a terminal, refusals, concurrency |
 | `RunExec` | the Exec table alone, over an `Execer`: a wire's client that carries Exec without a whole workspace (mcpworkspace's) |
-| `RunServerProvider` | a server provider: the list, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
+| `RunServerProvider` | a server provider: the list and its secrets mark, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
 | `Confined` | the layout `Run` uses: a workspace beside a directory holding a secret, with links that lead out and one that stays in |
 
 A backend runs the tables from its own tests, as `Local`, remote, the
@@ -899,8 +899,22 @@ themselves checked. A server that speaks mcpworkspace's methods is
 reached with the mcpworkspace client: `RunServerProvider` and
 `RunExec` run over it, while its other process methods and its files
 are checked by mcpworkspace's own tests, since its client is not a
-workspace. A fixture corpus of wire exchanges, checkable
-without Go, is an open question.
+workspace.
+
+**The wire corpus.** A server or a client in any language can check
+itself without Go against the corpus of each wire: request and reply
+exchanges, in order, over a served workspace laid out as the file's
+`doc` says, covering every operation and every error kind
+(#42). `testdata/wire/remote.json` holds remote's (method, path, token,
+body; status and reply), and `mcpworkspace/testdata/wire/mcpworkspace.json`
+mcpworkspace's (JSON-RPC method and params after an MCP
+initialization; result or error). A server replays the requests and
+compares its replies, with what differs between servers or runs
+(`${root}`, `${host}`, `${PATH}`, `${session}`, `*`) as placeholders; a
+client maps each reply's refusal to its kind. The reference server and
+client replay it in `remote/corpus_test.go` and
+`mcpworkspace/corpus_test.go`, so it stays true; `-update` records the
+replies of a changed server for review.
 
 Open: #30 will hold a container backend to `Run` and `RunStarter`, to
 [section 12](#12-descriptor)'s members, and to ending its instance at
@@ -941,13 +955,10 @@ The issues that will add or change a rule here:
   ended at close.
 - #34: named roots ([section 10](#10-roots)).
 
-
-Questions with no issue yet:
-
-- **A wire fixture corpus.** A non-Go server is checked only through a
-  Go client. A corpus of request and reply exchanges per wire, as
-  agenttool keeps for schemas, would let another language check one
-  without Go.
+Draft 0.2 listed four places where the code and its doc comments
+disagreed (the root, error kinds and messages over mcpworkspace, the
+signals), and two questions with no issue (reach over a wire, a wire
+corpus); draft 0.3 settles each, as its changes below say.
 
 ## Changes since draft 0.2
 
@@ -984,6 +995,9 @@ Questions with no issue yet:
   as a process of the session and granted with `exec`; a forwarder
   binds the loopback alone; a relay through a started process is a
   fallback binding, not the contract (#31).
+- [Section 16](#16-conformance): the wire corpus (#42), request and
+  reply exchanges per wire, replayed by the reference server and
+  client.
 - [Section 2](#error-kinds): every wire carries every kind both ways
   (#38). mcpworkspace's files carry the nine, and its process and
   server methods carry them too, as JSON-RPC error `-32011` with a

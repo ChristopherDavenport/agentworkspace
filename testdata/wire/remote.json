@@ -1,0 +1,869 @@
+{
+  "doc": [
+    "The exchanges of RFC 0001's remote wire, in order, against a served workspace laid out as:",
+    "inside.txt (ok), sub/a.txt (a), alias.txt -> inside.txt, linkout -> ../outside/secret.txt;",
+    "kind/<code> refused with that code's kind, its served text naming /srv/hidden/kind/<code>;",
+    "an environment of PATH and A=1, a host corpus-host, a lease of a minute, an exec output bound of 64 bytes and a session bound of two processes.",
+    "Tokens: all (every scope), read, servers. A reply is JSON as it is, NDJSON as the array of its lines, raw bytes as a string, none as absent;",
+    "${root}, ${host}, ${PATH} and ${session} stand for what differs between servers, and * for what differs between runs.",
+    "remote/corpus_test.go replays it against the reference server, and maps its refusals back through the reference client."
+  ],
+  "exchanges": [
+    {
+      "name": "info, to a principal holding every scope",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/info",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "connect": true,
+        "env": [
+          "PATH=${PATH}",
+          "A=1"
+        ],
+        "limits": {
+          "leaseMs": 60000,
+          "maxDirEntries": 10000,
+          "maxOutputBytes": 64,
+          "maxProcesses": 2,
+          "maxWriteBytes": 33554432
+        },
+        "links": true,
+        "reach": "*",
+        "root": "${root}",
+        "scopes": [
+          "read",
+          "write",
+          "exec",
+          "servers"
+        ],
+        "served": {
+          "host": "${host}",
+          "kind": "local",
+          "root": "${root}"
+        },
+        "start": true
+      }
+    },
+    {
+      "name": "info, to a principal holding servers alone: the root withheld, no host, no environment",
+      "token": "servers",
+      "method": "GET",
+      "path": "/v1/info",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "limits": {
+          "leaseMs": 60000,
+          "maxDirEntries": 10000,
+          "maxOutputBytes": 64,
+          "maxProcesses": 2,
+          "maxWriteBytes": 33554432
+        },
+        "links": true,
+        "reach": "*",
+        "root": "work",
+        "scopes": [
+          "servers"
+        ],
+        "served": {
+          "kind": "local",
+          "root": "work"
+        },
+        "start": false
+      }
+    },
+    {
+      "name": "no credentials: unauthenticated",
+      "method": "GET",
+      "path": "/v1/info",
+      "status": 401,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "unauthenticated",
+          "message": "remote: unauthenticated"
+        }
+      }
+    },
+    {
+      "name": "stat a file",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=inside.txt",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "modTime": "*",
+        "mode": 420,
+        "name": "inside.txt",
+        "size": 2
+      }
+    },
+    {
+      "name": "lstat a link",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/lstat?path=alias.txt",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "modTime": "*",
+        "mode": 134218239,
+        "name": "alias.txt",
+        "size": 10
+      }
+    },
+    {
+      "name": "readlink",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/readlink?path=alias.txt",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "target": "inside.txt"
+      }
+    },
+    {
+      "name": "readdir",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/readdir?path=sub",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "entries": [
+          {
+            "modTime": "*",
+            "mode": 420,
+            "name": "a.txt",
+            "size": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "read a file",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/file?path=inside.txt",
+      "status": 200,
+      "form": "raw",
+      "reply": "ok"
+    },
+    {
+      "name": "a name that leaves: outside",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=../x",
+      "status": 403,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "outside",
+          "message": "path is outside the workspace"
+        }
+      }
+    },
+    {
+      "name": "a link that leads out: outside",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=linkout",
+      "status": 403,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "outside",
+          "message": "path is outside the workspace"
+        }
+      }
+    },
+    {
+      "name": "nothing by that name: not_exist",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=missing",
+      "status": 404,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "not_exist",
+          "message": "no such file or directory"
+        }
+      }
+    },
+    {
+      "name": "a name that is not valid: invalid",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=a/../b",
+      "status": 400,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "invalid",
+          "message": "invalid argument"
+        }
+      }
+    },
+    {
+      "name": "a refusal of kind exist, its served text naming /srv/hidden: the kind's words alone",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=kind/exist",
+      "status": 409,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "exist",
+          "message": "file already exists"
+        }
+      }
+    },
+    {
+      "name": "a refusal of kind permission, its served text naming /srv/hidden: the kind's words alone",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=kind/permission",
+      "status": 403,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "permission",
+          "message": "permission denied"
+        }
+      }
+    },
+    {
+      "name": "a refusal of kind unsupported, its served text naming /srv/hidden: the kind's words alone",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=kind/unsupported",
+      "status": 501,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "unsupported",
+          "message": "unsupported operation"
+        }
+      }
+    },
+    {
+      "name": "a refusal of kind process_done, its served text naming /srv/hidden: the kind's words alone",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=kind/process_done",
+      "status": 409,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "process_done",
+          "message": "os: process already finished"
+        }
+      }
+    },
+    {
+      "name": "a refusal of kind closed, its served text naming /srv/hidden: the kind's words alone",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=kind/closed",
+      "status": 410,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "closed",
+          "message": "file already closed"
+        }
+      }
+    },
+    {
+      "name": "a refusal of kind no_server, its served text naming /srv/hidden: the kind's words alone",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=kind/no_server",
+      "status": 404,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "no_server",
+          "message": "no such server in this workspace"
+        }
+      }
+    },
+    {
+      "name": "write a file",
+      "token": "all",
+      "method": "PUT",
+      "path": "/v1/fs/file?path=new.txt&perm=420",
+      "type": "application/octet-stream",
+      "raw": "new",
+      "status": 204,
+      "form": "none"
+    },
+    {
+      "name": "read it back",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/file?path=new.txt",
+      "status": 200,
+      "form": "raw",
+      "reply": "new"
+    },
+    {
+      "name": "remove it",
+      "token": "all",
+      "method": "DELETE",
+      "path": "/v1/fs/file?path=new.txt",
+      "status": 204,
+      "form": "none"
+    },
+    {
+      "name": "write without the write scope: forbidden",
+      "token": "read",
+      "method": "PUT",
+      "path": "/v1/fs/file?path=new.txt&perm=420",
+      "type": "application/octet-stream",
+      "raw": "new",
+      "status": 403,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "forbidden",
+          "message": "remote: the principal lacks the write scope"
+        }
+      }
+    },
+    {
+      "name": "a JSON route sent another type: media_type",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions",
+      "type": "text/plain",
+      "raw": "{}",
+      "status": 415,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "media_type",
+          "message": "the body must be application/json"
+        }
+      }
+    },
+    {
+      "name": "list servers of a workspace that offers none: unsupported",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/servers",
+      "status": 501,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "unsupported",
+          "message": "unsupported operation"
+        }
+      }
+    },
+    {
+      "name": "exec: its status and both streams",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sh",
+          "-c",
+          "echo out; echo err >&2; exit 3"
+        ]
+      },
+      "status": 200,
+      "form": "ndjson",
+      "reply": [
+        {
+          "output": {
+            "exitCode": 3,
+            "stderr": "ZXJyCg==",
+            "stdout": "b3V0Cg=="
+          }
+        }
+      ]
+    },
+    {
+      "name": "exec with a stream: data frames, then the output",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sh",
+          "-c",
+          "echo a"
+        ],
+        "stream": true
+      },
+      "status": 200,
+      "form": "ndjson",
+      "reply": [
+        {
+          "data": "YQo="
+        },
+        {
+          "output": {
+            "exitCode": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "exec in a dir below the root",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "ls"
+        ],
+        "dir": "sub"
+      },
+      "status": 200,
+      "form": "ndjson",
+      "reply": [
+        {
+          "output": {
+            "exitCode": 0,
+            "stdout": "YS50eHQK"
+          }
+        }
+      ]
+    },
+    {
+      "name": "exec in a dir that leaves: an error frame",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "pwd"
+        ],
+        "dir": ".."
+      },
+      "status": 200,
+      "form": "ndjson",
+      "reply": [
+        {
+          "error": {
+            "code": "outside",
+            "message": "path is outside the workspace"
+          }
+        }
+      ]
+    },
+    {
+      "name": "exec whose output is over the bound: limit",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sh",
+          "-c",
+          "printf '%0100d' 0"
+        ]
+      },
+      "status": 200,
+      "form": "ndjson",
+      "reply": [
+        {
+          "error": {
+            "code": "limit",
+            "message": "the command exited with status 0, but its output is 100 bytes, over the 64 an Exec without a Stream gives back; give it a Stream"
+          }
+        }
+      ]
+    },
+    {
+      "name": "exec with a negative timeout: invalid",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "true"
+        ],
+        "timeoutMs": -1
+      },
+      "status": 400,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "invalid",
+          "message": "a timeout below zero or past what a duration holds"
+        }
+      }
+    },
+    {
+      "name": "cancel an exec no one runs: no_process",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec/corpusnoexecaaaa1/cancel",
+      "type": "application/json",
+      "body": {},
+      "status": 404,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "no_process",
+          "message": "no exec of this principal runs under that key"
+        }
+      }
+    },
+    {
+      "name": "open a session",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions",
+      "type": "application/json",
+      "body": {},
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "id": "${session}",
+        "leaseMs": 60000
+      }
+    },
+    {
+      "name": "start cat",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "cat"
+        ],
+        "key": "corpuscatkeyaaaa1"
+      },
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "id": "corpuscatkeyaaaa1"
+      }
+    },
+    {
+      "name": "its input, to its end",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes/corpuscatkeyaaaa1/stdin",
+      "type": "application/octet-stream",
+      "raw": "abc",
+      "status": 204,
+      "form": "none"
+    },
+    {
+      "name": "its output, to its end",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpuscatkeyaaaa1/stdout",
+      "status": 200,
+      "form": "raw",
+      "reply": "abc"
+    },
+    {
+      "name": "its wait",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpuscatkeyaaaa1/wait",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "status": 0
+      }
+    },
+    {
+      "name": "a signal after its exit: process_done",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes/corpuscatkeyaaaa1/signal",
+      "type": "application/json",
+      "body": {
+        "signal": "TERM"
+      },
+      "status": 409,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "process_done",
+          "message": "os: process already finished"
+        }
+      }
+    },
+    {
+      "name": "a resize of a process with no terminal: unsupported",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes/corpuscatkeyaaaa1/resize",
+      "type": "application/json",
+      "body": {
+        "rows": 24,
+        "cols": 80
+      },
+      "status": 501,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "unsupported",
+          "message": "unsupported operation"
+        }
+      }
+    },
+    {
+      "name": "its close",
+      "token": "all",
+      "method": "DELETE",
+      "path": "/v1/sessions/${session}/processes/corpuscatkeyaaaa1",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "status": 0
+      }
+    },
+    {
+      "name": "a closed process: no_process",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpuscatkeyaaaa1/wait",
+      "status": 404,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "no_process",
+          "message": "remote: no such process in this session"
+        }
+      }
+    },
+    {
+      "name": "start a sleeper",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sleep",
+          "30"
+        ],
+        "key": "corpussleepaaaa01"
+      },
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "id": "corpussleepaaaa01"
+      }
+    },
+    {
+      "name": "start another",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sleep",
+          "30"
+        ],
+        "key": "corpussleepaaaa02"
+      },
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "id": "corpussleepaaaa02"
+      }
+    },
+    {
+      "name": "a third, past the session's bound of two: limit",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sleep",
+          "30"
+        ],
+        "key": "corpussleepaaaa03"
+      },
+      "status": 413,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "limit",
+          "message": "2 processes are open or closing in this session, the most there may be; close one first"
+        }
+      }
+    },
+    {
+      "name": "a signal the wire does not carry: unsupported",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes/corpussleepaaaa01/signal",
+      "type": "application/json",
+      "body": {
+        "signal": "SEGV"
+      },
+      "status": 501,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "unsupported",
+          "message": "no signal named \"SEGV\" is carried"
+        }
+      }
+    },
+    {
+      "name": "a cancel: ended as its context's end ends it",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes/corpussleepaaaa01/cancel",
+      "type": "application/json",
+      "body": {},
+      "status": 204,
+      "form": "none"
+    },
+    {
+      "name": "its wait says canceled",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpussleepaaaa01/wait",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "ended": "canceled",
+        "status": -1
+      }
+    },
+    {
+      "name": "its close",
+      "token": "all",
+      "method": "DELETE",
+      "path": "/v1/sessions/${session}/processes/corpussleepaaaa01",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "ended": "canceled",
+        "status": -1
+      }
+    },
+    {
+      "name": "a signal it carries",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes/corpussleepaaaa02/signal",
+      "type": "application/json",
+      "body": {
+        "signal": "KILL"
+      },
+      "status": 204,
+      "form": "none"
+    },
+    {
+      "name": "its wait",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpussleepaaaa02/wait",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "status": -1
+      }
+    },
+    {
+      "name": "its close",
+      "token": "all",
+      "method": "DELETE",
+      "path": "/v1/sessions/${session}/processes/corpussleepaaaa02",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "status": -1
+      }
+    },
+    {
+      "name": "connect to port 0: invalid",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/connect",
+      "type": "application/json",
+      "body": {
+        "port": 0,
+        "key": "corpusconnaaaaa01"
+      },
+      "status": 400,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "invalid",
+          "message": "invalid argument"
+        }
+      }
+    },
+    {
+      "name": "the session, to another principal: no_session",
+      "token": "servers",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpussleepaaaa02/wait",
+      "status": 404,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "no_session",
+          "message": "remote: no such session"
+        }
+      }
+    },
+    {
+      "name": "renew the session",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/renew",
+      "type": "application/json",
+      "body": {},
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "leaseMs": 60000
+      }
+    },
+    {
+      "name": "close the session",
+      "token": "all",
+      "method": "DELETE",
+      "path": "/v1/sessions/${session}",
+      "status": 204,
+      "form": "none"
+    },
+    {
+      "name": "renew a closed session: no_session",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/renew",
+      "type": "application/json",
+      "body": {},
+      "status": 404,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "no_session",
+          "message": "remote: no such session"
+        }
+      }
+    }
+  ]
+}

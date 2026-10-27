@@ -7,6 +7,16 @@ versions may break the API.
 
 ## Unreleased
 
+- Added: the wire corpus (#42). `testdata/wire/remote.json` and
+  `mcpworkspace/testdata/wire/mcpworkspace.json` hold request and reply
+  exchanges for each wire, every operation and every error kind, over
+  a layout each file describes, for a server or client in another
+  language to check itself without Go. `TestTheWireCorpus` replays the
+  requests against the reference server (`-update` records the
+  replies), and `TestTheCorpusRefusalsMapBack` maps every refusal in it
+  back through the reference client and checks no served path is in
+  one. RFC 0001 §16 points at it.
+
 - Added: `connect(port)` (#31). `Connector`, `PortConn` (a stream with
   `CloseWrite`), `Connect(ctx, ws, port)` and `Local.Connect`, which
   dials the port on this machine's loopback, and `Forward(ctx, ws,

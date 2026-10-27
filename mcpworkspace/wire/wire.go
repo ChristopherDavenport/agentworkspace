@@ -12,7 +12,7 @@
 // be offered to the model of any harness connected to the server, and
 // starting a process is arbitrary execution. The methods are:
 //
-//	agentworkspace/process.start      {args, dir?, env?, timeoutMs?, stderr?} -> {id}
+//	agentworkspace/process.start      {args, dir?, env?, timeoutMs?, stderr?, terminal?: {rows, cols}} -> {id}
 //	agentworkspace/process.write      {id, data (base64, at most MaxWriteBytes)} -> {}
 //	agentworkspace/process.read       {id, fd: 1|2, max?} -> {data?, eof?}
 //	agentworkspace/process.closeStdin {id} -> {}
@@ -21,6 +21,7 @@
 //	agentworkspace/process.close      {id} -> {status, ended?, error?, stderr?}
 //	agentworkspace/process.cancel     {id} -> {}
 //	agentworkspace/process.info       {} -> {reach?, bounds}
+//	agentworkspace/process.resize     {id, rows, cols} -> {}
 //
 // A read is a long poll: it returns as soon as there is output, at most
 // max bytes (at most MaxReadBytes), or end of file, and waits otherwise.
@@ -30,7 +31,11 @@
 // the ladder begins at INT, with its input left open, and the process
 // stays in the table, so its output is read to its end and its wait
 // says EndedCanceled; a cancel of one that has exited changes nothing.
-// Info says what the server keeps: how far its end of a process reaches
+// A start with a terminal runs the process on a pseudo-terminal of that
+// size (agentworkspace.Command.Terminal): fd 1 is the terminal's
+// output, standard error merged into it, and a resize changes its
+// size; a server that cannot give one refuses the start as
+// KindUnsupported. Info says what the server keeps: how far its end of a process reaches
 // (agentworkspace.Reach's values; absent for a workspace that says
 // none) and its bounds. Each MCP session has its
 // own table of processes, at most MaxProcesses open at once: an id
@@ -95,12 +100,13 @@ const (
 	MethodClose      = MethodPrefix + "close"
 	MethodCancel     = MethodPrefix + "cancel"
 	MethodInfo       = MethodPrefix + "info"
+	MethodResize     = MethodPrefix + "resize"
 )
 
 // Methods are the process methods, in the order above, as a new slice
 // each call.
 func Methods() []string {
-	return []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose, MethodCancel, MethodInfo}
+	return []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose, MethodCancel, MethodInfo, MethodResize}
 }
 
 // ServersPrefix begins every server method.
@@ -257,6 +263,20 @@ type StartArgs struct {
 	// Stderr asks for the process's standard error, read as fd 2;
 	// without it, it is discarded.
 	Stderr bool `json:"stderr,omitempty"`
+	// Terminal asks for a pseudo-terminal of this size.
+	Terminal *TerminalSize `json:"terminal,omitempty"`
+}
+
+// TerminalSize is a terminal's size in character cells.
+type TerminalSize struct {
+	Rows uint16 `json:"rows"`
+	Cols uint16 `json:"cols"`
+}
+
+// ResizeArgs is process.resize's parameters.
+type ResizeArgs struct {
+	ID string `json:"id"`
+	TerminalSize
 }
 
 // Started is process.start's result.

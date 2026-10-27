@@ -46,8 +46,11 @@ const outputDelay = lifetime.Grace
 // session's end, its own close) is an Output with Interrupted beside an
 // error that is fs.ErrClosed.
 func Exec(ctx context.Context, c Conn, cmd agentworkspace.Command) (*agentworkspace.Output, error) {
-	if len(cmd.Args) == 0 {
+	switch {
+	case len(cmd.Args) == 0:
 		return nil, errors.New("mcpworkspace: no command")
+	case cmd.Terminal != nil:
+		return nil, fmt.Errorf("mcpworkspace: exec %s: Exec gives standard output and standard error apart; a terminal is Start's: %w", cmd.Args[0], errors.ErrUnsupported)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

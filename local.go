@@ -215,6 +215,9 @@ func (l *Local) Remove(_ context.Context, name string) error {
 // seconds past the command's exit for output its children still hold
 // open.
 func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
+	if c.Terminal != nil {
+		return nil, fmt.Errorf("agentworkspace: Exec gives standard output and standard error apart; a terminal is Start's: %w", errors.ErrUnsupported)
+	}
 	dir, env, prog, err := l.prepare(c)
 	if err != nil {
 		return nil, err

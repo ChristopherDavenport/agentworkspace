@@ -91,9 +91,11 @@ func Start(ctx context.Context, c Conn, cmd agentworkspace.Command) (agentworksp
 	}
 	sctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	res, err := mcp.CallCustomMethod[*StartParams, *StartResult](sctx, c.Session, wire.MethodStart, &StartParams{StartArgs: wire.StartArgs{
-		Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: cmd.Timeout.Milliseconds(), Stderr: cmd.Stream != nil,
-	}})
+	args := wire.StartArgs{Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: cmd.Timeout.Milliseconds(), Stderr: cmd.Stream != nil}
+	if t := cmd.Terminal; t != nil {
+		args.Terminal = &wire.TerminalSize{Rows: t.Rows, Cols: t.Cols}
+	}
+	res, err := mcp.CallCustomMethod[*StartParams, *StartResult](sctx, c.Session, wire.MethodStart, &StartParams{StartArgs: args})
 	if err != nil {
 		return nil, fmt.Errorf("start %s: %w", cmd.Args[0], fromWire(err))
 	}
@@ -320,6 +322,19 @@ func (p *process) Signal(sig os.Signal) error {
 	}
 	if r.Done {
 		return os.ErrProcessDone
+	}
+	return nil
+}
+
+// Resize changes the size of the process's terminal, as the served
+// process's Resize does: errors.ErrUnsupported for one started with no
+// terminal.
+func (p *process) Resize(size agentworkspace.TerminalSize) error {
+	ctx, cancel := context.WithTimeout(p.ctx, requestTimeout)
+	defer cancel()
+	_, err := mcp.CallCustomMethod[*ResizeParams, *EmptyResult](ctx, p.c.Session, wire.MethodResize, &ResizeParams{ResizeArgs: wire.ResizeArgs{ID: p.id, TerminalSize: wire.TerminalSize{Rows: size.Rows, Cols: size.Cols}}})
+	if err != nil {
+		return p.c.Err(fromWire(err))
 	}
 	return nil
 }

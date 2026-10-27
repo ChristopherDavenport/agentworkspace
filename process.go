@@ -241,9 +241,16 @@ func closedWithin(ch <-chan struct{}, d time.Duration) bool {
 // ladder (SIGINT, SIGTERM, SIGKILL, a grace apart), which Close
 // begins by closing the process's input; when it exits by itself,
 // anything left in its group is killed.
+//
+// With Command.Terminal, on Linux, the process runs in a session of its
+// own on a pseudo-terminal; elsewhere the start is
+// errors.ErrUnsupported.
 func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
-	if c.Stdin != nil {
+	switch {
+	case c.Stdin != nil:
 		return nil, errors.New("agentworkspace: Start takes no Command.Stdin; write to Process.Stdin")
+	case c.Terminal != nil && c.Stream != nil:
+		return nil, fmt.Errorf("agentworkspace: a terminal merges standard error into its output; Command.Stream is refused beside it: %w", fs.ErrInvalid)
 	}
 	dir, env, prog, err := l.prepare(c)
 	if err != nil {
@@ -255,6 +262,9 @@ func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 	cancel := context.CancelFunc(func() {})
 	if c.Timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
+	}
+	if c.Terminal != nil {
+		return l.startTerminal(ctx, cancel, c, dir, env, prog)
 	}
 	// os.Pipe rather than exec's StdinPipe and StdoutPipe: exec closes
 	// those when the process exits, which would cut a reader short of
@@ -350,8 +360,9 @@ type localProcess struct {
 	owner  *Local
 	cmd    *exec.Cmd
 	group  *group
-	stdin  *os.File // the write end
-	stdout *os.File // the read end
+	stdin  io.WriteCloser // the write end, or the terminal's input
+	stdout io.ReadCloser  // the read end, or the terminal's output
+	term   *os.File       // the terminal's master, nil without one
 
 	mu     sync.Mutex
 	exited bool  // the process has been reaped

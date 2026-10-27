@@ -36,7 +36,7 @@
 //	POST   /v1/sessions                          either   -> {id, leaseMs}
 //	POST   /v1/sessions/{s}/renew                either
 //	DELETE /v1/sessions/{s}                      either   ends every process it started
-//	POST   /v1/sessions/{s}/processes            exec     {args, dir, env, timeoutMs, stderr, key} -> {id}, the key
+//	POST   /v1/sessions/{s}/processes            exec     {args, dir, env, timeoutMs, stderr, terminal: {rows, cols}, key} -> {id}, the key
 //	POST   /v1/sessions/{s}/servers/{n}/start    servers  {stderr, key} -> {id}, the key: the server called n, a process of the session
 //	POST   /v1/sessions/{s}/processes/{p}/stdin  its own  the body, streamed to its input; its end is end of file
 //	GET    /v1/sessions/{s}/processes/{p}/stdout its own  its output, streamed
@@ -44,6 +44,7 @@
 //	GET    /v1/sessions/{s}/processes/{p}/wait   its own  a long poll -> {status, ended?, error?}, the same each time; one at a time: another while one waits is invalid, ask again
 //	POST   /v1/sessions/{s}/processes/{p}/signal its own  {signal: "TERM"}, a name: HUP INT QUIT KILL USR1 USR2 PIPE ALRM TERM CONT STOP TSTP WINCH
 //	POST   /v1/sessions/{s}/processes/{p}/cancel its own  ends it as its context's end does
+//	POST   /v1/sessions/{s}/processes/{p}/resize its own  {rows, cols}: its terminal's size; unsupported for one with none
 //	DELETE /v1/sessions/{s}/processes/{p}        its own  ends it as Process.Close does -> {status, ...}
 //
 // A session's routes take exec or servers, either one ("either"). A

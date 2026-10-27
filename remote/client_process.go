@@ -60,9 +60,13 @@ func (c *Client) start(ctx context.Context, cmd agentworkspace.Command) (agentwo
 	case len(cmd.Args) == 0:
 		return nil, errors.New("remote: no command")
 	}
+	var term *terminalSize
+	if t := cmd.Terminal; t != nil {
+		term = &terminalSize{Rows: t.Rows, Cols: t.Cols}
+	}
 	return c.launch(ctx, "start "+cmd.Args[0], "/processes", cmd.Stream, func(key string) any {
 		return startRequest{
-			Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: millis(cmd.Timeout), Stderr: cmd.Stream != nil, Key: key,
+			Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: millis(cmd.Timeout), Stderr: cmd.Stream != nil, Terminal: term, Key: key,
 		}
 	})
 }
@@ -196,6 +200,20 @@ func (p *process) Signal(sig os.Signal) error {
 	ctx, cancel := context.WithTimeout(p.ctx, p.c.timeout)
 	defer cancel()
 	return p.c.call(ctx, http.MethodPost, p.route+"/signal", nil, signalRequest{Signal: name}, nil)
+}
+
+// Resize changes the size of the process's terminal, as the served
+// process's Resize does: errors.ErrUnsupported for one started with no
+// terminal.
+func (p *process) Resize(size agentworkspace.TerminalSize) error {
+	select {
+	case <-p.done:
+		return os.ErrProcessDone
+	default:
+	}
+	ctx, cancel := context.WithTimeout(p.ctx, p.c.timeout)
+	defer cancel()
+	return p.c.call(ctx, http.MethodPost, p.route+"/resize", nil, terminalSize{Rows: size.Rows, Cols: size.Cols}, nil)
 }
 
 // Close ends the process, if it is still running, and everything it

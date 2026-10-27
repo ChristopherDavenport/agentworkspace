@@ -56,6 +56,7 @@ func RunStarter(t *testing.T, starters ...Starter) {
 		{"FindsItsProgramOnItsOwnPath", []string{"A=1"}, false, findsItsProgramOnItsOwnPath},
 		{"EnvIsWhatItWasGiven", givenEnv, false, envIsWhatItWasGiven},
 		{"EndsWhatLeftItsGroup", path, false, startEndsWhatLeftItsGroup},
+		{"Terminal", path, false, startTerminal},
 	} {
 		t.Run(table.name, func(t *testing.T) {
 			if table.secret {
@@ -425,4 +426,76 @@ func readLine(t *testing.T, p agentworkspace.Process) {
 			t.Errorf("a line of output: %v", err)
 		}
 	})
+}
+
+// A command started with a terminal has it as its controlling terminal,
+// of the size given and then of the size a resize gives, its standard
+// error merged into its output; Exec, and a Stream beside it, are
+// refused. A starter that cannot give a terminal refuses the start as
+// unsupported, and the case is skipped; it never runs the command on
+// pipes.
+func startTerminal(t *testing.T, s agentworkspace.Starter, _ string) {
+	ctx := context.Background()
+	cmd := agentworkspace.Command{
+		Args:     []string{"sh", "-c", `stty size; tty >/dev/null && echo a terminal; echo err >&2; read x; stty size`},
+		Terminal: &agentworkspace.TerminalSize{Rows: 24, Cols: 80},
+	}
+	p, err := s.Start(ctx, cmd)
+	if errors.Is(err, errors.ErrUnsupported) {
+		t.Skipf("no terminal here: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	out := bufio.NewReader(p.Stdout())
+	// line is the next line that is not empty, its terminal's \r cut.
+	line := func() string {
+		t.Helper()
+		var got string
+		within(t, 10*time.Second, "a line from the terminal", func() {
+			for got == "" {
+				l, err := out.ReadString('\n')
+				if err != nil {
+					t.Errorf("reading the terminal: %q, %v", l, err)
+					return
+				}
+				got = strings.TrimRight(l, "\r\n")
+			}
+		})
+		return got
+	}
+	for _, want := range []string{"24 80", "a terminal", "err"} {
+		if got := line(); got != want {
+			t.Errorf("the terminal said %q, want %q", got, want)
+		}
+	}
+	if err := agentworkspace.Resize(p, agentworkspace.TerminalSize{Rows: 30, Cols: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(p.Stdin(), "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := line(); got != "30 100" {
+		t.Errorf("after the resize the terminal said %q, want 30 100", got)
+	}
+	within(t, 10*time.Second, "the process's exit", func() {
+		if status, err := p.Wait(); status != 0 || err != nil {
+			t.Errorf("Wait = %d, %v", status, err)
+		}
+	})
+
+	c := cmd
+	c.Stream = io.Discard
+	if q, err := s.Start(ctx, c); err == nil {
+		q.Close()
+		t.Error("a Stream beside a terminal was taken")
+	}
+	if _, err := s.Exec(ctx, cmd); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("Exec with a terminal: %v, want errors.ErrUnsupported", err)
+	}
+	plain := start(t, ctx, s, agentworkspace.Command{Args: []string{"sleep", "30"}})
+	if err := agentworkspace.Resize(plain, agentworkspace.TerminalSize{Rows: 1, Cols: 1}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("resizing a process with no terminal: %v, want errors.ErrUnsupported", err)
+	}
 }

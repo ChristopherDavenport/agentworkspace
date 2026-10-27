@@ -7,6 +7,20 @@ versions may break the API.
 
 ## Unreleased
 
+- Added: terminal mode (#29). `Command.Terminal`, a `TerminalSize`,
+  starts a command on a pseudo-terminal of that size as its controlling
+  terminal, in a session of its own, its standard error merged into its
+  output; closing its input sends `^D`. `Resizer` and `Resize(p, size)`
+  change the size. `Local.Start` gives one on Linux and refuses the
+  start with `errors.ErrUnsupported` elsewhere, never falling back to
+  pipes; a `Stream` beside a terminal is refused, and so is `Exec` with
+  one. remote carries it as the start's `terminal` and a `resize`
+  route, mcpworkspace as `process.start`'s `terminal` and
+  `process.resize` (`wire.TerminalSize`, `wire.MethodResize`).
+  RFC 0001 §7 states it, and `workspacetest.RunStarter` has a
+  `Terminal` case. The persistent shell of #29 is a tool, and is not
+  here.
+
 - Added: `Server.Secrets`, a mark on a listed server the offering gives
   a secret (#23). `Offering.Servers` sets it for a server whose
   `OfferedServer.Secrets` names any; remote's servers route and

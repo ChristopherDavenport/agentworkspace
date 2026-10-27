@@ -236,6 +236,9 @@ type startRequest struct {
 	// Stderr asks for standard error, on the stderr route; without it,
 	// it is discarded.
 	Stderr bool `json:"stderr,omitempty"`
+	// Terminal asks for a pseudo-terminal of this size
+	// (agentworkspace.Command.Terminal).
+	Terminal *terminalSize `json:"terminal,omitempty"`
 	// Key is the client's name for the start, which becomes the
 	// process's id: a start repeated with the same key is answered
 	// with the same process, and a client whose reply was lost closes
@@ -275,6 +278,13 @@ type startedReply struct {
 
 type signalRequest struct {
 	Signal string `json:"signal"`
+}
+
+// terminalSize is an agentworkspace.TerminalSize on the wire: a
+// terminal start's, and a resize's body.
+type terminalSize struct {
+	Rows uint16 `json:"rows"`
+	Cols uint16 `json:"cols"`
 }
 
 // The values of exitReply's Ended.

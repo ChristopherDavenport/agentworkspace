@@ -513,6 +513,8 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 	switch {
 	case len(cmd.Args) == 0:
 		return nil, errors.New("remote: no command")
+	case cmd.Terminal != nil:
+		return nil, fmt.Errorf("remote: exec %s: Exec gives standard output and standard error apart; a terminal is Start's: %w", cmd.Args[0], errors.ErrUnsupported)
 	case int64(len(cmd.Stdin)) > c.info.Limits.MaxWriteBytes:
 		return nil, fmt.Errorf("remote: exec %s: %w: stdin of %d bytes, over the server's %d", cmd.Args[0], ErrLimit, len(cmd.Stdin), c.info.Limits.MaxWriteBytes)
 	case c.isClosed():

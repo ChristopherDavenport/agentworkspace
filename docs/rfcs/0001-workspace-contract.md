@@ -389,10 +389,27 @@ signal its system has, and refuses one that is not a system signal.
 `workspacetest.RunStarter` sends each of the required set and checks
 a signal no starter carries is refused as *unsupported*.
 
-Open: #29 will add a terminal mode: a process started with a
-pseudo-terminal of a given size as its controlling terminal, a resize,
-and a refusal, never a fallback to pipes, where a backend cannot give
-one.
+**Terminal.** A command started with a **terminal** of a given size
+(rows and columns) runs with a pseudo-terminal of that size as its
+controlling terminal, in a session of its own. Its standard input is
+the terminal's input and its standard output the terminal's output,
+standard error merged into it; what is written is echoed as the
+terminal echoes it, and lines end as the terminal ends them (`\r\n`).
+Closing its input sends the terminal's end of file (`^D`). A
+**resize** changes the size, and the system sends the terminal's
+foreground group `WINCH`; a resize of a process with no terminal is
+refused as *unsupported*. A stream beside a terminal is refused as
+*invalid*, since standard error is in the output, and Exec refuses a
+terminal as *unsupported*, since it gives the two apart. A backend
+that cannot give a terminal MUST refuse the start as *unsupported*,
+and MUST NOT run the command on pipes instead (#29). Over remote it is
+the start's `terminal {rows, cols}` and `POST …/processes/{p}/resize`;
+over mcpworkspace, `process.start {…, terminal}` and `process.resize`.
+The reference binding gives one on Linux (`/dev/ptmx`) and refuses
+elsewhere; `workspacetest.RunStarter`'s `Terminal` case checks the
+size, the merge, the resize and the refusals, and is skipped where the
+start is refused. A persistent shell over a terminal is a tool, not
+this contract's.
 
 ## 8. Ending a process
 
@@ -675,12 +692,12 @@ The root module is the reference binding.
 | bounded read | `Read(w, name, max)` |
 | write, remove | `Workspace.WriteFile(ctx, name, data, perm)`, `Workspace.Remove(ctx, name)` |
 | environment | `Workspace.Env()`, a copy |
-| command | `Command{Args, Dir, Env, Stdin, Timeout, Stream}` |
+| command | `Command{Args, Dir, Env, Stdin, Timeout, Stream, Terminal}`; `TerminalSize{Rows, Cols}` |
 | exec | `Workspace.Exec(ctx, cmd)` → `*Output{Stdout, Stderr, ExitCode, TimedOut, Interrupted}`, beside `ctx.Err()` when interrupted |
 | descriptor | `Workspace.Descriptor()` → `Descriptor{Kind, Ref, Host, Instance, Root}`; `KindLocal`, `KindContainer`, `KindRemote` |
 | close | `Workspace.Close()` |
 | starter | `Starter` interface; `Start(ctx, ws, cmd)` refuses a non-starter with `errors.ErrUnsupported` |
-| process | `Process{Stdin, Stdout, Wait, Signal, Close}` |
+| process | `Process{Stdin, Stdout, Wait, Signal, Close}`; `Resizer`, `Resize(p, size)` for a terminal's |
 | reach | `ReachOf(ws)` → `Reach`: `ReachGroup`, `ReachDescendants`, `ReachAll`, or `""` when the workspace states none; a workspace states it with a `Reach()` method |
 | owner's context | the `ctx` given to `Start` or `StartServer` |
 | server provider | `ServerProvider{Servers, StartServer}`, `Server{Name, Description, Secrets}`, `ValidServerName`, `ErrNoServer` |
@@ -696,7 +713,8 @@ the standard library alone.
 
 | Contract | mcpworkspace |
 | --- | --- |
-| start | `agentworkspace/process.start {args, dir?, env?, timeoutMs?, stderr?} → {id}` |
+| start | `agentworkspace/process.start {args, dir?, env?, timeoutMs?, stderr?, terminal?} → {id}` |
+| resize | `process.resize {id, rows, cols} → {}` |
 | standard input | `process.write {id, data}`, at most `MaxWriteBytes` (1 MiB) each; `process.closeStdin {id}` |
 | standard output, standard error | `process.read {id, fd: 1\|2, max?} → {data?, eof?}`, a long poll, at most `MaxReadBytes` (64 KiB) |
 | signal | `process.signal {id, signal} → {done?}`, a name of the named set ([section 7](#7-processes)) |
@@ -736,9 +754,9 @@ does not repeat. In summary:
 | cancel an exec | `POST /v1/exec/{key}/cancel`, the principal's own key | `exec` |
 | list servers | `GET /v1/servers` | `servers` |
 | owner | a session, `POST /v1/sessions`, renewed on a lease; its lapse or close ends every process in it | `exec` or `servers` |
-| start | `POST /v1/sessions/{s}/processes`, keyed by the client | `exec` |
+| start | `POST /v1/sessions/{s}/processes`, keyed by the client, a `terminal` optional | `exec` |
 | start a server | `POST /v1/sessions/{s}/servers/{n}/start`, keyed | `servers` |
-| pipes, wait, signal, cancel, close | `/v1/sessions/{s}/processes/{p}/…` | the scope it was started under |
+| pipes, wait, signal, cancel, resize, close | `/v1/sessions/{s}/processes/{p}/…` | the scope it was started under |
 | error kinds | every kind of [section 2](#error-kinds), and the wire's own (`unauthenticated`, `forbidden`, `limit`, `no_session`, `no_process`, `media_type`) | |
 
 `exec` and `servers` imply neither the other; `servers` needs no
@@ -885,7 +903,6 @@ The issues that will add or change a rule here:
 
 - #9: an offered server's isolation, beyond the trust rule
   ([section 13](#13-isolation-statement)); waits for a second product.
-- #29: terminal mode, with size and resize ([section 7](#7-processes)).
 - #30: a container backend: conformance, descriptor, its instance
   ended at close.
 - #31: `connect(port)` ([section 9](#9-ports)).
@@ -925,6 +942,10 @@ Questions with no issue yet:
   principal without `read` as withheld.
 - [Section 11](#11-servers-offered): the `secrets` mark on a listed
   server, and that its absence proves nothing (#23).
+- [Section 7](#7-processes): terminal mode (#29): a start with a
+  pseudo-terminal of a given size, standard error merged, a resize, and
+  a refusal as *unsupported*, never pipes, where a backend cannot give
+  one; both wires carry it.
 - [Section 2](#error-kinds): every wire carries every kind both ways
   (#38). mcpworkspace's files carry the nine, and its process and
   server methods carry them too, as JSON-RPC error `-32011` with a

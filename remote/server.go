@@ -216,6 +216,7 @@ func NewHandler(ws agentworkspace.Workspace, opts ...Option) (*Handler, error) {
 	m.HandleFunc("GET "+routeSessions+"/{sid}/processes/{pid}/wait", h.needAny(sessionScopes, h.wait))
 	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/signal", h.needAny(sessionScopes, typed(jsonType, h.signal)))
 	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/cancel", h.needAny(sessionScopes, typed(jsonType, h.cancel)))
+	m.HandleFunc("POST "+routeSessions+"/{sid}/processes/{pid}/resize", h.needAny(sessionScopes, typed(jsonType, h.resize)))
 	m.HandleFunc("DELETE "+routeSessions+"/{sid}/processes/{pid}", h.needAny(sessionScopes, h.closeProcess))
 	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, wireError{Code: codeNotExist, Message: "no such route"})

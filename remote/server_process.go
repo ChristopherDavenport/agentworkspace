@@ -439,6 +439,9 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cmd := agentworkspace.Command{Args: req.Args, Dir: req.Dir, Env: req.Env, Timeout: time.Duration(req.TimeoutMs) * time.Millisecond}
+	if t := req.Terminal; t != nil {
+		cmd.Terminal = &agentworkspace.TerminalSize{Rows: t.Rows, Cols: t.Cols}
+	}
 	h.launch(w, s, req.Key, req.Stderr, &proc{scope: ScopeExec}, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {
 		if stderr != nil {
 			cmd.Stream = stderr
@@ -714,6 +717,24 @@ func (h *Handler) signal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := sp.p.Signal(sig); err != nil {
+		h.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resize changes the size of the process's terminal; one started with
+// none is unsupported.
+func (h *Handler) resize(w http.ResponseWriter, r *http.Request) {
+	sp := h.procOf(w, r)
+	if sp == nil {
+		return
+	}
+	var req terminalSize
+	if !decode(w, r, MaxRequestBytes, &req) {
+		return
+	}
+	if err := agentworkspace.Resize(sp.p, agentworkspace.TerminalSize{Rows: req.Rows, Cols: req.Cols}); err != nil {
 		h.fail(w, err)
 		return
 	}

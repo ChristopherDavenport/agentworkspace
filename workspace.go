@@ -112,6 +112,39 @@ type Command struct {
 	// it is standard error, standard output being Process.Stdout; nil
 	// discards it.
 	Stream io.Writer
+	// Terminal, when set, runs the command, Start's alone, with a
+	// pseudo-terminal of this size as its controlling terminal, in a
+	// session of its own: Process.Stdin is the terminal's input and
+	// Process.Stdout its output, standard error merged into it, and
+	// what is written is echoed as the terminal echoes it. Closing
+	// Stdin sends the terminal's end of file (^D). Resize changes the
+	// size. A Stream is refused beside it, since standard error is in
+	// the output, and Exec refuses it, since it gives the two apart. A
+	// backend that cannot give a terminal refuses the start with
+	// errors.ErrUnsupported; it never runs the command on pipes instead.
+	Terminal *TerminalSize
+}
+
+// TerminalSize is a terminal's size in character cells.
+type TerminalSize struct {
+	Rows, Cols uint16
+}
+
+// Resizer is a Process that can change its terminal's size, as one
+// started with Command.Terminal can; the process's foreground group is
+// sent SIGWINCH.
+type Resizer interface {
+	Resize(size TerminalSize) error
+}
+
+// Resize changes the size of p's terminal, and is errors.ErrUnsupported
+// for a process that was started without one.
+func Resize(p Process, size TerminalSize) error {
+	r, ok := p.(Resizer)
+	if !ok {
+		return fmt.Errorf("agentworkspace: a process with no terminal: %w", errors.ErrUnsupported)
+	}
+	return r.Resize(size)
 }
 
 // Output is how a process ended.

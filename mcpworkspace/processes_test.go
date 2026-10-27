@@ -609,3 +609,51 @@ func TestTheParamsAreTheWiresShapes(t *testing.T) {
 		}
 	}
 }
+
+// A start with a terminal runs the process on one of that size, its
+// standard error in its output, and a resize changes the size; a
+// process with none refuses a resize as unsupported.
+func TestATerminalCrosses(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	c := conn(t, cs)
+	p, err := Start(context.Background(), c, agentworkspace.Command{
+		Args:     []string{"sh", "-c", "stty size; echo err >&2; read x; stty size"},
+		Terminal: &agentworkspace.TerminalSize{Rows: 24, Cols: 80},
+	})
+	if errors.Is(err, errors.ErrUnsupported) {
+		t.Skipf("no terminal here: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	out := bufio.NewReader(p.Stdout())
+	line := func() string {
+		for {
+			l, err := out.ReadString('\n')
+			if l = strings.TrimRight(l, "\r\n"); l != "" || err != nil {
+				return l
+			}
+		}
+	}
+	within(t, 10*time.Second, "the terminal", func() {
+		if a, b := line(), line(); a != "24 80" || b != "err" {
+			t.Errorf("the terminal said %q, %q", a, b)
+		}
+		if err := agentworkspace.Resize(p, agentworkspace.TerminalSize{Rows: 30, Cols: 100}); err != nil {
+			t.Error(err)
+		}
+		io.WriteString(p.Stdin(), "\n")
+		if got := line(); got != "30 100" {
+			t.Errorf("after the resize: %q", got)
+		}
+	})
+	q := start(t, c, sleeper)
+	if err := agentworkspace.Resize(q, agentworkspace.TerminalSize{Rows: 1, Cols: 1}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("resizing a process with no terminal: %v", err)
+	}
+	if _, err := Exec(context.Background(), c, agentworkspace.Command{Args: []string{"true"}, Terminal: &agentworkspace.TerminalSize{Rows: 1, Cols: 1}}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("Exec with a terminal: %v", err)
+	}
+}

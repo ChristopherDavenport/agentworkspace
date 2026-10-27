@@ -84,6 +84,7 @@ func (s *Processes) Register(srv *mcp.Server) error {
 		mcp.AddReceivingCustomMethod(srv, wire.MethodClose, answering(c, root, s.close)),
 		mcp.AddReceivingCustomMethod(srv, wire.MethodCancel, answering(c, root, s.cancel)),
 		mcp.AddReceivingCustomMethod(srv, wire.MethodInfo, answering(c, root, s.info)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodResize, answering(c, root, s.resize)),
 	)
 }
 
@@ -218,6 +219,9 @@ func (s *Processes) start(_ context.Context, ss *mcp.ServerSession, p *StartPara
 		}
 	}
 	cmd := agentworkspace.Command{Args: p.Args, Dir: p.Dir, Env: p.Env, Timeout: time.Duration(p.TimeoutMs) * time.Millisecond}
+	if t := p.Terminal; t != nil {
+		cmd.Terminal = &agentworkspace.TerminalSize{Rows: t.Rows, Cols: t.Cols}
+	}
 	return s.launch(ss, p.Stderr, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {
 		if stderr != nil {
 			cmd.Stream = stderr
@@ -442,6 +446,21 @@ func (s *Processes) cancel(_ context.Context, ss *mcp.ServerSession, p *IDParams
 		return nil, err
 	}
 	sp.cancel()
+	return &EmptyResult{}, nil
+}
+
+// resize changes the size of the process's terminal.
+func (s *Processes) resize(_ context.Context, ss *mcp.ServerSession, p *ResizeParams) (*EmptyResult, error) {
+	if p == nil {
+		return nil, errNoParams
+	}
+	sp, err := s.lookup(ss, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := agentworkspace.Resize(sp.p, agentworkspace.TerminalSize{Rows: p.Rows, Cols: p.Cols}); err != nil {
+		return nil, err
+	}
 	return &EmptyResult{}, nil
 }
 

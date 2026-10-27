@@ -41,7 +41,7 @@ func (m *mapped) WriteFile(ctx context.Context, name string, data []byte, perm f
 }
 func (m *mapped) Remove(ctx context.Context, name string) error { return m.backing.Remove(ctx, name) }
 func (m *mapped) Descriptor() agentworkspace.Descriptor {
-	return agentworkspace.Descriptor{Kind: agentworkspace.KindContainer, Ref: "sha256:test", Root: mappedRoot}
+	return agentworkspace.Descriptor{Kind: agentworkspace.KindContainer, Ref: "sha256:test", Instance: "stand-in", Root: mappedRoot}
 }
 
 func (m *mapped) Exec(ctx context.Context, c agentworkspace.Command) (*agentworkspace.Output, error) {

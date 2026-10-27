@@ -38,7 +38,8 @@ const (
 
 // Workspace is where a session's tools act. Names given to it are
 // fs.ValidPath names relative to Root; turning a path the model wrote
-// into one is the tool's.
+// into one is the tool's. Its methods are safe for concurrent use, and
+// Root and Descriptor answer the same every time.
 type Workspace interface {
 	// Root is the absolute path of the working directory as the
 	// workspace's own processes see it: the checkout on this machine,
@@ -125,14 +126,29 @@ type Output struct {
 }
 
 // Descriptor is what the session records about a workspace, in its env
-// entry: agentsession's workspace kind and ref, and the root, which is
-// the entry's cwd.
+// entry: agentsession's workspace members (kind, ref, host and
+// instance, every fact that tells this file system from another the
+// session could be resumed against) and the root, which is the entry's
+// cwd. Each is a string a reader compares exactly; one that is empty
+// is not written.
 type Descriptor struct {
 	// Kind is KindLocal, KindContainer or KindRemote.
 	Kind string
-	// Ref is what the harness resolves to it: an image digest, a host,
-	// an instance ID; empty for the local machine.
+	// Ref is what the workspace was made from or is reached by: a
+	// container's image digest, a remote's endpoint. It is empty for
+	// KindLocal. The machine and the instance are Host and Instance,
+	// never Ref.
 	Ref string
+	// Host names the machine the file system is on, as the program
+	// names it: a KindLocal workspace sets it to a name that tells this
+	// machine from the others a session may be resumed on, and a
+	// container one when its runtime is not on the agent's machine. A
+	// host name lands in session files a program may publish.
+	Host string
+	// Instance names the file system among those Kind, Ref and Host
+	// describe: a container's or a sandbox's ID, set whenever a restart
+	// gives a new file system.
+	Instance string
 	// Root is Workspace.Root.
 	Root string
 }

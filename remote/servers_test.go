@@ -167,6 +167,9 @@ func TestAServersPrincipalRunsNoCommand(t *testing.T) {
 	if base := filepath.Base(o.Root()); ws.Root() != base || ws.Served().Root != base || ws.Descriptor().Root != base {
 		t.Errorf("a servers principal was told the root %q, served %q, descriptor %q; want %q alone", ws.Root(), ws.Served().Root, ws.Descriptor().Root, base)
 	}
+	if h := ws.Served().Host; h != "" {
+		t.Errorf("a servers principal was told the host %q", h)
+	}
 	if strings.Contains(fmt.Sprint(clientOf(ws).info), o.Root()) {
 		t.Errorf("the info route told a servers principal the host's path %s", o.Root())
 	}

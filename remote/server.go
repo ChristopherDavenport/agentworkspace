@@ -474,12 +474,12 @@ func decode(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 // holding exec. It answers read or servers, so a principal holding
 // servers alone learns nothing it may not know: to one without read,
 // the root, and the served descriptor's, are their last element alone,
-// not a path on the host.
+// not a path on the host, and the served descriptor names no host.
 func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 	p := principalOf(r)
 	root, served := h.ws.Root(), descriptorOf(h.ws.Descriptor())
 	if !p.Has(ScopeRead) {
-		root, served.Root = filepath.Base(root), filepath.Base(served.Root)
+		root, served.Root, served.Host = filepath.Base(root), filepath.Base(served.Root), ""
 	}
 	_, start := h.ws.(agentworkspace.Starter)
 	_, servers := h.ws.(agentworkspace.ServerProvider)

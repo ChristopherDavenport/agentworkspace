@@ -32,6 +32,7 @@ type Local struct {
 	dir  string // as given, absolute and cleaned
 	real string // dir with its links resolved
 	env  []string
+	host string
 
 	mu     sync.Mutex
 	closed bool
@@ -46,7 +47,15 @@ var (
 // NewLocal opens dir as a workspace whose processes start with env and
 // nothing else: nil is an empty environment, not this process's. A
 // product passes this process's environment without its credentials.
-func NewLocal(dir string, env []string) (*Local, error) {
+func NewLocal(dir string, env []string, opts ...LocalOption) (*Local, error) {
+	var cfg localConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	host := cfg.host
+	if !cfg.hostSet {
+		host, _ = os.Hostname()
+	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
@@ -59,7 +68,22 @@ func NewLocal(dir string, env []string) (*Local, error) {
 	if err != nil {
 		real = abs
 	}
-	return &Local{root: root, dir: abs, real: real, env: env, procs: map[*localProcess]struct{}{}}, nil
+	return &Local{root: root, dir: abs, real: real, env: env, host: host, procs: map[*localProcess]struct{}{}}, nil
+}
+
+// A LocalOption changes how NewLocal opens a workspace.
+type LocalOption func(*localConfig)
+
+type localConfig struct {
+	host    string
+	hostSet bool
+}
+
+// WithHost names this machine in the Descriptor, in place of the
+// system's host name, which two machines a session may move between can
+// share. Empty leaves Host unset.
+func WithHost(name string) LocalOption {
+	return func(c *localConfig) { c.host, c.hostSet = name, true }
 }
 
 // Root is the directory, absolute and cleaned.
@@ -80,8 +104,12 @@ func (l *Local) Env() []string { return slices.Clone(l.env) }
 // began is not found.
 func (l *Local) Reach() Reach { return reach }
 
-// Descriptor names the local machine.
-func (l *Local) Descriptor() Descriptor { return Descriptor{Kind: KindLocal, Root: l.dir} }
+// Descriptor names the local machine: KindLocal, no Ref, Host the
+// system's host name as NewLocal found it (or WithHost's), and the
+// root.
+func (l *Local) Descriptor() Descriptor {
+	return Descriptor{Kind: KindLocal, Host: l.host, Root: l.dir}
+}
 
 // Close ends every process Start started that is not closed yet, as
 // Process.Close does, and releases the directory handle.

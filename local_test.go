@@ -69,6 +69,36 @@ func TestProcessEnv(t *testing.T) {
 	}
 }
 
+// A local Descriptor names the machine, as the system does or as
+// WithHost says, and has no Ref.
+func TestLocalDescriptorNamesTheHost(t *testing.T) {
+	dir := t.TempDir()
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Skip(err)
+	}
+	for _, tc := range []struct {
+		name string
+		opts []LocalOption
+		want string
+	}{
+		{"the system's", nil, hostname},
+		{"WithHost", []LocalOption{WithHost("build-7")}, "build-7"},
+		{"WithHost empty", []LocalOption{WithHost("")}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l, err := NewLocal(dir, nil, tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			if d := l.Descriptor(); d != (Descriptor{Kind: KindLocal, Host: tc.want, Root: l.Root()}) {
+				t.Errorf("Descriptor = %+v, want Host %q", d, tc.want)
+			}
+		})
+	}
+}
+
 // A nil environment is an empty one, never this process's, which holds
 // the credentials Env is built without.
 func TestANilEnvIsEmpty(t *testing.T) {

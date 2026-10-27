@@ -7,6 +7,17 @@ versions may break the API.
 
 ## Unreleased
 
+- Added: `Descriptor.Host` and `Descriptor.Instance`, agentsession
+  0.14's `workspace.host` and `workspace.instance` (#3). `Local` sets
+  `Host` to the system's host name, or to `WithHost`'s, a new
+  `LocalOption` of `NewLocal` for machines that share one, and leaves
+  `Ref` empty. `remote` carries both in the served descriptor (`Served`),
+  without the host to a principal lacking `read`. `Descriptor.Ref`'s
+  doc no longer lists a host or an instance among what it holds, and
+  `Workspace`'s says its methods are safe for concurrent use. RFC 0001
+  §12 states which kind sets which, and `workspacetest.Run` checks the
+  members and concurrent use.
+
 - Fixed: on Linux, ending a process `Local` started (`Process.Close`,
   the context's end, `Command.Timeout`, the workspace's `Close`,
   `Process.Signal`, and an `Exec` its context or timeout ends) now

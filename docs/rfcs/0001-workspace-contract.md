@@ -524,36 +524,53 @@ holds none.
 ## 12. Descriptor
 
 A **descriptor** is what the session records about a workspace, in
-agentsession RFC 0001's `env` entry:
+agentsession RFC 0001's `env` entry (draft 0.14 and later):
 
 | Descriptor | agentsession `env` | Meaning |
 | --- | --- | --- |
 | kind | `workspace.kind` | `local`, `container` or `remote`; closed |
-| ref | `workspace.ref` | what the harness resolves to the workspace: a container's image digest, a remote's endpoint; empty for `local` |
+| ref | `workspace.ref` | what the file system was made from or is reached by: a container's image digest, a remote's endpoint; absent for `local` |
+| host | `workspace.host` | the machine the file system is on |
+| instance | `workspace.instance` | the file system among those kind, ref and host describe: a container's or a sandbox's ID |
 | root | `cwd` | the root |
 
 The descriptor is a fact about placement, recorded so that a session
-resumed against another file system records a substitution.
+resumed against another file system records a substitution. It MUST
+carry, in these members, every fact that tells its file system from
+another the session could be resumed against; ref, host and instance
+are strings, opaque to a reader, which compares them exactly, and an
+empty one is not written. The machine and the instance MUST NOT be
+written into ref.
 
-- `Local` records `kind: local` and its root, and no `ref`.
-- A remote client records `kind: remote`, the base URL with no
-  userinfo, query or fragment as `ref`, and the served root. It keeps
-  the served workspace's own descriptor beside it (Go's `Served`), and
-  never puts a credential in either.
+- A `local` workspace MUST set host to a name that tells this machine
+  from the others a session may be resumed on, and MUST NOT set ref.
+  Its instance is absent: the root on that host is the file system.
+- A `container` workspace MUST set ref to the image digest, a digest
+  rather than a tag, and instance to the running instance, since a
+  restart from the same image is another file system; and host when
+  its runtime is not on the agent's machine.
+- A `remote` client records `kind: remote` and the base URL with no
+  userinfo, query or fragment as ref, and the served root. It keeps the
+  served workspace's own descriptor beside it (Go's `Served`), with that
+  workspace's host and instance, and never puts a credential in either.
 - A tunnel's client records `kind: remote` and
-  `http://<name>.tunnel.invalid` as `ref`, a host that resolves
-  nowhere.
+  `http://<name>.tunnel.invalid` as ref, a host that resolves nowhere.
 
-Since agentsession 0.14, `workspace` also has `host`, the machine the
-file system is on, and `instance`, the file system among those its
-`kind`, `ref` and `host` describe, both opaque strings; a writer SHOULD
-write `host` for every `local` workspace and `instance` whenever a
-restart gives a new file system. No descriptor carries either at draft
-0.1. Open: #3 will add both members, say which kind sets which, and
-what a `host` value must distinguish.
+What host holds is the binding's choice, as long as it tells the
+machines apart. The reference binding's `Local` uses the system's host
+name, which two machines can share (two laptops of one model), and
+lets the program name the machine instead (`WithHost`). A host name
+lands in session files that a program may publish, so a redactor
+SHOULD know the member.
 
-Open: #30, a container backend, records the image digest as `ref` and
-the running instance as `instance`, and ends its instance at close.
+Over remote, a principal without `read` is told the served descriptor
+without its host, as it is told the root's last element alone.
+
+A descriptor's members are fixed for the workspace's life: asking
+twice gives the same answer, and a binding MAY cache it.
+
+Open: #30, a container backend, records the image digest as ref and
+the running instance as instance, and ends its instance at close.
 
 ## 13. Isolation statement
 
@@ -588,7 +605,7 @@ The root module is the reference binding.
 | environment | `Workspace.Env()`, a copy |
 | command | `Command{Args, Dir, Env, Stdin, Timeout, Stream}` |
 | exec | `Workspace.Exec(ctx, cmd)` → `*Output{Stdout, Stderr, ExitCode, TimedOut, Interrupted}`, beside `ctx.Err()` when interrupted |
-| descriptor | `Workspace.Descriptor()` → `Descriptor{Kind, Ref, Root}`; `KindLocal`, `KindContainer`, `KindRemote` |
+| descriptor | `Workspace.Descriptor()` → `Descriptor{Kind, Ref, Host, Instance, Root}`; `KindLocal`, `KindContainer`, `KindRemote` |
 | close | `Workspace.Close()` |
 | starter | `Starter` interface; `Start(ctx, ws, cmd)` refuses a non-starter with `errors.ErrUnsupported` |
 | process | `Process{Stdin, Stdout, Wait, Signal, Close}` |
@@ -596,7 +613,7 @@ The root module is the reference binding.
 | owner's context | the `ctx` given to `Start` or `StartServer` |
 | server provider | `ServerProvider{Servers, StartServer}`, `Server{Name, Description}`, `ValidServerName`, `ErrNoServer` |
 | offering | `Offer(ws, servers, opts...)` → `*Offering`; `OfferedServer{Server, Command, Secrets}`; `WithOutputFilter(OutputFilter)`; `ErrOutputFilter` |
-| reference backend | `NewLocal(dir, env)` → `*Local`, over an `os.Root`; Unix (Linux and macOS) |
+| reference backend | `NewLocal(dir, env, opts...)` → `*Local`, over an `os.Root`; `WithHost(name)`; Unix (Linux and macOS) |
 
 ### mcpworkspace
 
@@ -718,7 +735,7 @@ The reference suite is Go package `workspacetest`:
 
 | Table | Holds |
 | --- | --- |
-| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names |
+| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names, the descriptor's members for its kind, concurrent use |
 | `RunStarter` | a starter: the pipes, the directory and environment (argv resolution, the environment as given), the lifetimes (context, timeout, close, exit, the workspace's close, a descendant that left the group), signals, refusals, concurrency |
 | `RunServerProvider` | a server provider: the list, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
 | `Confined` | the layout `Run` uses: a workspace beside a directory holding a secret, with links that lead out and one that stays in |
@@ -775,8 +792,6 @@ conforming client of the old wire cannot read takes a new one.
 
 The issues that will add or change a rule here:
 
-- #3: the descriptor's `host` and `instance` members, and which kind
-  sets which ([section 12](#12-descriptor)).
 - #5, the wire half: remote carrying an interrupted Exec's output, by an
   exec key and a cancel route ([section 6](#6-exec)).
 - #9: an offered server's isolation, beyond the trust rule
@@ -795,10 +810,6 @@ Where the code and its doc comments disagree today. This draft does
 not pick a side; each is settled by the issue named, or by a later
 draft:
 
-- **`Descriptor.Ref`.** Its doc comment lists "a host, an instance ID"
-  among what `Ref` may hold; agentsession 0.14 gives the host and the
-  instance members of their own and says `ref` is absent for `local`
-  (#3).
 - **`Workspace.Root`.** Its doc comment says it is the absolute path of
   the working directory; a remote client dialled by a principal without
   `read` is told the root's last element alone, so its `Root()`, and
@@ -848,3 +859,7 @@ Questions with no issue yet:
 - [Section 8](#8-ending-a-process): everything a process started
   includes the descendants that left its group or session (#32), and a
   backend states its reach (`group`, `descendants`, `all`).
+- [Section 12](#12-descriptor): the descriptor's host and instance
+  members (#3), as agentsession 0.14 defines them, which kind sets
+  which, and that a local host must tell the machines apart; ref holds
+  neither.

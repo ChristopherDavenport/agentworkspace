@@ -34,8 +34,10 @@ refuses one. An FS that can tell a link from its target implements
 `fs.ReadLinkFS`, so a policy can follow a link inside the workspace
 before it decides what a read of it really reads. `Env` is what the
 constructor was given, a copy; nil is an empty environment, never the
-host's. `Descriptor` (`Kind`, `Ref`, `Root`) is what a session records
-about where its tools ran, as agentsession's env entry keeps it.
+host's. `Descriptor` (`Kind`, `Ref`, `Host`, `Instance`, `Root`) is
+what a session records about where its tools ran, as agentsession's env
+entry keeps it; `Local`'s names this machine's host, as the system does
+or as `WithHost` says.
 
 `Local` is a directory on this machine. Every file operation goes
 through an `os.Root`, so a link that leads out is refused rather than

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -44,7 +45,7 @@ type Backend struct {
 }
 
 // Run runs every table a Workspace keeps (confinement, a FIFO, Env,
-// Exec, names that are not valid paths) on every backend, each a subtest
+// Exec, names that are not valid paths, the descriptor, concurrent use) on every backend, each a subtest
 // named after the table and then the backend.
 func Run(t *testing.T, backends ...Backend) {
 	for _, table := range []struct {
@@ -57,6 +58,7 @@ func Run(t *testing.T, backends ...Backend) {
 		{"EnvIsACopy", envIsACopy},
 		{"Exec", execRuns},
 		{"NamesThatAreNotValidPaths", namesThatAreNotValidPaths},
+		{"Concurrently", concurrently},
 	} {
 		t.Run(table.name, func(t *testing.T) {
 			for _, b := range backends {
@@ -191,6 +193,7 @@ func insideWorks(t *testing.T, b Backend) {
 	if d := ws.Descriptor(); d.Root != ws.Root() {
 		t.Errorf("Descriptor.Root = %q, Root = %q", d.Root, ws.Root())
 	}
+	describes(t, ws.Descriptor())
 	// Where links lead is read through the workspace, or not at all:
 	// never followed on the host.
 	links, ok := ws.FS().(fs.ReadLinkFS)
@@ -209,6 +212,61 @@ func insideWorks(t *testing.T, b Backend) {
 	if target, err := links.ReadLink("linkdir"); err != nil || target != outside {
 		t.Errorf("ReadLink linkdir = %q, %v", target, err)
 	}
+}
+
+// describes checks d has the members its kind must: a local workspace
+// names its host and has no ref, a container its image and its
+// instance, a remote its endpoint.
+func describes(t *testing.T, d agentworkspace.Descriptor) {
+	t.Helper()
+	switch d.Kind {
+	case agentworkspace.KindLocal:
+		if d.Ref != "" || d.Host == "" {
+			t.Errorf("a local Descriptor = %+v, want a Host and no Ref", d)
+		}
+	case agentworkspace.KindContainer:
+		if d.Ref == "" || d.Instance == "" {
+			t.Errorf("a container Descriptor = %+v, want a Ref and an Instance", d)
+		}
+	case agentworkspace.KindRemote:
+		if d.Ref == "" {
+			t.Errorf("a remote Descriptor = %+v, want a Ref", d)
+		}
+	default:
+		t.Errorf("Descriptor.Kind = %q", d.Kind)
+	}
+}
+
+// The workspace's methods are safe for concurrent use, and its
+// Descriptor and Root answer the same every time.
+func concurrently(t *testing.T, b Backend) {
+	ws := b.Open(t, t.TempDir())
+	ctx := context.Background()
+	d, root := ws.Descriptor(), ws.Root()
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() {
+			name := fmt.Sprintf("f%d.txt", i)
+			if err := ws.WriteFile(ctx, name, []byte(name), 0o644); err != nil {
+				t.Error(err)
+				return
+			}
+			if b, err := fs.ReadFile(ws.FS(), name); err != nil || string(b) != name {
+				t.Errorf("read %s = %q, %v", name, b, err)
+			}
+			if _, err := fs.Stat(ws.FS(), name); err != nil {
+				t.Error(err)
+			}
+			if got := ws.Descriptor(); got != d || ws.Root() != root {
+				t.Errorf("Descriptor = %+v, then %+v", d, got)
+			}
+			ws.Env()
+			if err := ws.Remove(ctx, name); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // Nothing blocks on a FIFO: it opens, or fails, at once, what was

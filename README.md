@@ -44,6 +44,13 @@ user can, and the product's policy is what stands in front of it.
 `Exec` runs each command in a process group of its own, so a timeout
 or a cancel kills what it started too. `Local` runs on Linux and macOS.
 
+[RFC 0001](docs/rfcs/0001-workspace-contract.md) specifies the contract
+every backend keeps, for an implementation in any language: names and
+confinement, files, the environment, commands, Exec, processes and how
+they end, offered servers and the descriptor, with this module as its
+Go binding, `remote` and `mcpworkspace` as its wires, and
+`workspacetest` as its conformance suite.
+
 ## Long-lived processes
 
 A workspace that can run a process for longer than one call is a

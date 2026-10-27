@@ -29,7 +29,8 @@
 // # Client
 //
 // RegisterClient adds the process and server methods to an *mcp.Client
-// before it connects. Start starts a process over a Conn; NewFS reads
+// before it connects. Start starts a process over a Conn, and Exec runs
+// one to its end, as a workspace's Exec does; NewFS reads
 // the files over a Source; ListServers and StartServer reach the
 // servers the workspace offers, and Servers is that workspace as an
 // agentworkspace.ServerProvider.

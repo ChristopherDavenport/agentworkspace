@@ -7,6 +7,17 @@ versions may break the API.
 
 ## Unreleased
 
+- Added: `mcpworkspace.Exec`, a command run to its end over the process
+  methods with `Workspace.Exec`'s rules (#33): its stdin written and
+  closed, its output kept or streamed, `TimedOut` from its timeout, and
+  the end of its context a cancel whose output is read to the end and
+  returned with `Interrupted` beside `ctx.Err()`; a failing `Stream`
+  ends the command. `workspacetest.RunExec`, with `Execer` and
+  `ExecBackend`, runs `Run`'s Exec table over a backend that carries
+  Exec without a whole workspace, and mcpworkspace runs it. Two of the
+  table's commands pause between their standard output and standard
+  error, which such a wire carries apart.
+
 - Fixed: mcpworkspace carries every error kind of RFC 0001 §2 both
   ways (#38). Its files' errors had five kinds, so `fs.ErrExist`,
   `errors.ErrUnsupported` and `fs.ErrClosed` reached the client as

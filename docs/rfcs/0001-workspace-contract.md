@@ -324,8 +324,17 @@ carries a key, its reply's header is sent once the key is taken, and
 `POST /v1/exec/{key}/cancel` is the cancel (#5); `workspacetest.Run`
 checks the kept output on every backend, remote and tunnel among them.
 
-Open: #33 will give the mcpworkspace client an Exec composed over
-Start, held to this section.
+**Exec over a process carrier.** A binding whose wire carries
+processes but no Exec MAY compose Exec from a start, the pipes, a
+cancel and a wait, and MUST then give what a native Exec gives: the
+command's stdin written and its input closed, its output in full or to
+the stream, the timeout's and the interrupt's results as above (the
+interrupt a cancel, the ladder from INT, with the output read to its
+end after it), and a stream whose write fails ending the command. With
+a stream, a carrier that moves standard output and standard error apart
+keeps each in its order, and the two in the order they arrive. The
+mcpworkspace client's Exec is such a composition (#33);
+`workspacetest.RunExec` holds it to the Exec table.
 
 ## 7. Processes
 
@@ -675,9 +684,10 @@ to the server, and starting a process is arbitrary execution. A server
 offering no servers need not answer the server methods; a client takes
 *method not found* as none offered.
 
-It does not carry write, remove, Exec, the environment, the root or
-the descriptor. Its client side is a starter's Start and a read-only
-file system, not a workspace.
+It does not carry write, remove, the environment, the root or the
+descriptor. Its client side is a starter's Start, Exec composed over
+the process methods ([section 6](#6-exec)), and a read-only file
+system, not a workspace.
 
 ### remote
 
@@ -784,6 +794,7 @@ The reference suite is Go package `workspacetest`:
 | --- | --- |
 | `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names, the descriptor's members for its kind, concurrent use |
 | `RunStarter` | a starter: the pipes, the directory and environment (argv resolution, the environment as given), the lifetimes (context, timeout, close, exit, the workspace's close, a descendant that left the group), signals, refusals, concurrency |
+| `RunExec` | the Exec table alone, over an `Execer`: a wire's client that carries Exec without a whole workspace (mcpworkspace's) |
 | `RunServerProvider` | a server provider: the list, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
 | `Confined` | the layout `Run` uses: a workspace beside a directory holding a secret, with links that lead out and one that stays in |
 
@@ -800,10 +811,10 @@ its wire. A server that speaks remote's `/v1` is dialled with
 `remote.Dial` and run under `Run`, `RunStarter` and
 `RunServerProvider`, which is how the remote and tunnel bindings are
 themselves checked. A server that speaks mcpworkspace's methods is
-reached with the mcpworkspace client: `RunServerProvider` runs over it
-today, while its process and file methods are checked by mcpworkspace's
-own tests rather than by the shared tables, since its client is not a
-workspace (Open: #33). A fixture corpus of wire exchanges, checkable
+reached with the mcpworkspace client: `RunServerProvider` and
+`RunExec` run over it, while its other process methods and its files
+are checked by mcpworkspace's own tests, since its client is not a
+workspace. A fixture corpus of wire exchanges, checkable
 without Go, is an open question.
 
 Open: #30 will hold a container backend to `Run` and `RunStarter`, to
@@ -847,8 +858,6 @@ The issues that will add or change a rule here:
 - #30: a container backend: conformance, descriptor, its instance
   ended at close.
 - #31: `connect(port)` ([section 9](#9-ports)).
-- #33: Exec over mcpworkspace's process methods
-  ([sections 6](#6-exec) and [14](#mcpworkspace)).
 - #34: named roots ([section 10](#10-roots)).
 
 Where the code and its doc comments disagree today. This draft does
@@ -884,6 +893,10 @@ Questions with no issue yet:
   *interrupted*. mcpworkspace gains `process.cancel`, which ends a
   process as its context's end does and leaves it to read, and its
   client sends it when a start's context ends, rather than a close.
+- [Section 6](#6-exec): Exec composed over a process carrier gives
+  what a native Exec gives (#33); mcpworkspace's client has one
+  (`mcpworkspace.Exec`), and `workspacetest.RunExec` runs the Exec table
+  over an `Execer`.
 - [Section 2](#error-kinds): every wire carries every kind both ways
   (#38). mcpworkspace's files carry the nine, and its process and
   server methods carry them too, as JSON-RPC error `-32011` with a

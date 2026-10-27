@@ -22,7 +22,7 @@
 // relative to the served Root; both halves refuse any other, one that
 // leaves as agentworkspace.ErrOutside.
 //
-//	GET    /v1/info                              read or servers  root, the served descriptor, links, the bounds; Start with exec, Servers with servers, Env with exec
+//	GET    /v1/info                              read or servers  root, the served descriptor, links, the bounds, the served reach; Start with exec, Servers with servers, Env with exec
 //	GET    /v1/fs/stat?path=N                    read
 //	GET    /v1/fs/lstat?path=N                   read     unsupported when the served FS cannot read links
 //	GET    /v1/fs/readlink?path=N                read     ditto

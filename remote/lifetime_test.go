@@ -641,3 +641,17 @@ func TestCloseWaitsAGraceForStandardError(t *testing.T) {
 		t.Errorf("the stream has %q, want %q", got, "bye\n")
 	}
 }
+
+// The served workspace's reach is the client's: Local's, told at Dial,
+// and none for a workspace that says none, to every principal.
+func TestTheServedReachIsTheClients(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	_, url := serve(t, l, WithInsecureNoAuth())
+	if got, want := agentworkspace.ReachOf(dial(t, url)), l.Reach(); got != want || got == "" {
+		t.Errorf("the client's reach = %q, want Local's, %q", got, want)
+	}
+	_, url = serve(t, struct{ agentworkspace.Workspace }{l}, WithInsecureNoAuth())
+	if got := agentworkspace.ReachOf(dial(t, url)); got != "" {
+		t.Errorf("the client of a workspace that says no reach says %q", got)
+	}
+}

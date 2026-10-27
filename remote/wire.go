@@ -138,6 +138,9 @@ type infoReply struct {
 	Scopes []Scope  `json:"scopes"`
 	Env    []string `json:"env,omitempty"` // only to a principal with exec
 	Limits limits   `json:"limits"`
+	// Reach is how far the served workspace's end of a process reaches
+	// (agentworkspace.ReachOf), "" for one that says none.
+	Reach string `json:"reach,omitempty"`
 }
 
 // fileInfo is an fs.FileInfo on the wire. Raw is the name's bytes when

@@ -436,7 +436,14 @@ its end of a process goes:
 
 A caller MUST NOT take a backend that states no reach to reach `all`.
 A container backend reaches `all` by ending its instance's PID
-namespace.
+namespace. A binding over a wire MUST tell the client the serving
+side's reach, as the served workspace states it, and its client states
+that reach and no other: remote's info route carries `reach`, and
+mcpworkspace's `process.info` does. A client states none when the
+server says none, or a value it does not know. What a client was told
+is the reach when it asked; a served workspace whose reach changes
+(the reference binding's, when `/proc` is not its own) is asked
+again by asking again.
 
 A backend that walks a process table to find descendants MUST NOT
 signal the program's own process or group. It SHOULD send a descendant
@@ -473,8 +480,9 @@ On macOS it is `group`: `Local` does not read that system's process table
 (`sysctl kern.proc`), so a descendant that left the group outlives the
 end there. On both, a descendant whose parent exited before any signal
 was sent (a daemon's double fork, a job its shell left) is not found.
-remote's info route does not carry the served workspace's reach yet,
-so a remote client states none.
+A remote client states the reach the info route gave at Dial, and an
+mcpworkspace program the reach `process.info` gives
+(`mcpworkspace.ProcessInfo`, put in `Conn.Reach`).
 
 ## 9. Ports
 
@@ -672,6 +680,7 @@ the standard library alone.
 | wait | `process.wait {id} → {status, ended?, error?}` |
 | close | `process.close {id} → {status, ended?, error?, stderr?}` |
 | cancel (the owner's context ended) | `process.cancel {id} → {}`: the ladder from INT, input left open, the process left to read and wait on |
+| reach, bounds | `process.info {} → {reach?, bounds}` |
 | owner | the MCP session: each session has its own process table, at most `MaxProcesses` (32) open; its end ends them |
 | list servers | `agentworkspace/servers.list {} → {servers: [{name, description?}]}` |
 | start a server | `agentworkspace/servers.start {name, stderr?} → {id}`, a process of the session; not offered is JSON-RPC error `-32010` |
@@ -697,7 +706,7 @@ does not repeat. In summary:
 
 | Contract | remote | Scope |
 | --- | --- | --- |
-| root, descriptor, bounds, environment | `GET /v1/info` | `read` or `servers`; environment only with `exec` |
+| root, descriptor, bounds, reach, environment | `GET /v1/info` | `read` or `servers`; environment only with `exec` |
 | files | `GET /v1/fs/{stat,lstat,readlink,readdir,file}?path=N` | `read` |
 | write, remove | `PUT`, `DELETE /v1/fs/file?path=N` | `write` |
 | exec | `POST /v1/exec {…, key}`, NDJSON frames back: `{"data"}` for the stream, then one `{"output"}` or `{"error"}`; `output.interrupted` for a cancelled one | `exec` |
@@ -874,11 +883,6 @@ draft:
 
 Questions with no issue yet:
 
-- **Reach over a wire.** remote's info route does not carry the served
-  workspace's reach ([section 8](#8-ending-a-process)), nor does
-  mcpworkspace, so a client of either states none, and a caller cannot
-  tell a served `Local` on macOS from one on Linux.
-
 - **A wire fixture corpus.** A non-Go server is checked only through a
   Go client. A corpus of request and reply exchanges per wire, as
   agenttool keeps for schemas, would let another language check one
@@ -897,6 +901,9 @@ Questions with no issue yet:
   what a native Exec gives (#33); mcpworkspace's client has one
   (`mcpworkspace.Exec`), and `workspacetest.RunExec` runs the Exec table
   over an `Execer`.
+- [Section 8](#8-ending-a-process): a wire tells its client the
+  serving side's reach, and the client states it: remote's info route
+  carries `reach`, and mcpworkspace gains `process.info`.
 - [Section 2](#error-kinds): every wire carries every kind both ways
   (#38). mcpworkspace's files carry the nine, and its process and
   server methods carry them too, as JSON-RPC error `-32011` with a

@@ -511,6 +511,7 @@ func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 	if p.Has(ScopeExec) {
 		reply.Env = h.ws.Env()
 	}
+	reply.Reach = string(agentworkspace.ReachOf(h.ws))
 	writeJSON(w, reply)
 }
 

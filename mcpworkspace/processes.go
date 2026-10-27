@@ -83,6 +83,7 @@ func (s *Processes) Register(srv *mcp.Server) error {
 		mcp.AddReceivingCustomMethod(srv, wire.MethodWait, answering(c, root, s.wait)),
 		mcp.AddReceivingCustomMethod(srv, wire.MethodClose, answering(c, root, s.close)),
 		mcp.AddReceivingCustomMethod(srv, wire.MethodCancel, answering(c, root, s.cancel)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodInfo, answering(c, root, s.info)),
 	)
 }
 
@@ -442,6 +443,12 @@ func (s *Processes) cancel(_ context.Context, ss *mcp.ServerSession, p *IDParams
 	}
 	sp.cancel()
 	return &EmptyResult{}, nil
+}
+
+// info says what the server keeps: the workspace's reach, asked now,
+// and the bounds.
+func (s *Processes) info(context.Context, *mcp.ServerSession, *InfoParams) (*InfoResult, error) {
+	return &InfoResult{Info: wire.Info{Reach: string(agentworkspace.ReachOf(s.ws)), Bounds: wire.DefaultBounds()}}, nil
 }
 
 // result is how the process ended, once it has.

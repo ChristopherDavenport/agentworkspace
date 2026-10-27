@@ -291,6 +291,19 @@ func (c *Client) Root() string { return c.info.Root }
 // for a principal without exec, whom the server does not tell it.
 func (c *Client) Env() []string { return slices.Clone(c.info.Env) }
 
+// Reach is how far the served workspace's end of a process reaches, as
+// the server said it at Dial (agentworkspace.ReachOf on the served
+// workspace), and "" when it said none or one this client does not
+// know. A served Local asks its system at each call; the client keeps
+// what it was told.
+func (c *Client) Reach() agentworkspace.Reach {
+	switch r := agentworkspace.Reach(c.info.Reach); r {
+	case agentworkspace.ReachGroup, agentworkspace.ReachDescendants, agentworkspace.ReachAll:
+		return r
+	}
+	return ""
+}
+
 // Descriptor names the remote: KindRemote, the base URL with no
 // userinfo, query or fragment as its Ref, and the served Root.
 func (c *Client) Descriptor() agentworkspace.Descriptor {

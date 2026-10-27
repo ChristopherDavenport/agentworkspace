@@ -49,6 +49,11 @@ type Conn struct {
 	// through Err, as the loss it is, and one that ends under any other
 	// cause as the process's close.
 	Lost error
+	// Reach is how far the server's end of a process reaches, as it
+	// says it (ProcessInfo), and "" when it says none: what a program
+	// reports for the workspace at the other end, never a claim of its
+	// own. Nothing here acts on it.
+	Reach agentworkspace.Reach
 	// Err, when not nil, is what a failed request's error about a
 	// started process becomes for the process's caller, such as a
 	// program's word for a lost connection; nil leaves it as it is.
@@ -93,6 +98,30 @@ func Start(ctx context.Context, c Conn, cmd agentworkspace.Command) (agentworksp
 		return nil, fmt.Errorf("start %s: %w", cmd.Args[0], fromWire(err))
 	}
 	return attach(ctx, c, res.ID, cmd.Stream), nil
+}
+
+// ProcessInfo asks the server at the other end of cs what it keeps: how far
+// its end of a process reaches and its bounds, which a program puts in
+// the Conn it starts processes over (Conn.Reach, Conn.Bounds). A reach
+// this side does not know is "". A server that does not answer the
+// method is errors.ErrUnsupported.
+func ProcessInfo(ctx context.Context, cs *mcp.ClientSession) (agentworkspace.Reach, wire.Bounds, error) {
+	sctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	res, err := mcp.CallCustomMethod[*InfoParams, *InfoResult](sctx, cs, wire.MethodInfo, &InfoParams{})
+	switch {
+	case notFound(err):
+		return "", wire.Bounds{}, fmt.Errorf("process info: the server does not answer it: %w", errors.ErrUnsupported)
+	case err != nil:
+		return "", wire.Bounds{}, fmt.Errorf("process info: %w", fromWire(err))
+	}
+	reach := agentworkspace.Reach(res.Reach)
+	switch reach {
+	case agentworkspace.ReachGroup, agentworkspace.ReachDescendants, agentworkspace.ReachAll:
+	default:
+		reach = ""
+	}
+	return reach, res.Bounds, nil
 }
 
 // checkConn refuses a Conn a process cannot be started over.

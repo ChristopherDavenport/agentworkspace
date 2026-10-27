@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/mcpworkspace/wire"
 	"github.com/ChristopherDavenport/agentworkspace/workspacetest"
 )
 
@@ -21,6 +22,8 @@ func (e execer) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwor
 	return Exec(ctx, e.c, cmd)
 }
 
+func (e execer) Reach() agentworkspace.Reach { return e.c.Reach }
+
 func TestExecConformance(t *testing.T) {
 	workspacetest.RunExec(t, workspacetest.ExecBackend{Name: "mcpworkspace", Wire: true, Open: func(t *testing.T, dir string, env []string) workspacetest.Execer {
 		l, err := agentworkspace.NewLocal(dir, env)
@@ -29,7 +32,13 @@ func TestExecConformance(t *testing.T) {
 		}
 		t.Cleanup(func() { l.Close() })
 		cs, _ := serving(t, dir, l).connect(t)
-		return execer{conn(t, cs)}
+		c := conn(t, cs)
+		reach, bounds, err := ProcessInfo(context.Background(), cs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Reach, c.Bounds = reach, bounds
+		return execer{c}
 	}})
 }
 
@@ -55,5 +64,22 @@ func TestExecRefusals(t *testing.T) {
 	}
 	if _, err := Exec(context.Background(), c, agentworkspace.Command{}); err == nil {
 		t.Error("no command ran")
+	}
+}
+
+// The server says its workspace's reach and its bounds; one that says
+// no reach says none.
+func TestTheServersReachCrosses(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	reach, bounds, err := ProcessInfo(context.Background(), cs)
+	if want := agentworkspace.ReachOf(s.ws); err != nil || reach != want || want == "" || bounds != wire.DefaultBounds() {
+		t.Errorf("ProcessInfo = %q, %+v, %v; want %q and the default bounds", reach, bounds, err, want)
+	}
+	l := s.ws.(*agentworkspace.Local)
+	hidden := struct{ agentworkspace.Starter }{l}
+	cs, _ = serving(t, s.dir, hidden).connect(t)
+	if reach, _, err := ProcessInfo(context.Background(), cs); err != nil || reach != "" {
+		t.Errorf("ProcessInfo of a workspace that says no reach = %q, %v", reach, err)
 	}
 }

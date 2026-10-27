@@ -7,6 +7,14 @@ versions may break the API.
 
 ## Unreleased
 
+- Added: the served workspace's reach crosses both wires. remote's info
+  route carries `reach`, and `(*remote.Client).Reach` states it, so
+  `agentworkspace.ReachOf` on a remote client is the served one's where
+  it was `""`. mcpworkspace adds `agentworkspace/process.info {} ->
+  {reach?, bounds}` (`wire.MethodInfo`, `wire.Info`), `ProcessInfo`, its
+  client, and `Conn.Reach`, where a program puts what it said. A reach
+  a client does not know is `""`.
+
 - Added: `mcpworkspace.Exec`, a command run to its end over the process
   methods with `Workspace.Exec`'s rules (#33): its stdin written and
   closed, its output kept or streamed, `TimedOut` from its timeout, and

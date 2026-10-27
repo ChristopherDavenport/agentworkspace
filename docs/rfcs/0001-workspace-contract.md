@@ -537,9 +537,9 @@ so a program can prefix a server's tools with its name and a separator
 of underscores (`mcp__<name>__<tool>`) without two servers' tools
 running together.
 
-**List.** The provider lists the servers it offers, each a name and an
-optional description for a person choosing among them, in a stable
-order.
+**List.** The provider lists the servers it offers, each a name, an
+optional description for a person choosing among them and the secrets
+mark below, in a stable order.
 
 **Start.** Starting a server by name returns at once, as Start does,
 with the same lifetime ([section 8](#8-ending-a-process)): its close,
@@ -579,9 +579,14 @@ be offered only to a client that may neither run commands in the
 workspace nor write it: remote's `servers` scope alone, or a workspace
 that runs and writes nothing for that client.
 
-Open: #23 will add a `secrets` mark to a listed server, informative
-only: a client MUST NOT read its absence as a statement that a server
-holds none.
+**The secrets mark.** A listed server carries `secrets: true` when the
+offering gives it any secret; no name or value crosses with it. The
+mark informs a listing and no more: a listing is the workspace's own
+word ([section 13](#13-isolation-statement)), so a client MAY show the
+mark, and MUST NOT take its absence as a statement that a server holds
+none (#23). Both wires' listings carry it (remote's `GET /v1/servers`,
+mcpworkspace's `servers.list`), and `workspacetest.RunServerProvider`
+checks a server given a secret is marked and one given none is not.
 
 ## 12. Descriptor
 
@@ -678,7 +683,7 @@ The root module is the reference binding.
 | process | `Process{Stdin, Stdout, Wait, Signal, Close}` |
 | reach | `ReachOf(ws)` → `Reach`: `ReachGroup`, `ReachDescendants`, `ReachAll`, or `""` when the workspace states none; a workspace states it with a `Reach()` method |
 | owner's context | the `ctx` given to `Start` or `StartServer` |
-| server provider | `ServerProvider{Servers, StartServer}`, `Server{Name, Description}`, `ValidServerName`, `ErrNoServer` |
+| server provider | `ServerProvider{Servers, StartServer}`, `Server{Name, Description, Secrets}`, `ValidServerName`, `ErrNoServer` |
 | offering | `Offer(ws, servers, opts...)` → `*Offering`; `OfferedServer{Server, Command, Secrets}`; `WithOutputFilter(OutputFilter)`; `ErrOutputFilter` |
 | reference backend | `NewLocal(dir, env, opts...)` → `*Local`, over an `os.Root`; `WithHost(name)`; Unix (Linux and macOS) |
 
@@ -700,7 +705,7 @@ the standard library alone.
 | cancel (the owner's context ended) | `process.cancel {id} → {}`: the ladder from INT, input left open, the process left to read and wait on |
 | reach, bounds | `process.info {} → {reach?, bounds}` |
 | owner | the MCP session: each session has its own process table, at most `MaxProcesses` (32) open; its end ends them |
-| list servers | `agentworkspace/servers.list {} → {servers: [{name, description?}]}` |
+| list servers | `agentworkspace/servers.list {} → {servers: [{name, description?, secrets?}]}` |
 | start a server | `agentworkspace/servers.start {name, stderr?} → {id}`, a process of the session; not offered is JSON-RPC error `-32010` |
 | files | resource template `agentworkspace:///{op}{?path}`, op `stat`, `lstat`, `readdir`, `readlink` or `read`; at most `MaxFileBytes` (1 MiB) a read and `MaxDirEntries` (10000) a listing |
 | error kinds | a file's in its reply's `error {kind, message}`; a method's as JSON-RPC error `-32011` (`-32010` for no-server) with data `{kind}`: every kind of [section 2](#error-kinds), `noprocess` and `other` |
@@ -880,8 +885,6 @@ The issues that will add or change a rule here:
 
 - #9: an offered server's isolation, beyond the trust rule
   ([section 13](#13-isolation-statement)); waits for a second product.
-- #23: the `secrets` mark on a listed server
-  ([section 11](#11-servers-offered)).
 - #29: terminal mode, with size and resize ([section 7](#7-processes)).
 - #30: a container backend: conformance, descriptor, its instance
   ended at close.
@@ -920,6 +923,8 @@ Questions with no issue yet:
   known, and otherwise the withheld value, never a partial path (#36);
   a remote client takes the last element its info route gives a
   principal without `read` as withheld.
+- [Section 11](#11-servers-offered): the `secrets` mark on a listed
+  server, and that its absence proves nothing (#23).
 - [Section 2](#error-kinds): every wire carries every kind both ways
   (#38). mcpworkspace's files carry the nine, and its process and
   server methods carry them too, as JSON-RPC error `-32011` with a

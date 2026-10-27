@@ -66,7 +66,7 @@ func (c *Client) servers(ctx context.Context) ([]agentworkspace.Server, error) {
 		if !agentworkspace.ValidServerName(sv.Name) {
 			return nil, fmt.Errorf("remote: list servers: the workspace offers a server called %q, which agentworkspace.ValidServerName refuses", bounded(sv.Name))
 		}
-		out = append(out, agentworkspace.Server{Name: sv.Name, Description: sv.Description})
+		out = append(out, agentworkspace.Server{Name: sv.Name, Description: sv.Description, Secrets: sv.Secrets})
 	}
 	return out, nil
 }

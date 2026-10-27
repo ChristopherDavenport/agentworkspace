@@ -32,7 +32,7 @@
 //	DELETE /v1/fs/file?path=N                    write
 //	POST   /v1/exec                              exec     {args, dir, env, stdin, timeoutMs, stream, key} -> NDJSON frames
 //	POST   /v1/exec/{key}/cancel                 exec     ends the exec running under key as its context's end does; its reply carries the output so far
-//	GET    /v1/servers                           servers  -> {servers: [{name, description}]}, in the served order; unsupported when it is no ServerProvider
+//	GET    /v1/servers                           servers  -> {servers: [{name, description, secrets}]}, in the served order; unsupported when it is no ServerProvider
 //	POST   /v1/sessions                          either   -> {id, leaseMs}
 //	POST   /v1/sessions/{s}/renew                either
 //	DELETE /v1/sessions/{s}                      either   ends every process it started

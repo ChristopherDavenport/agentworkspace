@@ -131,6 +131,9 @@ func serversListed(t *testing.T, sp ServerProvider) {
 		if _, twice := got[s.Name]; twice {
 			t.Errorf("%s is listed twice", s.Name)
 		}
+		if s.Secrets {
+			t.Errorf("%s, given no secret, is marked as holding one", s.Name)
+		}
 		got[s.Name] = s.Description
 	}
 	if len(got) != len(want) {
@@ -380,10 +383,12 @@ func serverSecretsStayOut(t *testing.T, sp ServerProvider) {
 		t.Errorf("standard error = %q", got)
 	}
 	told := []string{seen.String(), stderr.String()}
-	if got, err := list(t, p); err == nil {
-		for _, sv := range got {
-			told = append(told, sv.Name, sv.Description)
-		}
+	got, err := list(t, p)
+	if err != nil || len(got) != 1 || !got[0].Secrets {
+		t.Errorf("the listing of a server given a secret = %+v, %v; want it marked", got, err)
+	}
+	for _, sv := range got {
+		told = append(told, sv.Name, sv.Description)
 	}
 	if ws, ok := p.(agentworkspace.Workspace); ok {
 		told = append(told, ws.Env()...)

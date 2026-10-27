@@ -258,6 +258,9 @@ type serverStartRequest struct {
 type serverInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+	// Secrets marks a server the workspace gives a secret; its absence
+	// proves nothing.
+	Secrets bool `json:"secrets,omitempty"`
 }
 
 // serverList is the servers route's reply, in the served workspace's

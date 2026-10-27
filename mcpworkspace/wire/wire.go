@@ -42,7 +42,7 @@
 // A workspace may offer MCP servers of its own (agentworkspace's
 // ServerProvider), each a stdio server it starts by name:
 //
-//	agentworkspace/servers.list  {} -> {servers: [{name, description?}]}
+//	agentworkspace/servers.list  {} -> {servers: [{name, description?, secrets?}]}
 //	agentworkspace/servers.start {name, stderr?} -> {id}
 //
 // A started server is a process like any other: its id takes the
@@ -121,6 +121,9 @@ type ServerInfo struct {
 	// Name is agentworkspace.ValidServerName's.
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+	// Secrets marks a server the workspace gives a secret; no name or
+	// value crosses, and its absence proves nothing.
+	Secrets bool `json:"secrets,omitempty"`
 }
 
 // CodeNoServer is the JSON-RPC error code of a servers.start refused

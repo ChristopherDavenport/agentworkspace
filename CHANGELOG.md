@@ -7,6 +7,14 @@ versions may break the API.
 
 ## Unreleased
 
+- Added: `Server.Secrets`, a mark on a listed server the offering gives
+  a secret (#23). `Offering.Servers` sets it for a server whose
+  `OfferedServer.Secrets` names any; remote's servers route and
+  mcpworkspace's `servers.list` carry it as `secrets` (`wire.ServerInfo`),
+  with no name or value. It informs a listing alone: a caller must not
+  take a server without it to hold no secret. RFC 0001 §11 states it,
+  and `workspacetest.RunServerProvider` checks it.
+
 - Changed: `Workspace.Root` is absolute, or `""` when the workspace does
   not tell this side its root, never a partial path (#36). A remote
   client dialled by a principal without `read` gave the root's last

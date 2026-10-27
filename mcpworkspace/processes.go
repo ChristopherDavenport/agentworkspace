@@ -233,7 +233,7 @@ func (s *Processes) servers(ctx context.Context, _ *mcp.ServerSession, _ *Server
 	}
 	res := &ServersResult{ServerList: wire.ServerList{Servers: make([]wire.ServerInfo, 0, len(list))}}
 	for _, sv := range list {
-		res.Servers = append(res.Servers, wire.ServerInfo{Name: sv.Name, Description: sv.Description})
+		res.Servers = append(res.Servers, wire.ServerInfo{Name: sv.Name, Description: sv.Description, Secrets: sv.Secrets})
 	}
 	return res, nil
 }

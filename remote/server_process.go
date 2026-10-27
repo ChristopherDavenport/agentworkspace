@@ -555,7 +555,7 @@ func (h *Handler) servers(w http.ResponseWriter, r *http.Request) {
 	}
 	reply := serverList{Servers: make([]serverInfo, 0, len(list))}
 	for _, sv := range list {
-		reply.Servers = append(reply.Servers, serverInfo{Name: sv.Name, Description: sv.Description})
+		reply.Servers = append(reply.Servers, serverInfo{Name: sv.Name, Description: sv.Description, Secrets: sv.Secrets})
 	}
 	writeJSON(w, reply)
 }

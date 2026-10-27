@@ -36,7 +36,7 @@ func ListServers(ctx context.Context, c Conn) ([]agentworkspace.Server, error) {
 		if !agentworkspace.ValidServerName(s.Name) {
 			return nil, fmt.Errorf("list servers: the workspace offers a server called %q, which agentworkspace.ValidServerName refuses", s.Name)
 		}
-		out = append(out, agentworkspace.Server{Name: s.Name, Description: s.Description})
+		out = append(out, agentworkspace.Server{Name: s.Name, Description: s.Description, Secrets: s.Secrets})
 	}
 	return out, nil
 }

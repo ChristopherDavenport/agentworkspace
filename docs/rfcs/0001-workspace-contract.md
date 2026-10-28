@@ -429,7 +429,11 @@ started there goes too. It SHOULD remember every descendant it found,
 the members of the process's own group among them, with something that
 tells a reused process ID apart, such as its start time, and look again
 for each at every later signal: a member that leaves the group after a
-walk, and whose parent then exits, is found by nothing else. Its reach
+walk, and whose parent then exits, is found by nothing else. One a walk
+cannot read is kept, not forgotten, and found again by its start time.
+After the kill it SHOULD walk again and kill anything it found that
+still runs, for a bounded while, so that one a read missed or a signal
+did not reach is not left behind. Its reach
 is what its table gives at the time it is asked: one that cannot read
 a table of its own processes (none mounted, an empty one, another PID
 namespace's) reaches the group alone, and says so.
@@ -443,9 +447,11 @@ is its own, which it checks at each call by `/proc/self` naming its
 process ID, and `group` when it is not. Before each signal, `Local`
 walks `/proc` by parent links from the process, its group's members and
 what it found before, remembers each descendant, member or not, with
-its start time, and stops them all before it kills them. Every walk
-reads `/proc` before it signals, so a descendant that exits in between
-can have its ID taken by another process, which then gets the signal:
+its start time, stops them all before it kills them, and walks again
+after the kill, killing anything still running, for up to 200 ms.
+Every walk reads `/proc` before it signals, so a descendant that exits
+in between can have its ID taken by another process, which then gets
+the signal:
 the start time is checked at the read, not at the send. For an INT or
 a TERM that window remains, and an unrelated process can get the
 signal. For the stop, `Local` reads each stopped process's start time

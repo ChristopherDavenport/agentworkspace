@@ -27,8 +27,10 @@ versions may break the API.
   Before each signal `Local` walks `/proc` by parent links, sends a
   descendant that leads a group of its own the signal by that group,
   remembers every descendant it finds (the group's members too, so one
-  that leaves the group later is still found) by its start time, and
-  stops them all before it kills them. A descendant whose parent
+  that leaves the group later is still found, and one a walk could not
+  read is kept) by its start time, stops them all before it kills them,
+  and returns only once a walk finds nothing it killed still running,
+  killing again what it finds, for up to 200 ms. A descendant whose parent
   exited before any signal was sent is still not found. On macOS, or
   where `/proc` is not this process's, `Local` signals the group alone.
 - Added: `Reach`, `ReachOf` and `(*Local).Reach`, how far a starter's

@@ -44,22 +44,46 @@ type group struct {
 	// signal goes to the group's ID once its leader is reaped.
 	mu     sync.Mutex
 	reaped bool
+	sys    procOS
 	found  map[int]uint64 // descendants found so far, in the group or out of it, by pid, with their start time
 }
 
 // newGroup is the group of the process pid, just started.
 func newGroup(pid int) *group {
-	start, _ := procStart(pid)
+	start, _ := startOf(pid)
 	return &group{pgid: pid, start: start}
 }
 
-// What a group reads the process table with and signals through;
-// tests replace them with a table of their own.
-var (
-	procTable  = processes
-	procStart  = startOf
-	sendSignal = syscall.Kill
-)
+// procOS is how a group reads the process table and signals: the
+// system's when a func is nil. A test gives a group a table of its own
+// here, never by replacing what every group uses, since a group of an
+// earlier test may still be ending.
+type procOS struct {
+	table func() (map[int]procInfo, bool)
+	start func(int) (uint64, bool)
+	send  func(int, syscall.Signal) error
+}
+
+func (o procOS) procs() (map[int]procInfo, bool) {
+	if o.table != nil {
+		return o.table()
+	}
+	return processes()
+}
+
+func (o procOS) startOf(pid int) (uint64, bool) {
+	if o.start != nil {
+		return o.start(pid)
+	}
+	return startOf(pid)
+}
+
+func (o procOS) kill(pid int, sig syscall.Signal) error {
+	if o.send != nil {
+		return o.send(pid, sig)
+	}
+	return syscall.Kill(pid, sig)
+}
 
 // procInfo is what a walk needs of a process.
 type procInfo struct {
@@ -82,7 +106,7 @@ func (g *group) signal(sig syscall.Signal) error {
 		return nil
 	}
 	g.descend(sig, true)
-	return sendSignal(-g.pgid, sig)
+	return g.sys.kill(-g.pgid, sig)
 }
 
 // reap records that the leader has been waited for, killing what is
@@ -110,7 +134,7 @@ func (g *group) reap(kill bool) {
 // no longer matches is continued: it is not a descendant, and the
 // kill's walk, which reads start times again, passes it by.
 func (g *group) kill(leader bool) {
-	sendSignal(-g.pgid, syscall.SIGSTOP)
+	g.sys.kill(-g.pgid, syscall.SIGSTOP)
 	stopped := map[int]uint64{}
 	for range 8 {
 		added, sent := g.descend(syscall.SIGSTOP, leader)
@@ -124,12 +148,46 @@ func (g *group) kill(leader bool) {
 		if pid < 0 {
 			pid = -pid
 		}
-		if now, ok := procStart(pid); ok && now != start {
-			sendSignal(target, syscall.SIGCONT)
+		if now, ok := g.sys.startOf(pid); ok && now != start {
+			g.sys.kill(target, syscall.SIGCONT)
 		}
 	}
 	g.descend(syscall.SIGKILL, leader)
-	sendSignal(-g.pgid, syscall.SIGKILL)
+	g.sys.kill(-g.pgid, syscall.SIGKILL)
+	// A kill is sent, not done: what it reached dies when it next runs,
+	// and one inside a system call (a rename, say) finishes that first,
+	// so the end could return while the workspace is still being
+	// changed. And a descendant a walk missed would not be reached at
+	// all. So the end waits, for a bounded while, until a walk finds
+	// nothing of the group's that is not yet a zombie, killing again
+	// what it finds.
+	for range 20 {
+		if running, ok := g.running(leader); ok && !running {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+		g.descend(syscall.SIGKILL, leader)
+		g.sys.kill(-g.pgid, syscall.SIGKILL)
+	}
+}
+
+// running reports whether a walk finds anything of the group's still
+// running: a member, or a descendant found, that is not yet a zombie.
+// ok is false when the table could not be read.
+func (g *group) running(leader bool) (running, ok bool) {
+	ps, ok := g.sys.procs()
+	if !ok {
+		return false, false
+	}
+	for pid, p := range ps {
+		if pid == g.pgid && !leader {
+			continue
+		}
+		if start, ok := g.found[pid]; (p.pgrp == g.pgid || ok && start == p.start) && !p.zombie {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 // descend sends sig to every descendant of the leader that left its
@@ -150,7 +208,7 @@ func (g *group) kill(leader bool) {
 // /proc and the signal, and its ID be given to another process in that
 // moment; the kill stops every descendant first, so it does not race.
 func (g *group) descend(sig syscall.Signal, leader bool) (int, map[int]uint64) {
-	ps, ok := procTable()
+	ps, ok := g.sys.procs()
 	if !ok {
 		return 0, nil
 	}
@@ -198,7 +256,16 @@ func (g *group) descend(sig syscall.Signal, leader bool) (int, map[int]uint64) {
 		}
 		if _, ok := signalled[target]; !ok {
 			signalled[target] = start
-			sendSignal(target, sig)
+			g.sys.kill(target, sig)
+		}
+	}
+	// One found before and not read now (gone, or its entry not
+	// readable this once) is kept: forgetting it would lose it for
+	// good once it has left the group and its parent has exited. A
+	// later walk seeds it only while its start time matches.
+	for pid, start := range g.found {
+		if _, read := ps[pid]; !read {
+			found[pid] = start
 		}
 	}
 	g.found = found

@@ -1,6 +1,6 @@
 # RFC 0001: Workspace Contract
 
-Status: draft 0.1
+Status: draft 0.2
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding; `Local` is the reference backend, and
@@ -21,8 +21,9 @@ runs a process for longer than one call with pipes to it, and the
 This document states what the Go module already promises in its doc
 comments and package docs, with the module as the reference binding
 and its two wires, `remote` (HTTP) and `mcpworkspace` (MCP), as
-bindings given against it. At draft 0.1 it adds no rule that the code
-or its doc comments do not already state. Where an open issue will add or change a rule, the section
+bindings given against it. Draft 0.1 added no rule that the code or
+its doc comments did not already state; draft 0.2 settles the issues
+listed under [changes since draft 0.1](#changes-since-draft-01). Where an open issue will add or change a rule, the section
 says so in an **Open** note naming the issue, and the rule is written
 when that issue lands. Where the code and its doc comments disagree,
 the disagreement is listed under [open questions](#19-open-questions)
@@ -206,11 +207,26 @@ constructed with, and nothing else:
 - the environment a caller is given MUST be a copy: changing it changes
   nothing a later process starts with.
 
-Removing the program's own credentials (the model provider's key, a
-token) before it constructs a workspace is the program's duty; a
-workspace adds nothing to and removes nothing from what it is given.
-See [open questions](#19-open-questions) on the doc comment that reads
-otherwise.
+A workspace MUST report the environment it was given, and MUST start
+its processes with it, adding nothing and removing nothing: not the
+model provider's key, not a token, not a name that looks like a secret.
+Keeping the program's own credentials out of a workspace is the
+program's duty, done before it constructs the workspace, and a reader
+of the environment MUST NOT take it as screened. A backend that offers
+to remove entries does so only by an option the program names, and
+reports what is left.
+
+**A process's environment.** A process starts with the workspace's
+environment with the command's entries ([section 5](#5-commands)) over
+it, name by name. An entry's name is what comes before its first `=`.
+An entry of the command replaces the workspace's entry of the same
+name, and a later entry of either replaces an earlier one of the same
+name. Each name MUST appear once in what the process receives, with
+the last value given it; where in the list it appears is not part of
+the contract. A backend MUST apply this rule itself rather than rely on
+what its process API does with a repeated name, which differs between
+systems. A binding over a wire passes the command's entries as given,
+and the serving side's workspace applies the rule.
 
 A binding over a wire tells the environment only to a principal that
 may run commands (remote's `exec` scope); to any other it is empty.
@@ -223,7 +239,7 @@ A **command** is one process to run:
 | --- | --- |
 | args | argv; MUST NOT be empty, and an empty one is refused before anything starts |
 | dir | a name of a directory, relative to the root; empty is the root. A dir that leaves the workspace, by name or through a link, is refused as *outside*; one that is not a directory is refused |
-| env | entries added to the workspace's environment, after it |
+| env | entries over the workspace's environment, name by name ([section 4](#4-environment)) |
 | stdin | the bytes of standard input for Exec; none when absent. Start refuses it: a started process's input is its pipe |
 | timeout | ends the process, and everything it started, after this long; zero is no limit but the owner's |
 | stream | where the output the caller is not otherwise given goes as it arrives: for Exec, standard output and standard error interleaved; for Start, standard error. Absent discards it (Start) or keeps it in the result (Exec) |
@@ -232,11 +248,30 @@ The process runs at the root, or at dir, as the workspace's own
 processes see it, with the workspace's environment and then the
 command's.
 
-**Argv resolution.** The doc comment says `args[0]` is "resolved in the
-workspace" and says no more. Open: #4 will state how a name without a
-slash is looked up (in the process's own `PATH`, as the workspace sees
-the file system), what an environment without `PATH` finds, and whether
-relative `PATH` entries are searched.
+**Argv resolution.** The program a command runs is found as POSIX
+`execvp` finds it, over the process's own environment:
+
+- When `args[0]` contains a `/`, it names the program, relative to dir
+  when it is not absolute.
+- When it contains none, it MUST be looked up in the `PATH` of the
+  environment the process starts with (the workspace's, with the
+  command's over it, [section 4](#4-environment)), as the workspace's
+  own processes see the file system, and never in the `PATH` of the
+  program that holds the workspace. Each entry is tried in order, and
+  the first executable file of that name runs.
+- Only absolute entries are searched. A relative entry, the empty one
+  included, MUST be skipped, not resolved against dir: otherwise a file
+  written into the workspace could stand in for a program (Go's
+  `exec.ErrDot` refuses the same).
+- With no `PATH`, a bare name is not found. A backend MUST NOT supply a
+  default, since a container's default differs from the host's.
+- A name not found is an error, and nothing runs. The process gets
+  `args[0]` as given, whatever the lookup found.
+
+`workspacetest` holds it: `Run` runs a bare name found only on the
+command's `PATH`, and `RunStarter`, over a workspace with no `PATH`,
+finds nothing for a bare name, an empty `PATH` or a relative entry, and
+runs a name with a slash relative to dir.
 
 ## 6. Exec
 
@@ -246,23 +281,43 @@ it ended:
 | Member | Meaning |
 | --- | --- |
 | stdout, stderr | what the process wrote, each in full, when the command had no stream; empty when it had one |
-| exit status | the process's status; −1 when a signal ended it |
+| exit status | the process's status; −1 when a signal ended it, or its timeout or the caller's context did |
 | timed out | the command's timeout ended it |
+| interrupted | the end of the caller's context ended it; the result comes beside the context's error |
 
 - An exit status other than zero is a result, not an error.
-- When the command's timeout ends it, Exec MUST return a result with
-  exit status −1 and *timed out* set, not an error, and MUST end
-  everything the command started.
-- When the caller's context has ended before the command runs, or ends
-  while it runs, Exec returns the context's error and the command does
-  not run to its end. Today it returns no result beside that error.
-- A command that cannot start (no args, a refused dir) is an error, and
-  nothing runs.
+- When the command's timeout ends it, Exec MUST end the command and
+  everything it started ([section 8](#8-ending-a-process)), and MUST
+  return a result with exit status −1 and *timed out* set, not an
+  error.
+- When the caller's context ends while the command runs, Exec MUST end
+  the command and everything it started in the same way, and MUST
+  return a result beside the context's error: the output collected
+  until the command ended, exit status −1 and *interrupted* set. A
+  context that ends after the command itself exited, while a child it
+  left still holds its output open, interrupts nothing: the result
+  keeps the command's own exit status. With a
+  stream, the output went to the stream as it came, and the result
+  keeps none, as when the command runs to its end. A caller that
+  interrupts a command still learns what it printed, which a build or a
+  test run has often said by then.
+- When the caller's context has ended before the command runs, Exec
+  returns the context's error, runs nothing, and gives no result.
+- A command that cannot start (no args, a refused dir, a program not
+  found) is an error, and nothing runs.
 
-Open: #5 will state the result of an interrupted command: the output
-collected so far, with exit status −1 and an `interrupted` mark, beside
-the cancellation error, and what a wire must carry so the client gets
-it. Open: #33 will give the mcpworkspace client an Exec composed over
+A binding over a wire MUST deliver an interrupted command's output to
+the client, so its cancellation is a message, not a dropped connection.
+**Pending (#5, the wire half):** remote does not yet. `/v1/exec` sends
+its `{"output"}` frame only at the end, and the client hangs up when its
+context ends, so over remote an interrupted Exec returns −1 and
+*interrupted* with no output kept, beyond what a stream was given. The
+change gives exec a key and a cancel route, as processes already have
+`/cancel`, and the client reads on after it cancels. Until it lands,
+`workspacetest.Run` checks the kept output on every backend but a
+remote one.
+
+Open: #33 will give the mcpworkspace client an Exec composed over
 Start, held to this section.
 
 ## 7. Processes
@@ -317,22 +372,99 @@ end it and everything it started:
 
 When the process exits by itself, what it started MUST go with it.
 
-**Close** first closes the process's input and gives it a moment to
-exit, as the MCP stdio transport's shutdown asks, then terminates it
-(TERM), then kills it (KILL). It returns once the process has exited,
-and MAY be called more than once. The reference binding's moment is two
-seconds at each step (`internal/lifetime.Grace`), and `workspacetest`
-checks against the same value.
+**The ladder.** Every way a process is ended (its close, the end of its
+context, its timeout, the workspace's close, and an Exec's context or
+timeout, [section 6](#6-exec)) MUST send the same signals, in this
+order, to the process and everything it started, and stop once the
+process has exited:
 
-The ladder for the other ways is not stated by the contract today. The
-reference binding, for a started process, sends TERM and then KILL
-after the same grace when the context or the timeout ends it, and for
-Exec sends KILL at once.
+1. INT;
+2. a grace later, TERM;
+3. a grace after that, KILL.
 
-Open: #5 will choose one escalation ladder for every way a process is
-ended. Open: #32 will state that "everything it started" includes the
-descendants that left its process group or session, and how a backend
-that cannot find an orphaned descendant says so.
+When the process exits partway, what it started that is still running
+is killed at once. The grace is the backend's; the reference binding's
+is two seconds at each step (`internal/lifetime.Grace`), and
+`workspacetest` checks against the same value.
+
+**Close** first closes the process's input and gives it a grace to
+exit, as the MCP stdio transport's shutdown asks, and then climbs the
+ladder. It returns once the process has exited, and MAY be called more
+than once. The end of the context and the timeout are interrupts, not a
+shutdown, and begin at the ladder's first step.
+
+The ladder is the same for all of them so that a program behaves one
+way however it is stopped. INT comes first because it is the interrupt
+a terminal's user sends to a foreground job, and the end of a call's
+context is the user's interrupt (agenttool RFC 0001, stopping a call);
+a program that buffers its output or prints a summary writes it on INT,
+which is what an interrupted Exec returns. TERM follows because a job a
+non-interactive shell started in the background ignores INT (POSIX has
+it ignore INT and QUIT) but not TERM, and because the MCP stdio shutdown
+names TERM, so a server or a background job gets its chance to clean up
+before KILL. A process that ignores both is killed two graces after the
+ladder begins.
+
+**Everything it started.** Ending a process MUST end every process it
+started, directly or through others, whatever process group or session
+it moved to (by `setsid` or `setpgid`, or a shell's job control): each
+step of the ladder reaches them as it reaches the process. Not every
+backend can find them all, so each MUST state its **reach**, how far
+its end of a process goes:
+
+| Reach | What an end reaches |
+| --- | --- |
+| `group` | the process's group alone; a descendant that left it outlives the end |
+| `descendants` | the group, and every descendant found through parent links when a signal is sent, whatever its group or session; one whose parent exited before any signal was sent has been given to another parent, and is not found |
+| `all` | every descendant, orphaned or not, as a backend that ends a PID namespace or a cgroup whole reaches |
+
+A caller MUST NOT take a backend that states no reach to reach `all`.
+A container backend reaches `all` by ending its instance's PID
+namespace.
+
+A backend that walks a process table to find descendants MUST NOT
+signal the program's own process or group. It SHOULD send a descendant
+that leads a group of its own the signal by that group, so what it
+started there goes too. It SHOULD remember every descendant it found,
+the members of the process's own group among them, with something that
+tells a reused process ID apart, such as its start time, and look again
+for each at every later signal: a member that leaves the group after a
+walk, and whose parent then exits, is found by nothing else. One a walk
+cannot read is kept, not forgotten, and found again by its start time.
+After the kill it SHOULD walk again and kill anything it found that
+still runs, for a bounded while, so that one a read missed or a signal
+did not reach is not left behind. Its reach
+is what its table gives at the time it is asked: one that cannot read
+a table of its own processes (none mounted, an empty one, another PID
+namespace's) reaches the group alone, and says so.
+Before the last step it SHOULD stop what it found and walk again until
+a walk finds nothing new, so that no descendant forks a child the kill
+would miss: a child whose parent is killed first is given to another
+parent, and found no more.
+
+The reference binding's reach is `descendants` on Linux while `/proc`
+is its own, which it checks at each call by `/proc/self` naming its
+process ID, and `group` when it is not. Before each signal, `Local`
+walks `/proc` by parent links from the process, its group's members and
+what it found before, remembers each descendant, member or not, with
+its start time, stops them all before it kills them, and walks again
+after the kill, killing anything still running, for up to 200 ms.
+Every walk reads `/proc` before it signals, so a descendant that exits
+in between can have its ID taken by another process, which then gets
+the signal:
+the start time is checked at the read, not at the send. For an INT or
+a TERM that window remains, and an unrelated process can get the
+signal. For the stop, `Local` reads each stopped process's start time
+again once the stops are sent and continues any that no longer
+matches, so an unrelated process is held stopped only for that moment;
+the KILL that follows reaches only what is stopped and still matches,
+which cannot exit and give up its ID unless something else kills it.
+On macOS it is `group`: `Local` does not read that system's process table
+(`sysctl kern.proc`), so a descendant that left the group outlives the
+end there. On both, a descendant whose parent exited before any signal
+was sent (a daemon's double fork, a job its shell left) is not found.
+remote's info route does not carry the served workspace's reach yet,
+so a remote client states none.
 
 ## 9. Ports
 
@@ -418,36 +550,58 @@ holds none.
 ## 12. Descriptor
 
 A **descriptor** is what the session records about a workspace, in
-agentsession RFC 0001's `env` entry:
+agentsession RFC 0001's `env` entry (draft 0.14 and later):
 
 | Descriptor | agentsession `env` | Meaning |
 | --- | --- | --- |
 | kind | `workspace.kind` | `local`, `container` or `remote`; closed |
-| ref | `workspace.ref` | what the harness resolves to the workspace: a container's image digest, a remote's endpoint; empty for `local` |
+| ref | `workspace.ref` | what the file system was made from or is reached by: a container's image digest, a remote's endpoint; absent for `local` |
+| host | `workspace.host` | the machine the file system is on |
+| instance | `workspace.instance` | the file system among those kind, ref and host describe: a container's or a sandbox's ID |
 | root | `cwd` | the root |
 
 The descriptor is a fact about placement, recorded so that a session
-resumed against another file system records a substitution.
+resumed against another file system records a substitution. It MUST
+carry, in these members, every fact that tells its file system from
+another the session could be resumed against; ref, host and instance
+are strings, opaque to a reader, which compares them exactly, and an
+empty one is not written. The machine and the instance MUST NOT be
+written into ref.
 
-- `Local` records `kind: local` and its root, and no `ref`.
-- A remote client records `kind: remote`, the base URL with no
-  userinfo, query or fragment as `ref`, and the served root. It keeps
-  the served workspace's own descriptor beside it (Go's `Served`), and
-  never puts a credential in either.
+- A `local` workspace MUST set host to a name that tells this machine
+  from the others a session may be resumed on, and MUST NOT set ref.
+  Its instance is absent: the root on that host is the file system.
+- A `container` workspace MUST set ref to the image digest, a digest
+  rather than a tag, and instance to the running instance, since a
+  restart from the same image is another file system; and host when
+  its runtime is not on the agent's machine.
+- A `remote` client records `kind: remote` and the base URL with no
+  userinfo, query or fragment as ref, and the served root. It keeps the
+  served workspace's own descriptor beside it (Go's `Served`), with that
+  workspace's host and instance, and never puts a credential in either.
 - A tunnel's client records `kind: remote` and
-  `http://<name>.tunnel.invalid` as `ref`, a host that resolves
-  nowhere.
+  `http://<name>.tunnel.invalid` as ref, a host that resolves nowhere.
 
-Since agentsession 0.14, `workspace` also has `host`, the machine the
-file system is on, and `instance`, the file system among those its
-`kind`, `ref` and `host` describe, both opaque strings; a writer SHOULD
-write `host` for every `local` workspace and `instance` whenever a
-restart gives a new file system. No descriptor carries either at draft
-0.1. Open: #3 will add both members, say which kind sets which, and
-what a `host` value must distinguish.
+What host holds is the binding's choice, as long as it tells the
+machines apart and is never empty. The reference binding's `Local`
+uses the system's host name, which two machines can share (two laptops
+of one model), and lets the program name the machine instead
+(`WithHost`, which refuses an empty name). Where the system gives no
+host name, it uses `machine-` and 16 hex digits of a SHA-256 of a label
+and the machine ID (the first of `/etc/machine-id`, `/run/machine-id`
+and D-Bus's that is not empty), never the ID itself, and `localhost`
+where there is no machine ID either. A host name
+lands in session files that a program may publish, so a redactor
+SHOULD know the member.
 
-Open: #30, a container backend, records the image digest as `ref` and
-the running instance as `instance`, and ends its instance at close.
+Over remote, a principal without `read` is told the served descriptor
+without its host, as it is told the root's last element alone.
+
+A descriptor's members are fixed for the workspace's life: asking
+twice gives the same answer, and a binding MAY cache it.
+
+Open: #30, a container backend, records the image digest as ref and
+the running instance as instance, and ends its instance at close.
 
 ## 13. Isolation statement
 
@@ -481,15 +635,16 @@ The root module is the reference binding.
 | write, remove | `Workspace.WriteFile(ctx, name, data, perm)`, `Workspace.Remove(ctx, name)` |
 | environment | `Workspace.Env()`, a copy |
 | command | `Command{Args, Dir, Env, Stdin, Timeout, Stream}` |
-| exec | `Workspace.Exec(ctx, cmd)` → `*Output{Stdout, Stderr, ExitCode, TimedOut}` |
-| descriptor | `Workspace.Descriptor()` → `Descriptor{Kind, Ref, Root}`; `KindLocal`, `KindContainer`, `KindRemote` |
+| exec | `Workspace.Exec(ctx, cmd)` → `*Output{Stdout, Stderr, ExitCode, TimedOut, Interrupted}`, beside `ctx.Err()` when interrupted |
+| descriptor | `Workspace.Descriptor()` → `Descriptor{Kind, Ref, Host, Instance, Root}`; `KindLocal`, `KindContainer`, `KindRemote` |
 | close | `Workspace.Close()` |
 | starter | `Starter` interface; `Start(ctx, ws, cmd)` refuses a non-starter with `errors.ErrUnsupported` |
 | process | `Process{Stdin, Stdout, Wait, Signal, Close}` |
+| reach | `ReachOf(ws)` → `Reach`: `ReachGroup`, `ReachDescendants`, `ReachAll`, or `""` when the workspace states none; a workspace states it with a `Reach()` method |
 | owner's context | the `ctx` given to `Start` or `StartServer` |
 | server provider | `ServerProvider{Servers, StartServer}`, `Server{Name, Description}`, `ValidServerName`, `ErrNoServer` |
 | offering | `Offer(ws, servers, opts...)` → `*Offering`; `OfferedServer{Server, Command, Secrets}`; `WithOutputFilter(OutputFilter)`; `ErrOutputFilter` |
-| reference backend | `NewLocal(dir, env)` → `*Local`, over an `os.Root`; Unix (Linux and macOS) |
+| reference backend | `NewLocal(dir, env, opts...)` → `*Local`, over an `os.Root`; `WithHost(name)`; Unix (Linux and macOS) |
 
 ### mcpworkspace
 
@@ -611,13 +766,15 @@ The reference suite is Go package `workspacetest`:
 
 | Table | Holds |
 | --- | --- |
-| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec, invalid names |
-| `RunStarter` | a starter: the pipes, the directory and environment, the lifetimes (context, timeout, close, exit, the workspace's close), signals, refusals, concurrency |
+| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names, the descriptor's members for its kind, concurrent use |
+| `RunStarter` | a starter: the pipes, the directory and environment (argv resolution, the environment as given), the lifetimes (context, timeout, close, exit, the workspace's close, a descendant that left the group), signals, refusals, concurrency |
 | `RunServerProvider` | a server provider: the list, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
 | `Confined` | the layout `Run` uses: a workspace beside a directory holding a secret, with links that lead out and one that stays in |
 
 A backend runs the tables from its own tests, as `Local`, remote, the
-tunnel and mcpworkspace do. The tables make real files, links, FIFOs
+tunnel and mcpworkspace do. A case that needs a descendant to leave
+its group is skipped for a backend whose reach is `group`, and where
+`setsid` is not on the `PATH`. The tables make real files, links, FIFOs
 and processes, expect a POSIX shell and the common utilities (`sh`,
 `cat`, `sleep`, `pwd`) on the workspace's `PATH`, and bound every wait,
 so a process that was not ended fails rather than hangs.
@@ -666,12 +823,8 @@ conforming client of the old wire cannot read takes a new one.
 
 The issues that will add or change a rule here:
 
-- #3: the descriptor's `host` and `instance` members, and which kind
-  sets which ([section 12](#12-descriptor)).
-- #4: argv resolution ([section 5](#5-commands)).
-- #5: what an interrupted Exec returns, the wire change that carries
-  it, and one escalation ladder ([sections 6](#6-exec) and
-  [8](#8-ending-a-process)).
+- #5, the wire half: remote carrying an interrupted Exec's output, by an
+  exec key and a cancel route ([section 6](#6-exec)).
 - #9: an offered server's isolation, beyond the trust rule
   ([section 13](#13-isolation-statement)); waits for a second product.
 - #23: the `secrets` mark on a listed server
@@ -680,8 +833,6 @@ The issues that will add or change a rule here:
 - #30: a container backend: conformance, descriptor, its instance
   ended at close.
 - #31: `connect(port)` ([section 9](#9-ports)).
-- #32: descendants that left the process group or session
-  ([section 8](#8-ending-a-process)).
 - #33: Exec over mcpworkspace's process methods
   ([sections 6](#6-exec) and [14](#mcpworkspace)).
 - #34: named roots ([section 10](#10-roots)).
@@ -690,30 +841,10 @@ Where the code and its doc comments disagree today. This draft does
 not pick a side; each is settled by the issue named, or by a later
 draft:
 
-- **Argv resolution.** `Command.Args`'s doc says `args[0]` "is resolved
-  in the workspace"; `Local.Exec` and `Local.Start` look it up on the
-  `PATH` of the agent's process, not the workspace's environment (#4).
-- **"Everything it started".** The doc comments of `Command.Timeout`,
-  `Starter.Start`, `Process.Signal` and `Process.Close`, and the README
-  for Exec, promise that an end reaches everything the process started;
-  `Local` signals the process group, so a descendant that called
-  `setsid` or `setpgid` outlives it, for Exec and Start alike (#32).
-- **Exec's ladder.** `Process.Close` closes input, then sends TERM,
-  then KILL; `Local.Exec` sends KILL at once on a cancel or a timeout,
-  and a started process's context end skips the closing of input. The
-  doc comments state the ladder for Close alone (#5).
-- **`Descriptor.Ref`.** Its doc comment lists "a host, an instance ID"
-  among what `Ref` may hold; agentsession 0.14 gives the host and the
-  instance members of their own and says `ref` is absent for `local`
-  (#3).
 - **`Workspace.Root`.** Its doc comment says it is the absolute path of
   the working directory; a remote client dialled by a principal without
   `read` is told the root's last element alone, so its `Root()`, and
   its `Served().Root`, are not absolute.
-- **`Workspace.Env`.** Its doc comment says the environment has "the
-  provider's key and other credentials already removed"; no backend
-  removes anything. `NewLocal` keeps what it is given, and its own doc
-  comment makes the removal the product's.
 - **Error kinds over mcpworkspace.** remote maps every kind of
   [section 2](#error-kinds) both ways; mcpworkspace's file errors have
   five kinds, so *exist*, *unsupported* and *closed* reach its client as
@@ -731,10 +862,40 @@ draft:
 
 Questions with no issue yet:
 
-- **Duplicate environment entries.** The command's environment is
-  added after the workspace's; which entry a process sees when both set
-  one name is Go's (`os/exec` keeps the last), not stated.
+- **Reach over a wire.** remote's info route does not carry the served
+  workspace's reach ([section 8](#8-ending-a-process)), nor does
+  mcpworkspace, so a client of either states none, and a caller cannot
+  tell a served `Local` on macOS from one on Linux.
+
 - **A wire fixture corpus.** A non-Go server is checked only through a
   Go client. A corpus of request and reply exchanges per wire, as
   agenttool keeps for schemas, would let another language check one
   without Go.
+
+## Changes since draft 0.1
+
+- [Section 5](#5-commands): argv resolution (#4). A bare `args[0]` is
+  looked up in the `PATH` of the process's own environment, absolute
+  entries alone; with no `PATH` it is not found.
+- [Section 4](#4-environment): a process's environment (#41). The
+  command's entries are over the workspace's name by name, and each
+  name reaches the process once, with the last value given it.
+- [Section 4](#4-environment): a workspace reports the environment it
+  was given and removes nothing; keeping secrets out is the program's
+  (#37). `Workspace.Env`'s doc comment no longer says the provider's key
+  is already removed.
+- [Section 6](#6-exec): an interrupted Exec (#5) ends what the command
+  started and returns the output so far, with exit status −1 and
+  *interrupted*, beside the context's error. A wire MUST carry it;
+  remote's change is pending.
+- [Section 8](#8-ending-a-process): one ladder for every way a process
+  is ended (#5): INT, then TERM, then KILL, a grace apart, with Close
+  closing input first. The reference binding sent TERM then KILL for a
+  started process and KILL at once for Exec.
+- [Section 8](#8-ending-a-process): everything a process started
+  includes the descendants that left its group or session (#32), and a
+  backend states its reach (`group`, `descendants`, `all`).
+- [Section 12](#12-descriptor): the descriptor's host and instance
+  members (#3), as agentsession 0.14 defines them, which kind sets
+  which, and that a local host must tell the machines apart; ref holds
+  neither.

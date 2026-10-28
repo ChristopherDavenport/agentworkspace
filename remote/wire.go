@@ -91,17 +91,19 @@ const (
 
 // descriptor is an agentworkspace.Descriptor on the wire.
 type descriptor struct {
-	Kind string `json:"kind"`
-	Ref  string `json:"ref,omitempty"`
-	Root string `json:"root"`
+	Kind     string `json:"kind"`
+	Ref      string `json:"ref,omitempty"`
+	Host     string `json:"host,omitempty"`
+	Instance string `json:"instance,omitempty"`
+	Root     string `json:"root"`
 }
 
 func descriptorOf(d agentworkspace.Descriptor) descriptor {
-	return descriptor{Kind: d.Kind, Ref: d.Ref, Root: d.Root}
+	return descriptor{Kind: d.Kind, Ref: d.Ref, Host: d.Host, Instance: d.Instance, Root: d.Root}
 }
 
 func (d descriptor) workspace() agentworkspace.Descriptor {
-	return agentworkspace.Descriptor{Kind: d.Kind, Ref: d.Ref, Root: d.Root}
+	return agentworkspace.Descriptor{Kind: d.Kind, Ref: d.Ref, Host: d.Host, Instance: d.Instance, Root: d.Root}
 }
 
 // limits are the bounds a server keeps, as the info route says them,

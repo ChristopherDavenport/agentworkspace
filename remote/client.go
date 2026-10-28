@@ -470,7 +470,10 @@ func (c *Client) Remove(ctx context.Context, name string) error {
 
 // Exec runs one command in the served workspace. The request's context
 // is the process's on the server: ctx's end, or Close, ends it and
-// everything it started. Command.Timeout is sent, and the server ends
+// everything it started. Ended by ctx, Exec returns an Output with
+// ExitCode -1 and Interrupted beside ctx.Err(), whose Stdout and Stderr
+// are empty: the wire carries nothing past the hang-up but what a
+// Command.Stream was given. Command.Timeout is sent, and the server ends
 // the process at it. Command.Stream gets the output as the server sends
 // it; when writing to it fails, the command is ended and Exec returns
 // that error.
@@ -505,9 +508,19 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 		}
 		return fmt.Errorf("remote: exec %s: %w", cmd.Args[0], err)
 	}
+	// fail answers a request that ended. One ctx ended is interrupted:
+	// what of its output the Stream was given is all the wire carries
+	// past a hang-up, so the Output holds none (#5's wire change is to
+	// come).
+	fail := func(err error) (*agentworkspace.Output, error) {
+		if err = ended(err); ctx.Err() != nil && err == ctx.Err() {
+			return &agentworkspace.Output{ExitCode: -1, Interrupted: true}, err
+		}
+		return nil, err
+	}
 	resp, err := c.request(rctx, http.MethodPost, routeExec, nil, bytes.NewReader(body), "application/json")
 	if err != nil {
-		return nil, ended(err)
+		return fail(err)
 	}
 	defer resp.Body.Close()
 	br := bufio.NewReader(resp.Body)
@@ -518,7 +531,7 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 			return nil, fmt.Errorf("remote: exec %s: %w", cmd.Args[0], err)
 		}
 		if err != nil {
-			return nil, ended(fmt.Errorf("the reply ended without an outcome: %w", err))
+			return fail(fmt.Errorf("the reply ended without an outcome: %w", err))
 		}
 		var f execFrame
 		if err := json.Unmarshal(line, &f); err != nil {

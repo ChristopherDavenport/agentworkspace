@@ -38,7 +38,8 @@ const (
 
 // Workspace is where a session's tools act. Names given to it are
 // fs.ValidPath names relative to Root; turning a path the model wrote
-// into one is the tool's.
+// into one is the tool's. Its methods are safe for concurrent use, and
+// Root and Descriptor answer the same every time.
 type Workspace interface {
 	// Root is the absolute path of the working directory as the
 	// workspace's own processes see it: the checkout on this machine,
@@ -59,9 +60,19 @@ type Workspace interface {
 	// Remove deletes a file or an empty directory.
 	Remove(ctx context.Context, name string) error
 	// Env is the environment every process in the workspace starts
-	// with, the provider's key and other credentials already removed.
+	// with: what the workspace was given, a copy, with nothing added or
+	// removed. A workspace keeps no credential out of it; leaving the
+	// provider's key and other secrets out of what it is given is the
+	// program's.
 	Env() []string
-	// Exec runs one command to completion in a fresh process.
+	// Exec runs one command to completion in a fresh process. An exit
+	// status other than zero is an Output, not an error. When
+	// Command.Timeout ends the command, Exec returns its Output with
+	// ExitCode -1 and TimedOut, and no error. When ctx ends first, Exec
+	// ends the command and everything it started, and returns the
+	// output collected so far, with ExitCode -1 and Interrupted, beside
+	// ctx.Err(); a ctx that has ended before the command starts runs
+	// nothing and gives no Output.
 	Exec(ctx context.Context, cmd Command) (*Output, error)
 	// Descriptor is what the session records about where the tools ran.
 	Descriptor() Descriptor
@@ -71,12 +82,20 @@ type Workspace interface {
 
 // Command is one process to run.
 type Command struct {
-	// Args is argv; Args[0] is resolved in the workspace.
+	// Args is argv. Args[0] with no slash is looked up as execvp(3)
+	// does, on the PATH of the environment the process starts with
+	// (Workspace.Env, then Env), as the workspace's own processes see
+	// the file system, never on this process's: a relative PATH entry,
+	// the empty one included, is skipped, and with no PATH the name is
+	// not found. One with a slash is used as it is, relative to Dir.
+	// The process gets Args[0] as given.
 	Args []string
 	// Dir is relative to Root; "" is Root. A Dir that leaves the
 	// workspace, by name or through a link, is ErrOutside.
 	Dir string
-	// Env is added to Workspace.Env.
+	// Env is over Workspace.Env, name by name: an entry replaces the
+	// workspace's of the same name, and a later entry an earlier one,
+	// so each name reaches the process once.
 	Env []string
 	// Stdin is the process's standard input; nil is none. Start refuses
 	// it: a started process's input is Process.Stdin.
@@ -95,21 +114,41 @@ type Command struct {
 // Output is how a process ended.
 type Output struct {
 	Stdout, Stderr []byte
-	// ExitCode is the process's status; -1 when it was killed.
+	// ExitCode is the process's status; -1 when it was killed, or
+	// ended by its timeout or its context.
 	ExitCode int
 	// TimedOut reports that Command.Timeout ended it.
 	TimedOut bool
+	// Interrupted reports that the end of Exec's context ended it. The
+	// Output is then what the command wrote until its end, returned
+	// beside the context's error.
+	Interrupted bool
 }
 
 // Descriptor is what the session records about a workspace, in its env
-// entry: agentsession's workspace kind and ref, and the root, which is
-// the entry's cwd.
+// entry: agentsession's workspace members (kind, ref, host and
+// instance, every fact that tells this file system from another the
+// session could be resumed against) and the root, which is the entry's
+// cwd. Each is a string a reader compares exactly; one that is empty
+// is not written.
 type Descriptor struct {
 	// Kind is KindLocal, KindContainer or KindRemote.
 	Kind string
-	// Ref is what the harness resolves to it: an image digest, a host,
-	// an instance ID; empty for the local machine.
+	// Ref is what the workspace was made from or is reached by: a
+	// container's image digest, a remote's endpoint. It is empty for
+	// KindLocal. The machine and the instance are Host and Instance,
+	// never Ref.
 	Ref string
+	// Host names the machine the file system is on, as the program
+	// names it: a KindLocal workspace sets it to a name that tells this
+	// machine from the others a session may be resumed on, and a
+	// container one when its runtime is not on the agent's machine. A
+	// host name lands in session files a program may publish.
+	Host string
+	// Instance names the file system among those Kind, Ref and Host
+	// describe: a container's or a sandbox's ID, set whenever a restart
+	// gives a new file system.
+	Instance string
 	// Root is Workspace.Root.
 	Root string
 }
@@ -130,6 +169,39 @@ type Starter interface {
 	Start(ctx context.Context, cmd Command) (Process, error)
 }
 
+// Reach is how far a Starter's end of a process reaches among what the
+// process started. Every end (Process.Close, the context's, the
+// timeout's, the workspace's Close, and Exec's) is meant to end every
+// process the process started, directly or not, whatever group or
+// session it moved to; a backend that cannot find some of them says
+// which with its Reach, and a caller asks for it with ReachOf.
+type Reach string
+
+const (
+	// ReachGroup is the process's group alone: a descendant that
+	// called setsid or setpgid, or that a shell's job control put in a
+	// group of its own, outlives the end.
+	ReachGroup Reach = "group"
+	// ReachDescendants is the group and every descendant found through
+	// parent links when a signal is sent, whatever its group or
+	// session. A descendant whose parent exited before any signal was
+	// sent has been given to another parent, and is not found.
+	ReachDescendants Reach = "descendants"
+	// ReachAll is every descendant, orphaned or not, as when the
+	// backend ends a PID namespace or a cgroup whole.
+	ReachAll Reach = "all"
+)
+
+// ReachOf says how far ending a process started in ws reaches, as ws
+// says with a Reach method, and "" when ws does not say. "" is not a
+// claim of ReachAll.
+func ReachOf(ws Workspace) Reach {
+	if r, ok := ws.(interface{ Reach() Reach }); ok {
+		return r.Reach()
+	}
+	return ""
+}
+
 // Process is a process started in a workspace. Its methods are safe
 // for concurrent use: one goroutine may read Stdout while another
 // writes Stdin and a third waits.
@@ -146,14 +218,18 @@ type Process interface {
 	// failed; an exit status other than zero is not an error. Wait may
 	// be called any number of times and returns the same each time.
 	Wait() (status int, err error)
-	// Signal sends sig to the process and to everything it started. It
-	// is os.ErrProcessDone once the process has exited.
+	// Signal sends sig to the process and to everything it started, as
+	// far as the workspace's Reach goes. It is os.ErrProcessDone once
+	// the process has exited.
 	Signal(sig os.Signal) error
 	// Close ends the process, if it is still running, and everything it
 	// started, and releases the pipes. It first closes Stdin and gives
 	// the process a moment to exit, as the MCP stdio transport's
-	// shutdown asks, then terminates it, then kills it. It returns once
-	// the process has exited, and may be called more than once.
+	// shutdown asks, then climbs the ladder every end of a process
+	// climbs (the context's, Command.Timeout's, Exec's): it interrupts
+	// them (SIGINT), then terminates them (SIGTERM), then kills them
+	// (SIGKILL), a moment apart. It returns once the process has
+	// exited, and may be called more than once.
 	Close() error
 }
 

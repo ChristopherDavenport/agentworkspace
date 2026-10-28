@@ -130,7 +130,8 @@ keeps its rule; one about Local alone stays in the root's tests.
   the host's environment.
 - A started process lives no longer than its owner: `Close`, the
   context's end, `Command.Timeout` and the workspace's `Close` end it
-  and everything it started.
+  and everything it started, with one ladder (SIGINT, SIGTERM,
+  SIGKILL), and a backend states how far that reaches (`Reach`).
 - `Start` is optional (`Starter`), so a workspace that only stores
   files is still a `Workspace`.
 - So is offering MCP servers (`ServerProvider`): a server it starts
@@ -172,8 +173,9 @@ Peer repositories, each independently versioned:
 - `../dax`: the first product. Its `workspace` package is this
   module's draft; dax moves here by changing its import.
 - `../agentsession`: the session format. `Descriptor` is what its env
-  entry records (`EnvEntry.SetWorkspace(kind, ref)`); this module does
-  not import it.
+  entry records (`EnvEntry.SetWorkspace(kind, ref)`, and the `host` and
+  `instance` members since its RFC's draft 0.14); this module does not
+  import it.
 - `../agenttool`, `../agentturn`: the tool contract and the loop. Tools
   written over a `Workspace` live in a product for now; they move here
   (`tools/`) once a second product wants them.

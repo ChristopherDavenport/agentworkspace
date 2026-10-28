@@ -20,10 +20,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -41,7 +45,7 @@ type Backend struct {
 }
 
 // Run runs every table a Workspace keeps (confinement, a FIFO, Env,
-// Exec, names that are not valid paths) on every backend, each a subtest
+// Exec, names that are not valid paths, the descriptor, concurrent use) on every backend, each a subtest
 // named after the table and then the backend.
 func Run(t *testing.T, backends ...Backend) {
 	for _, table := range []struct {
@@ -54,6 +58,7 @@ func Run(t *testing.T, backends ...Backend) {
 		{"EnvIsACopy", envIsACopy},
 		{"Exec", execRuns},
 		{"NamesThatAreNotValidPaths", namesThatAreNotValidPaths},
+		{"Concurrently", concurrently},
 	} {
 		t.Run(table.name, func(t *testing.T) {
 			for _, b := range backends {
@@ -188,6 +193,7 @@ func insideWorks(t *testing.T, b Backend) {
 	if d := ws.Descriptor(); d.Root != ws.Root() {
 		t.Errorf("Descriptor.Root = %q, Root = %q", d.Root, ws.Root())
 	}
+	describes(t, ws.Descriptor())
 	// Where links lead is read through the workspace, or not at all:
 	// never followed on the host.
 	links, ok := ws.FS().(fs.ReadLinkFS)
@@ -206,6 +212,61 @@ func insideWorks(t *testing.T, b Backend) {
 	if target, err := links.ReadLink("linkdir"); err != nil || target != outside {
 		t.Errorf("ReadLink linkdir = %q, %v", target, err)
 	}
+}
+
+// describes checks d has the members its kind must: a local workspace
+// names its host and has no ref, a container its image and its
+// instance, a remote its endpoint.
+func describes(t *testing.T, d agentworkspace.Descriptor) {
+	t.Helper()
+	switch d.Kind {
+	case agentworkspace.KindLocal:
+		if d.Ref != "" || d.Host == "" {
+			t.Errorf("a local Descriptor = %+v, want a Host and no Ref", d)
+		}
+	case agentworkspace.KindContainer:
+		if d.Ref == "" || d.Instance == "" {
+			t.Errorf("a container Descriptor = %+v, want a Ref and an Instance", d)
+		}
+	case agentworkspace.KindRemote:
+		if d.Ref == "" {
+			t.Errorf("a remote Descriptor = %+v, want a Ref", d)
+		}
+	default:
+		t.Errorf("Descriptor.Kind = %q", d.Kind)
+	}
+}
+
+// The workspace's methods are safe for concurrent use, and its
+// Descriptor and Root answer the same every time.
+func concurrently(t *testing.T, b Backend) {
+	ws := b.Open(t, t.TempDir())
+	ctx := context.Background()
+	d, root := ws.Descriptor(), ws.Root()
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() {
+			name := fmt.Sprintf("f%d.txt", i)
+			if err := ws.WriteFile(ctx, name, []byte(name), 0o644); err != nil {
+				t.Error(err)
+				return
+			}
+			if b, err := fs.ReadFile(ws.FS(), name); err != nil || string(b) != name {
+				t.Errorf("read %s = %q, %v", name, b, err)
+			}
+			if _, err := fs.Stat(ws.FS(), name); err != nil {
+				t.Error(err)
+			}
+			if got := ws.Descriptor(); got != d || ws.Root() != root {
+				t.Errorf("Descriptor = %+v, then %+v", d, got)
+			}
+			ws.Env()
+			if err := ws.Remove(ctx, name); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // Nothing blocks on a FIFO: it opens, or fails, at once, what was
@@ -261,6 +322,7 @@ func envIsACopy(t *testing.T, b Backend) {
 func execRuns(t *testing.T, b Backend) {
 	dir := t.TempDir()
 	os.Mkdir(filepath.Join(dir, "sub"), 0o755)
+	hello(t, dir)
 	ws := b.Open(t, dir)
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -272,6 +334,7 @@ func execRuns(t *testing.T, b Backend) {
 		{"Dir below the root", agentworkspace.Command{Args: []string{"pwd"}, Dir: "sub"}, agentworkspace.Output{Stdout: []byte(filepath.Join(ws.Root(), "sub") + "\n")}},
 		{"Env added", agentworkspace.Command{Args: []string{"sh", "-c", "echo $X"}, Env: []string{"X=y"}}, agentworkspace.Output{Stdout: []byte("y\n")}},
 		{"Stdin", agentworkspace.Command{Args: []string{"cat"}, Stdin: []byte("in")}, agentworkspace.Output{Stdout: []byte("in")}},
+		{"a bare name on the command's PATH", agentworkspace.Command{Args: []string{"hello"}, Env: []string{"PATH=" + path.Join(ws.Root(), "bin")}}, agentworkspace.Output{Stdout: []byte("hello\n")}},
 		{"Timeout kills what it started", agentworkspace.Command{Args: []string{"sh", "-c", "sleep 30 & sleep 30"}, Timeout: 200 * time.Millisecond}, agentworkspace.Output{ExitCode: -1, TimedOut: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -288,6 +351,17 @@ func execRuns(t *testing.T, b Backend) {
 			}
 		})
 	}
+	// The command's environment is over the workspace's name by name,
+	// and each name reaches the process once.
+	cmd := agentworkspace.Command{Args: []string{"sh", "-c", `env | grep -c '^X='; echo $X; env | grep -c '^PATH='`}, Env: []string{"X=1", "X=2"}}
+	for _, kv := range ws.Env() {
+		if strings.HasPrefix(kv, "PATH=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	if out, err := ws.Exec(ctx, cmd); err != nil || string(out.Stdout) != "1\n2\n1\n" {
+		t.Errorf("a name set twice by the command, and one set by both: %q, %v; want once each, the last value", out.Stdout, err)
+	}
 	var stream bytes.Buffer
 	out, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"sh", "-c", "echo a; echo b >&2"}, Stream: &stream})
 	if err != nil || stream.String() != "a\nb\n" || len(out.Stdout)+len(out.Stderr) != 0 {
@@ -300,6 +374,159 @@ func execRuns(t *testing.T, b Backend) {
 	cancel()
 	if _, err := ws.Exec(cctx, agentworkspace.Command{Args: []string{"sleep", "5"}}); err == nil {
 		t.Error("a cancelled context ran the command to the end")
+	}
+	execInterrupted(t, ws)
+	execEndsWhatLeftItsGroup(t, dir, ws)
+}
+
+// A timeout ends what the command started that left its group, as
+// startEndsWhatLeftItsGroup's Close does.
+func execEndsWhatLeftItsGroup(t *testing.T, dir string, ws agentworkspace.Workspace) {
+	t.Run("a timeout ends what left the group", func(t *testing.T) {
+		leavesItsGroup(t, ws, dir)
+		var out *agentworkspace.Output
+		var err error
+		within(t, 15*time.Second, "the Exec", func() {
+			out, err = ws.Exec(context.Background(), agentworkspace.Command{Args: []string{"sh", "-c", "setsid sh beat.sh & sleep 30"}, Timeout: time.Second})
+		})
+		if err != nil || !out.TimedOut {
+			t.Fatalf("Exec = %+v, %v; want it timed out", out, err)
+		}
+		if beating(t, dir) {
+			t.Error("the child that left the group outlived the timeout")
+		}
+	})
+}
+
+// beatScript beats into the file beat until it is killed, or for 30
+// seconds, ignoring SIGINT and SIGTERM.
+const beatScript = `trap '' INT TERM HUP
+i=0
+while [ $i -lt 300 ]; do
+	i=$((i+1))
+	echo $i > beat.tmp && mv beat.tmp beat
+	sleep 0.1
+done
+`
+
+// leavesItsGroup writes beat.sh into dir, skipping the test where a
+// child cannot leave its group (no setsid on this PATH) or where ws
+// says its end of a process does not reach one that has.
+func leavesItsGroup(t *testing.T, ws agentworkspace.Workspace, dir string) {
+	t.Helper()
+	if agentworkspace.ReachOf(ws) == agentworkspace.ReachGroup {
+		t.Skip("this workspace's end of a process reaches its group alone")
+	}
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("no setsid here")
+	}
+	os.Remove(filepath.Join(dir, "beat"))
+	if err := os.WriteFile(filepath.Join(dir, "beat.sh"), []byte(beatScript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// beating reports whether beat.sh, run in dir, is still beating: its
+// file changes within a second.
+func beating(t *testing.T, dir string) bool {
+	t.Helper()
+	name := filepath.Join(dir, "beat")
+	first, _ := os.ReadFile(name)
+	for range 10 {
+		time.Sleep(100 * time.Millisecond)
+		if b, _ := os.ReadFile(name); len(b) > 0 && !bytes.Equal(b, first) {
+			return true
+		}
+	}
+	return false
+}
+
+// An Exec whose context ends while it runs ends the command, and what
+// it started, and returns what it wrote until then, with ExitCode -1
+// and Interrupted, beside the context's error: given to a Stream as it
+// came, or kept in the Output.
+func execInterrupted(t *testing.T, ws agentworkspace.Workspace) {
+	cmd := agentworkspace.Command{Args: []string{"sh", "-c", "echo started; echo also >&2; sleep 30 & sleep 30"}}
+	check := func(what string, out *agentworkspace.Output, err error) {
+		t.Helper()
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("%s: err = %v, want context.Canceled", what, err)
+		}
+		if out == nil || out.ExitCode != -1 || !out.Interrupted || out.TimedOut {
+			t.Errorf("%s: Output = %+v, want ExitCode -1 and Interrupted", what, out)
+		}
+	}
+
+	t.Run("kept", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		time.AfterFunc(time.Second, cancel)
+		var out *agentworkspace.Output
+		var err error
+		within(t, 10*time.Second, "the interrupted Exec", func() { out, err = ws.Exec(ctx, cmd) })
+		check("kept", out, err)
+		if ws.Descriptor().Kind == agentworkspace.KindRemote {
+			// remote's wire carries no output past the hang-up yet: #5's
+			// wire change, an exec key and a cancel route, is to come.
+			return
+		}
+		if out != nil && (string(out.Stdout) != "started\n" || string(out.Stderr) != "also\n") {
+			t.Errorf("kept: the output so far = %q, %q", out.Stdout, out.Stderr)
+		}
+	})
+
+	t.Run("streamed", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		stream := &cancelAt{want: "started\nalso\n", cancel: cancel}
+		c := cmd
+		c.Stream = stream
+		var out *agentworkspace.Output
+		var err error
+		within(t, 10*time.Second, "the interrupted Exec", func() { out, err = ws.Exec(ctx, c) })
+		check("streamed", out, err)
+		if got := stream.String(); got != "started\nalso\n" {
+			t.Errorf("streamed: the stream got %q", got)
+		}
+		if out != nil && len(out.Stdout)+len(out.Stderr) != 0 {
+			t.Errorf("streamed: the Output kept %q, %q", out.Stdout, out.Stderr)
+		}
+	})
+}
+
+// cancelAt is a Stream that calls cancel once it has been given want.
+type cancelAt struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	want   string
+	cancel context.CancelFunc
+}
+
+func (c *cancelAt) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.buf.Write(p)
+	if c.buf.String() == c.want {
+		c.cancel()
+	}
+	return len(p), nil
+}
+
+func (c *cancelAt) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+// hello writes bin/hello under dir, a program that prints "hello" and
+// is on no PATH but one that names that directory.
+func hello(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bin", "hello"), []byte("#!/bin/sh\necho hello\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 

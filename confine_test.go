@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -21,9 +22,9 @@ import (
 
 // mapped stands in for a container: its processes and its files see
 // the working directory as /workspace, whatever directory on this
-// machine holds it. Paths in a command's arguments are mapped in, and
-// paths in its output mapped back, as a container's mount does. It is
-// not a Starter.
+// machine holds it. Paths in a command's arguments and environment
+// are mapped in, and paths in its output mapped back, as a container's
+// mount does. It is not a Starter.
 type mapped struct {
 	backing *agentworkspace.Local
 	dir     string // the directory on this machine
@@ -40,7 +41,7 @@ func (m *mapped) WriteFile(ctx context.Context, name string, data []byte, perm f
 }
 func (m *mapped) Remove(ctx context.Context, name string) error { return m.backing.Remove(ctx, name) }
 func (m *mapped) Descriptor() agentworkspace.Descriptor {
-	return agentworkspace.Descriptor{Kind: agentworkspace.KindContainer, Ref: "sha256:test", Root: mappedRoot}
+	return agentworkspace.Descriptor{Kind: agentworkspace.KindContainer, Ref: "sha256:test", Instance: "stand-in", Root: mappedRoot}
 }
 
 func (m *mapped) Exec(ctx context.Context, c agentworkspace.Command) (*agentworkspace.Output, error) {
@@ -51,20 +52,37 @@ func (m *mapped) Exec(ctx context.Context, c agentworkspace.Command) (*agentwork
 		args[i] = in(a)
 	}
 	c.Args = args
-	stream := c.Stream
-	var buf bytes.Buffer
-	if stream != nil {
-		c.Stream = &buf
+	env := make([]string, len(c.Env))
+	for i, e := range c.Env {
+		env[i] = in(e)
+	}
+	c.Env = env
+	if c.Stream != nil {
+		// A pointer, so Local sees one writer for both streams and
+		// keeps their order.
+		c.Stream = &mappedWriter{c.Stream, out}
 	}
 	o, err := m.backing.Exec(ctx, c)
-	if err != nil {
+	if o == nil {
 		return nil, err
 	}
-	if stream != nil {
-		stream.Write(out(buf.Bytes()))
-	}
 	o.Stdout, o.Stderr = out(o.Stdout), out(o.Stderr)
-	return o, nil
+	return o, err
+}
+
+// mappedWriter maps paths back in each write as it passes, so a stream
+// gets the output as it comes. A path split across two writes is not
+// mapped, which the tables' short outputs never do.
+type mappedWriter struct {
+	w   io.Writer
+	out func([]byte) []byte
+}
+
+func (m *mappedWriter) Write(p []byte) (int, error) {
+	if _, err := m.w.Write(m.out(p)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 // noLinks is a workspace whose FS cannot tell a link from what it leads

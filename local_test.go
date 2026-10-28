@@ -34,12 +34,67 @@ func TestEnvIsACopy(t *testing.T) {
 	if got := l.Env(); !slices.Equal(got, []string{"A=1"}) {
 		t.Errorf("Env after a caller changed its copy = %q", got)
 	}
-	out, err := l.Exec(context.Background(), Command{Args: []string{"sh", "-c", "echo $A$B"}})
+	out, err := l.Exec(context.Background(), Command{Args: []string{"/bin/sh", "-c", "echo $A$B"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.TrimSpace(string(out.Stdout)); got != "1" {
 		t.Errorf("a process started with A$B = %q, want 1", got)
+	}
+}
+
+// A process's environment is the workspace's with the command's over
+// it, name by name: each name once, where it first appears, with the
+// last value given it.
+func TestProcessEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ws, cmd []string
+		want    []string
+	}{
+		{"neither", nil, nil, []string{}},
+		{"the command's added", []string{"A=1"}, []string{"B=2"}, []string{"A=1", "B=2"}},
+		{"the command's over the workspace's", []string{"A=1", "PATH=/bin", "C=3"}, []string{"PATH=/usr/bin"}, []string{"A=1", "PATH=/usr/bin", "C=3"}},
+		{"the last of the command's", nil, []string{"A=1", "A=2"}, []string{"A=2"}},
+		{"the workspace's own repeated", []string{"A=1", "A=2"}, nil, []string{"A=2"}},
+		{"an empty value is a value", []string{"A=1"}, []string{"A="}, []string{"A="}},
+		{"a value with an =", []string{"A=1"}, []string{"A=b=c"}, []string{"A=b=c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := processEnv(tc.ws, tc.cmd)
+			if got == nil || !slices.Equal(got, tc.want) {
+				t.Errorf("processEnv(%q, %q) = %#v, want %q", tc.ws, tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
+
+// A local Descriptor names the machine, as the system does or as
+// WithHost says, and has no Ref.
+func TestLocalDescriptorNamesTheHost(t *testing.T) {
+	dir := t.TempDir()
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Skip(err)
+	}
+	for _, tc := range []struct {
+		name string
+		opts []LocalOption
+		want string
+	}{
+		{"the system's", nil, hostname},
+		{"WithHost", []LocalOption{WithHost("build-7")}, "build-7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l, err := NewLocal(dir, nil, tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			if d := l.Descriptor(); d != (Descriptor{Kind: KindLocal, Host: tc.want, Root: l.Root()}) {
+				t.Errorf("Descriptor = %+v, want Host %q", d, tc.want)
+			}
+		})
 	}
 }
 

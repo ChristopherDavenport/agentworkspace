@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -74,8 +75,13 @@ func TestAMemberThatLeavesTheGroupLateIsEnded(t *testing.T) {
 			os.WriteFile(filepath.Join(dir, "beat.sh"), []byte(beats), 0o644)
 			os.WriteFile(filepath.Join(dir, "child.sh"), []byte(`trap 'exec setsid sh beat.sh' TERM; while :; do sleep 0.05; done`), 0o644)
 			tc.run(t, l)
+			// The end returns once what it killed has died, so nothing
+			// is left to change the workspace after it.
+			if left := inDir(dir); len(left) > 0 {
+				t.Errorf("still running in the directory when the end returned: %v", left)
+			}
 			if stillBeats(dir) {
-				t.Error("a member that left the group after the walk outlived the end")
+				t.Errorf("a member that left the group after the walk outlived the end; running in the directory: %v", inDir(dir))
 			}
 		})
 	}
@@ -136,22 +142,122 @@ func TestAStopThatReachedAReusedIDIsUndone(t *testing.T) {
 	}
 	names := map[syscall.Signal]string{syscall.SIGSTOP: "STOP", syscall.SIGCONT: "CONT", syscall.SIGKILL: "KILL"}
 	var sent []string
-	savedTable, savedStart, savedSend := procTable, procStart, sendSignal
-	t.Cleanup(func() { procTable, procStart, sendSignal = savedTable, savedStart, savedSend })
-	procTable = func() (map[int]procInfo, bool) { return maps.Clone(table), true }
-	procStart = func(pid int) (uint64, bool) { p, ok := table[pid]; return p.start, ok }
-	sendSignal = func(pid int, sig syscall.Signal) error {
-		sent = append(sent, fmt.Sprintf("%s %d", names[sig], pid))
-		if pid == 200 && sig == syscall.SIGSTOP {
-			// 200 exited as the walk read it, and another process,
-			// started later, has its ID.
-			table[200] = procInfo{ppid: 1, pgrp: 200, start: 9}
-		}
-		return nil
+	sys := procOS{
+		table: func() (map[int]procInfo, bool) { return maps.Clone(table), true },
+		start: func(pid int) (uint64, bool) { p, ok := table[pid]; return p.start, ok },
+		send: func(pid int, sig syscall.Signal) error {
+			sent = append(sent, fmt.Sprintf("%s %d", names[sig], pid))
+			switch {
+			case pid == 200 && sig == syscall.SIGSTOP:
+				// 200 exited as the walk read it, and another process,
+				// started later, has its ID.
+				table[200] = procInfo{ppid: 1, pgrp: 200, start: 9}
+			case sig == syscall.SIGKILL:
+				for id, p := range table {
+					if id == pid || p.pgrp == -pid {
+						p.zombie = true
+						table[id] = p
+					}
+				}
+			}
+			return nil
+		},
 	}
-	g := &group{pgid: 100, start: 1}
+	g := &group{pgid: 100, start: 1, sys: sys}
 	g.kill(true)
 	if want := []string{"STOP -100", "STOP 200", "CONT 200", "KILL -100"}; !slices.Equal(sent, want) {
 		t.Errorf("signals = %q, want %q", sent, want)
+	}
+}
+
+// inDir lists the processes whose working directory is dir, each as
+// pid ppid pgrp start and state.
+func inDir(dir string) []string {
+	dir, _ = filepath.EvalSymlinks(dir)
+	ps, _ := processes()
+	var out []string
+	for pid, p := range ps {
+		if cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid)); err == nil && cwd == dir {
+			stat, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+			state := ""
+			if i := bytes.LastIndexByte(stat, ')'); i >= 0 && i+3 <= len(stat) {
+				state = string(stat[i+2 : i+3])
+			}
+			out = append(out, fmt.Sprintf("%d(ppid %d pgrp %d %s)", pid, p.ppid, p.pgrp, state))
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// fakeOS is a process table a test changes as it goes, and the signals
+// sent to it: a kill makes what it reaches a zombie, unless lose says
+// to drop that one.
+type fakeOS struct {
+	table map[int]procInfo
+	sent  []string
+	lose  func(pid int, sig syscall.Signal) bool
+}
+
+func (f *fakeOS) sys() procOS {
+	names := map[syscall.Signal]string{syscall.SIGSTOP: "STOP", syscall.SIGCONT: "CONT", syscall.SIGKILL: "KILL", syscall.SIGTERM: "TERM", syscall.SIGINT: "INT"}
+	return procOS{
+		table: func() (map[int]procInfo, bool) { return maps.Clone(f.table), true },
+		start: func(pid int) (uint64, bool) { p, ok := f.table[pid]; return p.start, ok },
+		send: func(pid int, sig syscall.Signal) error {
+			f.sent = append(f.sent, fmt.Sprintf("%s %d", names[sig], pid))
+			if sig != syscall.SIGKILL || f.lose != nil && f.lose(pid, sig) {
+				return nil
+			}
+			for id, p := range f.table {
+				if id == pid || p.pgrp == -pid {
+					p.zombie = true
+					f.table[id] = p
+				}
+			}
+			return nil
+		},
+	}
+}
+
+// A descendant a walk could not read is not forgotten: once it has left
+// the group and its parent has exited, nothing else would find it.
+func TestADescendantAWalkCouldNotReadIsKept(t *testing.T) {
+	f := &fakeOS{table: map[int]procInfo{
+		100: {ppid: 1, pgrp: 100, start: 1},   // the leader
+		200: {ppid: 100, pgrp: 100, start: 5}, // a member
+	}}
+	g := &group{pgid: 100, start: 1, sys: f.sys()}
+	g.signal(syscall.SIGTERM)
+	// The member's entry cannot be read for one walk; meanwhile it
+	// leaves the group, and the leader exits and is reaped.
+	delete(f.table, 200)
+	delete(f.table, 100)
+	g.descend(syscall.SIGINT, false)
+	f.table[200] = procInfo{ppid: 1, pgrp: 200, start: 5}
+	g.reap(true)
+	if !slices.Contains(f.sent, "KILL -200") {
+		t.Errorf("signals = %q; the member that left was never killed", f.sent)
+	}
+}
+
+// A kill that something survives, by a read that missed it or a signal
+// lost on the way, is sent again until a walk finds nothing running.
+func TestTheKillIsSentAgainToWhatSurvivesIt(t *testing.T) {
+	lost := false
+	f := &fakeOS{table: map[int]procInfo{
+		200: {ppid: 1, pgrp: 200, start: 5}, // a descendant out of the group, found before
+	}}
+	f.lose = func(pid int, sig syscall.Signal) bool {
+		if pid == -200 && !lost {
+			lost = true
+			return true
+		}
+		return false
+	}
+	g := &group{pgid: 100, start: 1, sys: f.sys(), found: map[int]uint64{200: 5}}
+	g.reap(true)
+	if n := strings.Count(strings.Join(f.sent, ","), "KILL -200"); n != 2 {
+		t.Errorf("signals = %q; want KILL -200 sent again after the first was lost", f.sent)
 	}
 }

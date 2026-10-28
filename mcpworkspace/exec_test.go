@@ -9,12 +9,14 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/mcpworkspace/wire"
 	"github.com/ChristopherDavenport/agentworkspace/workspacetest"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // execer is Exec over a Conn, as workspacetest.Execer.
@@ -110,4 +112,40 @@ func TestAConnectCrosses(t *testing.T) {
 	if _, err := Connect(context.Background(), c, 70000); !errors.Is(err, fs.ErrInvalid) {
 		t.Errorf("port 70000: %v", err)
 	}
+}
+
+// Against a server that does not answer process.cancel (an older one),
+// the end of Exec's context closes the process instead, as Start's end
+// does, and Exec returns the interrupted result beside ctx's error.
+func TestExecInterruptsWithoutTheCancelMethod(t *testing.T) {
+	dir := t.TempDir()
+	l, err := agentworkspace.NewLocal(dir, []string{"PATH=" + os.Getenv("PATH")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	p := NewProcesses(l)
+	t.Cleanup(p.Close)
+	srv := mcp.NewServer(&mcp.Implementation{Name: "older", Version: "test"}, nil)
+	c0 := p.cfg
+	if err := errors.Join(
+		mcp.AddReceivingCustomMethod(srv, wire.MethodStart, answering(c0, p.start)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodWrite, answering(c0, p.write)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodRead, answering(c0, p.read)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodCloseStdin, answering(c0, p.closeStdin)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodSignal, answering(c0, p.signal)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodWait, answering(c0, p.wait)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodClose, answering(c0, p.close)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	cs, _ := connectTo(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	within(t, 10*time.Second, "Exec after its context's end", func() {
+		out, err := Exec(ctx, conn(t, cs), agentworkspace.Command{Args: []string{"sleep", "15"}})
+		if !errors.Is(err, context.DeadlineExceeded) || out == nil || !out.Interrupted || out.ExitCode != -1 {
+			t.Errorf("Exec = %+v, %v; want ExitCode -1 and Interrupted beside the context's error", out, err)
+		}
+	})
 }

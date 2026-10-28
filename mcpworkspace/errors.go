@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"syscall"
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/internal/wireerr"
@@ -100,45 +99,33 @@ func refuse(sentinel error, format string, args ...any) error {
 }
 
 // message is err's message as it crosses, err being of the kind
-// sentinel stands for (nil for none), from a workspace whose root is
-// root ("" for one not known): the sentinel's words, or the system's
-// for an errno, and otherwise its text with root cut from it and every
-// other absolute path cut to its last element, at most
-// wire.MaxErrorBytes. WithErrorText sends the text as it is.
-func (c serveConfig) message(root string, err, sentinel error) string {
+// sentinel stands for (nil for none): an allow-list (wireerr.Message),
+// the sentinel's words, the system's for an errno, a context's error's
+// own, and wireerr.Other for anything else; never the served error's
+// own text, which may name a path of this machine's in any form. A
+// refusal of the server's own (ownRefusal) is its words, made of the
+// request and nothing served. WithErrorText sends the text as it is.
+func (c serveConfig) message(err, sentinel error) string {
 	var own *ownRefusal
 	if c.errorText || errors.As(err, &own) && own == err {
 		return wireerr.Bounded(err.Error(), wire.MaxErrorBytes)
 	}
-	var errno syscall.Errno
-	hasErrno := errors.As(err, &errno)
-	switch {
-	case sentinel != nil && sentinel != agentworkspace.ErrOutside && hasErrno:
-		return errno.Error()
-	case sentinel != nil:
-		return sentinel.Error()
-	case hasErrno:
-		return errno.Error()
-	}
-	return wireerr.Bounded(wireerr.Scrub(root, err.Error()), wire.MaxErrorBytes)
+	return wireerr.Message(err, sentinel, sentinel != agentworkspace.ErrOutside)
 }
 
 // fileError is err as a reply's error.
 func (c serveConfig) fileError(err error) *wire.FileError {
 	kind, sentinel := kindOf(err)
-	return &wire.FileError{Kind: kind, Message: c.message("", err, sentinel)}
+	return &wire.FileError{Kind: kind, Message: c.message(err, sentinel)}
 }
 
 // refused is err, a process or server method's, as the wire carries
 // it: a JSON-RPC error with its kind as a wire.Refusal, CodeNoServer
-// for a server not offered and CodeRefused for any other.
-func (c serveConfig) refused(root string, err error) error {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		// The request's own end: the SDK answers it.
-		return err
-	}
+// for a server not offered and CodeRefused for any other, a context's
+// error among them (its words alone, never what wraps it).
+func (c serveConfig) refused(err error) error {
 	kind, sentinel := kindOf(err)
-	msg := c.message(root, err, sentinel)
+	msg := c.message(err, sentinel)
 	if errors.Is(err, agentworkspace.ErrOutputFilter) {
 		// Its words alone: the panic's value it wraps may hold a
 		// secret the filter was given.
@@ -153,12 +140,12 @@ func (c serveConfig) refused(root string, err error) error {
 }
 
 // answering is h with its error as the wire carries it.
-func answering[P, R any](c serveConfig, root string, h func(context.Context, *mcp.ServerSession, P) (R, error)) func(context.Context, *mcp.ServerSession, P) (R, error) {
+func answering[P, R any](c serveConfig, h func(context.Context, *mcp.ServerSession, P) (R, error)) func(context.Context, *mcp.ServerSession, P) (R, error) {
 	return func(ctx context.Context, ss *mcp.ServerSession, p P) (R, error) {
 		r, err := h(ctx, ss, p)
 		if err != nil {
 			var zero R
-			return zero, c.refused(root, err)
+			return zero, c.refused(err)
 		}
 		return r, nil
 	}

@@ -137,10 +137,11 @@ func readBounded(fsys fs.FS, name string) ([]byte, error) {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, &fs.PathError{Op: "read", Path: name, Err: errors.New("not a regular file")}
+		// The server's own words, of the name asked for.
+		return nil, refuse(nil, "read %s: not a regular file", name)
 	}
 	tooBig := func(n int64) error {
-		return &fs.PathError{Op: "read", Path: name, Err: fmt.Errorf("%d bytes, over the %d-byte limit of a read", n, wire.MaxFileBytes)}
+		return refuse(nil, "read %s: %d bytes, over the %d-byte limit of a read", name, n, wire.MaxFileBytes)
 	}
 	if fi.Size() > wire.MaxFileBytes {
 		return nil, tooBig(fi.Size())

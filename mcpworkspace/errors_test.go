@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/wireerr"
 	"github.com/ChristopherDavenport/agentworkspace/mcpworkspace/wire"
 )
 
@@ -73,6 +74,48 @@ func TestEveryKindCrosses(t *testing.T) {
 						t.Errorf("%s refused as %s: %q; the served path crossed: %v, want %v", what, kind, err, !text, text)
 					}
 				}
+			}
+		})
+	}
+}
+
+// startFailing is a Local whose Start fails with err.
+type startFailing struct {
+	*agentworkspace.Local
+	err error
+}
+
+func (s startFailing) Start(context.Context, agentworkspace.Command) (agentworkspace.Process, error) {
+	return nil, s.err
+}
+
+// A served refusal's own text never crosses, however a path is written
+// in it, a cancellation that wraps text among them: one of no kind is
+// wireerr.Other, a cancellation its own words (RFC 0001 §15).
+func TestNoServedTextCrosses(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"a cancellation":    {fmt.Errorf("mount source=/srv/hidden/x: %w", context.Canceled), context.Canceled.Error()},
+		"after a newline":   {errors.New("runtime failed:\n/srv/hidden/creds missing"), wireerr.Other},
+		"as key=/path":      {errors.New("mount source=/srv/hidden/creds failed"), wireerr.Other},
+		"with spaces in it": {errors.New("open /srv/my hidden dir/creds: boom"), wireerr.Other},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			l, err := agentworkspace.NewLocal(dir, []string{"PATH=" + os.Getenv("PATH")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { l.Close() })
+			ws := startFailing{l, tc.err}
+			s := &testServer{dir: dir, ws: ws, procs: NewProcesses(ws)}
+			t.Cleanup(s.procs.Close)
+			cs, _ := s.connect(t)
+			_, err = Start(context.Background(), conn(t, cs), agentworkspace.Command{Args: []string{"x"}})
+			if err == nil || strings.Contains(err.Error(), "hidden") || !strings.HasSuffix(err.Error(), tc.want) {
+				t.Errorf("Start = %v, want the words %q alone", err, tc.want)
 			}
 		})
 	}

@@ -461,7 +461,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // fail answers err, the served workspace's, as the wire carries it.
-func (h *Handler) fail(w http.ResponseWriter, err error) { h.refuse(w, errorOf(h.ws.Root(), err)) }
+func (h *Handler) fail(w http.ResponseWriter, err error) { h.refuse(w, errorOf(err)) }
 
 // decode reads r's JSON body into v, at most max bytes, and answers the
 // refusal itself when it cannot.
@@ -490,7 +490,7 @@ func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 	p := principalOf(r)
 	root, served := h.ws.Root(), descriptorOf(h.ws.Descriptor())
 	if !p.Has(ScopeRead) {
-		root, served.Root, served.Host = filepath.Base(root), filepath.Base(served.Root), ""
+		root, served.Root, served.Host = withheld(root), withheld(served.Root), ""
 	}
 	_, start := h.ws.(agentworkspace.Starter)
 	_, servers := h.ws.(agentworkspace.ServerProvider)
@@ -519,6 +519,17 @@ func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, reply)
 }
 
+// withheld is what the info route says of a root it does not tell: its
+// last element, which is no path and which a client takes as the root
+// withheld (an older client dials only with a root that is not empty),
+// and "." for a root whose last element is the absolute "/".
+func withheld(root string) string {
+	if b := filepath.Base(root); !filepath.IsAbs(b) {
+		return b
+	}
+	return "."
+}
+
 // name is r's one path, refused (and answered) when it is not a name
 // in the workspace, whatever the served FS would make of it.
 func name(w http.ResponseWriter, r *http.Request, op string) (string, bool) {
@@ -528,7 +539,7 @@ func name(w http.ResponseWriter, r *http.Request, op string) (string, bool) {
 		return "", false
 	}
 	if err := valid(op, names[0]); err != nil {
-		writeError(w, errorOf("", err))
+		writeError(w, errorOf(err))
 		return "", false
 	}
 	return names[0], true
@@ -672,7 +683,8 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !fi.Mode().IsRegular() {
-		h.fail(w, fmt.Errorf("%s is not a regular file", n))
+		// The server's own words, of the name asked for.
+		writeError(w, wireError{Code: codeOther, Message: bounded(n + " is not a regular file")})
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -796,7 +808,7 @@ func (h *Handler) exec(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := h.ws.Exec(ctx, cmd)
 	if err != nil && (out == nil || !out.Interrupted) {
-		e := errorOf(h.ws.Root(), err)
+		e := errorOf(err)
 		fr.send(execFrame{Error: &e})
 		return
 	}

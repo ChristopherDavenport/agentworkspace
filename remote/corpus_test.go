@@ -11,20 +11,23 @@ package remote
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/workspacetest"
 )
 
 var update = flag.Bool("update", false, "record the corpus's replies from the reference server")
@@ -39,7 +42,11 @@ type corpus struct {
 }
 
 // exchange is one request and the reply it gets. Path and a body may
-// name ${session}, the id the last session's opening gave. A reply is
+// name ${session}, the id the last session's opening gave, and a body
+// "${port}", a port on the loopback that answers what it is sent,
+// upper-cased, once it is all sent. A background exchange's reply is
+// read while the exchanges after it run: the server answers its
+// header first, and the rest comes when it ends. A reply is
 // JSON as it is, NDJSON as the array of its lines, raw bytes as a
 // string, and nothing as absent; ${root}, ${host} and ${PATH} stand for
 // the served root, the host and the PATH, and "*" for a value that
@@ -55,6 +62,8 @@ type exchange struct {
 	Status int             `json:"status"`
 	Form   string          `json:"form"` // json, ndjson, raw or none
 	Reply  json.RawMessage `json:"reply,omitempty"`
+
+	Background bool `json:"background,omitempty"`
 }
 
 // corpusTokens are the principals the exchanges are sent as.
@@ -77,6 +86,9 @@ func (k kindFS) refused(op, name string) error {
 	code, ok := strings.CutPrefix(name, "kind/")
 	if !ok {
 		return nil
+	}
+	if code == codeOther {
+		return errors.New("a failure of no kind, at /srv/hidden/" + name)
 	}
 	for _, c := range codes {
 		if c.code == code {
@@ -105,6 +117,34 @@ func (k kindFS) Lstat(name string) (fs.FileInfo, error) {
 		return nil, err
 	}
 	return k.ReadLinkFS.Lstat(name)
+}
+
+// corpusWorkspace is kindWorkspace offering two servers: echo, and
+// holder, which is given a secret.
+type corpusWorkspace struct {
+	kindWorkspace
+	offer *agentworkspace.Offering
+}
+
+func (c corpusWorkspace) Servers(ctx context.Context) ([]agentworkspace.Server, error) {
+	return c.offer.Servers(ctx)
+}
+
+func (c corpusWorkspace) StartServer(ctx context.Context, name string, stderr io.Writer) (agentworkspace.Process, error) {
+	return c.offer.StartServer(ctx, name, stderr)
+}
+
+func newCorpusWorkspace(t *testing.T, l *agentworkspace.Local) corpusWorkspace {
+	t.Helper()
+	k := kindWorkspace{l}
+	o, err := agentworkspace.Offer(k, []agentworkspace.OfferedServer{
+		{Server: agentworkspace.Server{Name: "echo", Description: "says it back"}, Command: agentworkspace.Command{Args: []string{"cat"}}},
+		{Server: agentworkspace.Server{Name: "holder", Description: "holds a token"}, Command: agentworkspace.Command{Args: []string{"cat"}, Env: []string{"TOKEN=s3cr3t"}}, Secrets: []string{"TOKEN"}},
+	}, agentworkspace.WithOutputFilter(func(_ string, _ map[string]string, r io.Reader) io.Reader { return r }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return corpusWorkspace{k, o}
 }
 
 func (k kindFS) ReadDir(name string) ([]fs.DirEntry, error) {
@@ -149,8 +189,27 @@ func TestTheWireCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
-	_, url := serve(t, kindWorkspace{l}, WithAuthenticator(grant(corpusTokens)), WithLease(time.Minute), WithMaxExecOutputBytes(64), WithMaxProcesses(2))
+	_, url := serve(t, newCorpusWorkspace(t, l), WithAuthenticator(grant(corpusTokens)), WithLease(time.Minute), WithMaxExecOutputBytes(64), WithMaxProcesses(2))
+	port := strconv.Itoa(workspacetest.Upper(t))
 	session := ""
+	type pending struct {
+		e    *exchange
+		resp *http.Response
+		done chan struct{}
+		form string
+		data json.RawMessage
+	}
+	var background []*pending
+	check := func(e *exchange, resp *http.Response, form string, reply json.RawMessage) {
+		t.Helper()
+		if *update {
+			e.Status, e.Form, e.Reply = resp.StatusCode, form, reply
+			return
+		}
+		if resp.StatusCode != e.Status || form != e.Form || !jsonEqual(reply, e.Reply) {
+			t.Errorf("%s: %s %s\n got %d %s %s\nwant %d %s %s", e.Name, e.Method, e.Path, resp.StatusCode, form, reply, e.Status, e.Form, e.Reply)
+		}
+	}
 	for i := range c.Exchanges {
 		e := &c.Exchanges[i]
 		path := strings.ReplaceAll(e.Path, "${session}", session)
@@ -159,7 +218,7 @@ func TestTheWireCorpus(t *testing.T) {
 		case e.Raw != nil:
 			body = strings.NewReader(*e.Raw)
 		case e.Body != nil:
-			body = bytes.NewReader(e.Body)
+			body = bytes.NewReader(bytes.ReplaceAll(e.Body, []byte(`"${port}"`), []byte(port)))
 		}
 		req, err := http.NewRequest(e.Method, url+path, body)
 		if err != nil {
@@ -175,6 +234,16 @@ func TestTheWireCorpus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", e.Name, err)
 		}
+		if e.Background {
+			p := &pending{e: e, resp: resp, done: make(chan struct{})}
+			go func() {
+				defer close(p.done)
+				p.form, p.data = replyOf(t, resp, l.Root())
+				resp.Body.Close()
+			}()
+			background = append(background, p)
+			continue
+		}
 		form, reply := replyOf(t, resp, l.Root())
 		resp.Body.Close()
 		if e.Method == http.MethodPost && path == routeSessions && resp.StatusCode == http.StatusOK {
@@ -183,13 +252,11 @@ func TestTheWireCorpus(t *testing.T) {
 			session = s.ID
 			reply = bytes.Replace(reply, []byte(session), []byte("${session}"), 1)
 		}
-		if *update {
-			e.Status, e.Form, e.Reply = resp.StatusCode, form, reply
-			continue
-		}
-		if resp.StatusCode != e.Status || form != e.Form || !jsonEqual(reply, e.Reply) {
-			t.Errorf("%s: %s %s\n got %d %s %s\nwant %d %s %s", e.Name, e.Method, e.Path, resp.StatusCode, form, reply, e.Status, e.Form, e.Reply)
-		}
+		check(e, resp, form, reply)
+	}
+	for _, p := range background {
+		within(t, 15*time.Second, p.e.Name, func() { <-p.done })
+		check(p.e, p.resp, p.form, p.data)
 	}
 	if *update {
 		var out bytes.Buffer
@@ -277,15 +344,22 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	return b
 }
 
+// jsonEqual reports whether a and b are the same JSON value, types
+// and all: numbers by their text, so 0 and "0" differ, as do true and
+// "true", and ["a","b"] and ["a b"].
 func jsonEqual(a, b json.RawMessage) bool {
 	if len(a) == 0 || len(b) == 0 {
 		return len(a) == len(b)
 	}
-	var x, y any
-	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
-		return false
+	decode := func(m json.RawMessage) (any, bool) {
+		d := json.NewDecoder(bytes.NewReader(m))
+		d.UseNumber()
+		var v any
+		return v, d.Decode(&v) == nil
 	}
-	return fmt.Sprint(x) == fmt.Sprint(y)
+	x, okx := decode(a)
+	y, oky := decode(b)
+	return okx && oky && reflect.DeepEqual(x, y)
 }
 
 // Every refusal in the corpus maps, on the client, to its code's

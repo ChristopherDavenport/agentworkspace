@@ -66,27 +66,27 @@ func NewProcesses(ws agentworkspace.Workspace, opts ...ServeOption) *Processes {
 // offers servers (an agentworkspace.ServerProvider), the server
 // methods.
 func (s *Processes) Register(srv *mcp.Server) error {
-	c, root := s.cfg, s.ws.Root()
+	c := s.cfg
 	var servers error
 	if _, ok := s.ws.(agentworkspace.ServerProvider); ok {
 		servers = errors.Join(
-			mcp.AddReceivingCustomMethod(srv, wire.MethodServersList, answering(c, root, s.servers)),
-			mcp.AddReceivingCustomMethod(srv, wire.MethodServersStart, answering(c, root, s.startServer)),
+			mcp.AddReceivingCustomMethod(srv, wire.MethodServersList, answering(c, s.servers)),
+			mcp.AddReceivingCustomMethod(srv, wire.MethodServersStart, answering(c, s.startServer)),
 		)
 	}
 	return errors.Join(
 		servers,
-		mcp.AddReceivingCustomMethod(srv, wire.MethodStart, answering(c, root, s.start)),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodWrite, answering(c, root, s.write)),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodRead, answering(c, root, s.read)),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodCloseStdin, answering(c, root, s.closeStdin)),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodSignal, answering(c, root, s.signal)),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodWait, answering(c, root, s.wait)),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodClose, answering(c, root, s.close)),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodCancel, answering(c, root, s.cancel)),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodInfo, answering(c, root, s.info)),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodResize, answering(c, root, s.resize)),
-		mcp.AddReceivingCustomMethod(srv, wire.MethodConnect, answering(c, root, s.connect)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodStart, answering(c, s.start)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodWrite, answering(c, s.write)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodRead, answering(c, s.read)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodCloseStdin, answering(c, s.closeStdin)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodSignal, answering(c, s.signal)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodWait, answering(c, s.wait)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodClose, answering(c, s.close)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodCancel, answering(c, s.cancel)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodInfo, answering(c, s.info)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodResize, answering(c, s.resize)),
+		mcp.AddReceivingCustomMethod(srv, wire.MethodConnect, answering(c, s.connect)),
 	)
 }
 
@@ -405,7 +405,7 @@ func (s *Processes) wait(ctx context.Context, ss *mcp.ServerSession, p *IDParams
 	}
 	select {
 	case <-sp.exited:
-		return sp.result(), nil
+		return sp.result(s.cfg), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -429,7 +429,7 @@ func (s *Processes) close(_ context.Context, ss *mcp.ServerSession, p *IDParams)
 		return nil, refuse(ErrNoProcess, "process %q: %s", p.ID, ErrNoProcess)
 	}
 	sp.close()
-	r := sp.result()
+	r := sp.result(s.cfg)
 	if sp.stderr != nil {
 		r.Stderr = sp.stderr.rest()
 	}
@@ -488,7 +488,7 @@ func (s *Processes) info(context.Context, *mcp.ServerSession, *InfoParams) (*Inf
 }
 
 // result is how the process ended, once it has.
-func (sp *started) result() *ExitResult {
+func (sp *started) result(cfg serveConfig) *ExitResult {
 	r := &ExitResult{Exit: wire.Exit{Status: sp.status}}
 	switch {
 	case errors.Is(sp.err, context.DeadlineExceeded):
@@ -496,7 +496,8 @@ func (sp *started) result() *ExitResult {
 	case errors.Is(sp.err, context.Canceled):
 		r.Ended = wire.EndedCanceled
 	case sp.err != nil:
-		r.Error = sp.err.Error()
+		_, sentinel := kindOf(sp.err)
+		r.Error = cfg.message(sp.err, sentinel)
 	}
 	return r
 }

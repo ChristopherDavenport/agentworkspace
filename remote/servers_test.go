@@ -442,7 +442,7 @@ func TestErrNoServerRoundTrips(t *testing.T) {
 	if err := (wireError{Code: codeNoServer, Message: "x"}).err(); !errors.Is(err, agentworkspace.ErrNoServer) {
 		t.Errorf("the code maps to %v", err)
 	}
-	if e := errorOf("", fmt.Errorf("server %q: %w", "x", agentworkspace.ErrNoServer)); e.Code != codeNoServer {
+	if e := errorOf(fmt.Errorf("server %q: %w", "x", agentworkspace.ErrNoServer)); e.Code != codeNoServer {
 		t.Errorf("ErrNoServer is sent as %q", e.Code)
 	}
 

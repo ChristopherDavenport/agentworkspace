@@ -1,7 +1,8 @@
 {
   "doc": [
     "The exchanges of RFC 0001's mcpworkspace wire, in order, each a JSON-RPC request sent with the next id after an MCP initialization, and its result or error.",
-    "The served workspace: inside.txt (ok), sub/a.txt (a), alias.txt -> inside.txt, linkout -> ../outside/secret.txt; a file k/<kind>, and a start of kind:<kind>, refused with that kind, its served text naming /srv/hidden/<kind>.",
+    "The served workspace: inside.txt (ok), sub/a.txt (a), alias.txt -> inside.txt, linkout -> ../outside/secret.txt; a file k/<kind>, and a start of kind:<kind>, refused with that kind (other: with none), its served text naming /srv/hidden/<kind>; two servers offered, echo and holder (given a secret), both cat.",
+    "A params' \"${port}\" is a port on the loopback that answers what it is sent, upper-cased, once all of it is sent.",
     "A resource's text is JSON, shown with its keys sorted; ${root} stands for the served root, and * for what differs between runs.",
     "mcpworkspace/corpus_test.go replays it against the reference server, and maps its refusals back through the reference client."
   ],
@@ -20,12 +21,21 @@
       }
     },
     {
-      "name": "a workspace that offers no servers does not answer the server methods",
+      "name": "list the servers offered: holder is marked as given a secret, and nothing of it is told",
       "method": "agentworkspace/servers.list",
       "params": {},
-      "error": {
-        "code": -32601,
-        "message": "method not found: \"agentworkspace/servers.list\""
+      "result": {
+        "servers": [
+          {
+            "description": "says it back",
+            "name": "echo"
+          },
+          {
+            "description": "holds a token",
+            "name": "holder",
+            "secrets": true
+          }
+        ]
       }
     },
     {
@@ -317,6 +327,24 @@
       }
     },
     {
+      "name": "a file refused with no kind, its served text naming /srv/hidden: the one generic message",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=k%2Fother"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"other\",\"message\":\"the workspace refused the operation\"}}",
+            "uri": "agentworkspace:///stat?path=k%2Fother"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
       "name": "start cat",
       "method": "agentworkspace/process.start",
       "params": {
@@ -492,6 +520,178 @@
       }
     },
     {
+      "name": "start on a terminal of 24 rows and 80 columns",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "sh",
+          "-c",
+          "stty size"
+        ],
+        "terminal": {
+          "rows": 24,
+          "cols": 80
+        }
+      },
+      "result": {
+        "id": "p3"
+      }
+    },
+    {
+      "name": "its wait",
+      "method": "agentworkspace/process.wait",
+      "params": {
+        "id": "p3"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "five bytes of its output: the terminal's",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p3",
+        "fd": 1,
+        "max": 5
+      },
+      "result": {
+        "data": "MjQgODA="
+      }
+    },
+    {
+      "name": "its close",
+      "method": "agentworkspace/process.close",
+      "params": {
+        "id": "p3"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "connect to a port that answers",
+      "method": "agentworkspace/process.connect",
+      "params": {
+        "port": "${port}"
+      },
+      "result": {
+        "id": "p4"
+      }
+    },
+    {
+      "name": "send to it",
+      "method": "agentworkspace/process.write",
+      "params": {
+        "id": "p4",
+        "data": "aGVsbG8="
+      },
+      "result": {}
+    },
+    {
+      "name": "the half-close",
+      "method": "agentworkspace/process.closeStdin",
+      "params": {
+        "id": "p4"
+      },
+      "result": {}
+    },
+    {
+      "name": "what it sends back: four bytes, at most max",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p4",
+        "fd": 1,
+        "max": 4
+      },
+      "result": {
+        "data": "SEVMTA=="
+      }
+    },
+    {
+      "name": "close the stream",
+      "method": "agentworkspace/process.close",
+      "params": {
+        "id": "p4"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "start the server echo",
+      "method": "agentworkspace/servers.start",
+      "params": {
+        "name": "echo"
+      },
+      "result": {
+        "id": "p5"
+      }
+    },
+    {
+      "name": "its input",
+      "method": "agentworkspace/process.write",
+      "params": {
+        "id": "p5",
+        "data": "cGluZwo="
+      },
+      "result": {}
+    },
+    {
+      "name": "its input's end",
+      "method": "agentworkspace/process.closeStdin",
+      "params": {
+        "id": "p5"
+      },
+      "result": {}
+    },
+    {
+      "name": "its wait",
+      "method": "agentworkspace/process.wait",
+      "params": {
+        "id": "p5"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "its output: four bytes, at most max",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p5",
+        "fd": 1,
+        "max": 4
+      },
+      "result": {
+        "data": "cGluZw=="
+      }
+    },
+    {
+      "name": "its close",
+      "method": "agentworkspace/process.close",
+      "params": {
+        "id": "p5"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "start a server not offered: noserver, -32010",
+      "method": "agentworkspace/servers.start",
+      "params": {
+        "name": "nope"
+      },
+      "error": {
+        "code": -32010,
+        "data": {
+          "kind": "noserver"
+        },
+        "message": "no such server in this workspace"
+      }
+    },
+    {
       "name": "a start with no command: invalid",
       "method": "agentworkspace/process.start",
       "params": {
@@ -663,6 +863,22 @@
           "kind": "noprocess"
         },
         "message": "no such process in this session"
+      }
+    },
+    {
+      "name": "a start refused with no kind: the one generic message",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:other"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "other"
+        },
+        "message": "the workspace refused the operation"
       }
     },
     {

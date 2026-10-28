@@ -829,21 +829,27 @@ bounds) are in its package doc.
   or a body of another media type than its route's. One made without
   authentication for a loopback listener answers a loopback `Host`
   alone, so a rebound name is refused.
-- **Refusals name no served path.** A binding over a wire MUST send a
-  refusal as its kind and a message that names no path of the serving
-  side's machine but a name inside the workspace, relative to its root:
-  a refusal of a kind is the kind's words, or the system's for an error
-  number (`ENOSPC`), and any other is the served text with the root cut
-  from it and every other absolute path cut to its last element
-  (`/usr/bin/tool` is `.../tool`). The serving side applies it, so a
-  client cannot opt out; a server MAY send the served text as it is
-  behind an option the program names for debugging, off by default
-  (mcpworkspace's `WithErrorText`). A refusal of the wire's own (a
-  malformed request, a bound) is the server's words. A path on the
-  serving side's machine (a home directory, a mount's layout) would
-  otherwise reach the agent and the model. `workspacetest.Run`'s
-  `RefusalsNameNoServedPath` and `RunExec` check it over every wire's
-  client (#39).
+- **Refusals cross by an allow-list.** A binding over a wire MUST send
+  a refusal as its kind and fixed words, never the served error's own
+  text: a refusal of a kind is that kind's words, or the system's fixed
+  words for the error number it holds (`ENOSPC`, but for *outside*,
+  whose words stand); a cancellation is the context's words; and a
+  refusal of no kind is one generic message ("the workspace refused the
+  operation"). The served text may name a path of the serving side's
+  machine (a home directory, a mount's layout) in any form (after a
+  newline, as `key=/path`, as a `file://` URL, with spaces in it), so
+  no filter over it is trusted; draft 0.3's first text cut paths out
+  of it, and leaked. A binding MAY add what it builds from the request
+  itself: the name asked for, relative to the root, a signal's name, a
+  port; and a refusal of the wire's own (a malformed request, a bound)
+  is the server's words, made of the request alone. The serving side
+  applies it, so a client cannot opt out; a server MAY send the served
+  text as it is behind an option the program names for debugging, off
+  by default (mcpworkspace's `WithErrorText`). The reference binding's
+  is `internal/wireerr.Message`, which both wires use;
+  `workspacetest.Run`'s `RefusalsNameNoServedPath` and `RunExec` check
+  it over every wire's client, and the wire corpus holds a refusal of
+  each kind and of none (#39).
 - **The root over remote** is told in full only to a principal that
   may read.
 - **Process ids** are random, and a process is reached only through
@@ -904,7 +910,8 @@ workspace.
 **The wire corpus.** A server or a client in any language can check
 itself without Go against the corpus of each wire: request and reply
 exchanges, in order, over a served workspace laid out as the file's
-`doc` says, covering every operation and every error kind
+`doc` says, covering the operations of each wire (but remote's stderr
+route, a successful resize and a lease's lapse) and every error kind
 (#42). `testdata/wire/remote.json` holds remote's (method, path, token,
 body; status and reply), and `mcpworkspace/testdata/wire/mcpworkspace.json`
 mcpworkspace's (JSON-RPC method and params after an MCP
@@ -1003,9 +1010,9 @@ corpus); draft 0.3 settles each, as its changes below say.
   server methods carry them too, as JSON-RPC error `-32011` with a
   `{kind}` datum.
 - [Section 15](#15-security-considerations): a refusal over any wire
-  names no path of the serving side's machine but a name relative to
-  the root (#39); mcpworkspace sends the served text only under
-  `WithErrorText`.
+  crosses by an allow-list, its kind's fixed words, the system's for an
+  error number, or one generic message, never the served text (#39);
+  mcpworkspace sends that text only under `WithErrorText`.
 
 ## Changes since draft 0.1
 

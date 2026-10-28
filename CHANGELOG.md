@@ -9,8 +9,13 @@ versions may break the API.
 
 - Added: the wire corpus (#42). `testdata/wire/remote.json` and
   `mcpworkspace/testdata/wire/mcpworkspace.json` hold request and reply
-  exchanges for each wire, every operation and every error kind, over
-  a layout each file describes, for a server or client in another
+  exchanges for each wire, over a layout each file describes: the
+  files, writes, exec (a keyed one cancelled among them, with
+  `interrupted`), sessions, processes (pipes, wait, signal, cancel,
+  close), a terminal, a connect, the servers (listed with `secrets`,
+  started, not offered), and every error kind and a refusal of none;
+  not yet remote's stderr route, a successful resize or a lease's
+  lapse, for a server or client in another
   language to check itself without Go. `TestTheWireCorpus` replays the
   requests against the reference server (`-update` records the
   replies), and `TestTheCorpusRefusalsMapBack` maps every refusal in it
@@ -56,7 +61,8 @@ versions may break the API.
   client dialled by a principal without `read` gave the root's last
   element as its `Root`, `Served().Root` and `Descriptor().Root`; it now
   gives `""` for each, while the server still sends the last element,
-  so an older client dials as before. RFC 0001 §1 states the rule, and
+  so an older client dials as before (`.` for a root of `/`, whose last
+  element is itself). RFC 0001 §1 states the rule, and
   `workspacetest.Run` checks a readable workspace's root is absolute.
 
 - Changed: mcpworkspace carries the thirteen signals remote does (`HUP
@@ -84,7 +90,10 @@ versions may break the API.
   closed, its output kept or streamed, `TimedOut` from its timeout, and
   the end of its context a cancel whose output is read to the end and
   returned with `Interrupted` beside `ctx.Err()`; a failing `Stream`
-  ends the command. `workspacetest.RunExec`, with `Execer` and
+  ends the command. Against a server that does not answer the cancel,
+  the end of its context closes the process instead, as `Start`'s does,
+  and `Exec` still returns `Interrupted`, without what the command wrote
+  after the close. `workspacetest.RunExec`, with `Execer` and
   `ExecBackend`, runs `Run`'s Exec table over a backend that carries
   Exec without a whole workspace, and mcpworkspace runs it. Two of the
   table's commands pause between their standard output and standard
@@ -99,11 +108,16 @@ versions may break the API.
   refusal is JSON-RPC error `wire.CodeRefused` (-32011), or
   `CodeNoServer`, with a `wire.Refusal{Kind}` as its data, which the
   client maps back, so `errors.Is` holds as over remote.
-- Changed: a refusal over mcpworkspace names no path of the serving
-  side's machine (#39). A refusal of a kind is the kind's words, or the
-  system's for an errno, and any other is the served text with the
-  workspace's root cut from it and every other absolute path cut to its
-  last element, as remote already did; `WithErrorText`, a new
+- Changed: a refusal crosses either wire by an allow-list, never as the
+  served error's text, which may name a path of the serving side's
+  machine (#39). A refusal of a kind is the kind's words, or the
+  system's for an errno; a cancellation is the context's words; one of
+  no kind is "the workspace refused the operation". remote sent the
+  served text of a refusal of no kind with absolute paths cut, which
+  missed a path after a newline or a tab, as `key=/path`, as a
+  `file://` URL or with spaces; mcpworkspace sent its files' and its
+  methods' text whole, a cancellation's too, and its exits' error
+  text. Both now use `internal/wireerr.Message`. `WithErrorText`, a new
   `ServeOption` of `ServeFiles` and `NewProcesses` (both now variadic),
   sends the text as it is, for debugging. The server's own refusals
   (a malformed request, a bound) keep their words. RFC 0001 §15 states

@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
@@ -76,8 +77,22 @@ func Exec(ctx context.Context, c Conn, cmd agentworkspace.Command) (*agentworksp
 	}
 	p := started.(*process)
 	defer p.Close()
+	// The end of ctx, or a failed sink, is a cancel; a server that does
+	// not answer one is sent the close, as Start's end of ctx is, and
+	// what the command wrote after it is lost.
 	var cancelOnce sync.Once
-	interrupt := func() { cancelOnce.Do(func() { p.interrupt() }) }
+	var closedForIt, exited atomic.Bool
+	interrupt := func() {
+		cancelOnce.Do(func() {
+			if exited.Load() {
+				return // nothing to interrupt: its status stands
+			}
+			if !p.interrupt() {
+				closedForIt.Store(true)
+				p.Close()
+			}
+		})
+	}
 	stop := context.AfterFunc(ctx, interrupt)
 	defer stop()
 	returned := make(chan struct{})
@@ -101,6 +116,7 @@ func Exec(ctx context.Context, c Conn, cmd agentworkspace.Command) (*agentworksp
 		io.Copy(out, p.Stdout())
 	}()
 	status, werr := p.Wait()
+	exited.Store(true)
 	cut := false
 	t := time.NewTimer(outputDelay)
 	select {
@@ -124,7 +140,7 @@ func Exec(ctx context.Context, c Conn, cmd agentworkspace.Command) (*agentworksp
 	case errors.Is(werr, context.DeadlineExceeded):
 		o.ExitCode, o.TimedOut = -1, true
 		return o, nil
-	case errors.Is(werr, context.Canceled) && ctx.Err() != nil:
+	case (errors.Is(werr, context.Canceled) || closedForIt.Load()) && ctx.Err() != nil:
 		o.ExitCode, o.Interrupted = -1, true
 		return o, ctx.Err()
 	case errors.Is(werr, context.Canceled):

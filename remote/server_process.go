@@ -201,7 +201,7 @@ func cutAt(w http.ResponseWriter, done <-chan struct{}) (stop func()) {
 
 // exit is how the process ended, once it has, its error's words as
 // errorOf gives them for root.
-func (sp *proc) exit(root string) exitReply {
+func (sp *proc) exit() exitReply {
 	r := exitReply{Status: sp.status}
 	switch {
 	case errors.Is(sp.err, context.DeadlineExceeded):
@@ -209,7 +209,7 @@ func (sp *proc) exit(root string) exitReply {
 	case errors.Is(sp.err, context.Canceled):
 		r.Ended = endedCanceled
 	case sp.err != nil:
-		r.Error = errorOf(root, sp.err).Message
+		r.Error = errorOf(sp.err).Message
 	}
 	return r
 }
@@ -721,7 +721,7 @@ func (h *Handler) wait(w http.ResponseWriter, r *http.Request) {
 	defer sp.release()
 	select {
 	case <-sp.exited:
-		writeJSON(w, sp.exit(h.ws.Root()))
+		writeJSON(w, sp.exit())
 	case <-r.Context().Done():
 	}
 }
@@ -835,7 +835,7 @@ func (h *Handler) closeProcess(w http.ResponseWriter, r *http.Request) {
 		}()
 	}()
 	sp.close()
-	writeJSON(w, sp.exit(h.ws.Root()))
+	writeJSON(w, sp.exit())
 }
 
 // stderrBuffer is what a process wrote to its standard error that the

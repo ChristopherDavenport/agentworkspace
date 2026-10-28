@@ -2,9 +2,10 @@
   "doc": [
     "The exchanges of RFC 0001's remote wire, in order, against a served workspace laid out as:",
     "inside.txt (ok), sub/a.txt (a), alias.txt -> inside.txt, linkout -> ../outside/secret.txt;",
-    "kind/<code> refused with that code's kind, its served text naming /srv/hidden/kind/<code>;",
+    "kind/<code> refused with that code's kind (kind/other with none), its served text naming /srv/hidden/kind/<code>; two servers offered, echo and holder (given a secret), both cat;",
     "an environment of PATH and A=1, a host corpus-host, a lease of a minute, an exec output bound of 64 bytes and a session bound of two processes.",
     "Tokens: all (every scope), read, servers. A reply is JSON as it is, NDJSON as the array of its lines, raw bytes as a string, none as absent;",
+    "A body's \"${port}\" is a port on the loopback that answers what it is sent, upper-cased, once all of it is sent. A background exchange is answered while the ones after it run; its reply is checked at the end.",
     "${root}, ${host}, ${PATH} and ${session} stand for what differs between servers, and * for what differs between runs.",
     "remote/corpus_test.go replays it against the reference server, and maps its refusals back through the reference client."
   ],
@@ -43,6 +44,7 @@
           "kind": "local",
           "root": "${root}"
         },
+        "servers": true,
         "start": true
       }
     },
@@ -71,6 +73,7 @@
           "kind": "local",
           "root": "work"
         },
+        "servers": true,
         "start": false
       }
     },
@@ -294,6 +297,20 @@
       }
     },
     {
+      "name": "a refusal of no kind, its served text naming /srv/hidden: the one generic message",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=kind/other",
+      "status": 500,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "other",
+          "message": "the workspace refused the operation"
+        }
+      }
+    },
+    {
       "name": "write a file",
       "token": "all",
       "method": "PUT",
@@ -353,17 +370,24 @@
       }
     },
     {
-      "name": "list servers of a workspace that offers none: unsupported",
+      "name": "list the servers offered: holder is marked as given a secret, and nothing of it is told",
       "token": "all",
       "method": "GET",
       "path": "/v1/servers",
-      "status": 501,
+      "status": 200,
       "form": "json",
       "reply": {
-        "error": {
-          "code": "unsupported",
-          "message": "unsupported operation"
-        }
+        "servers": [
+          {
+            "description": "says it back",
+            "name": "echo"
+          },
+          {
+            "description": "holds a token",
+            "name": "holder",
+            "secrets": true
+          }
+        ]
       }
     },
     {
@@ -524,6 +548,41 @@
           "message": "no exec of this principal runs under that key"
         }
       }
+    },
+    {
+      "name": "a keyed exec, read in the background: its reply is the output so far, interrupted",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sleep",
+          "30"
+        ],
+        "key": "corpusexeckeyaaa1"
+      },
+      "status": 200,
+      "form": "ndjson",
+      "reply": [
+        {
+          "output": {
+            "exitCode": -1,
+            "interrupted": true
+          }
+        }
+      ],
+      "background": true
+    },
+    {
+      "name": "cancel it by its key",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec/corpusexeckeyaaa1/cancel",
+      "type": "application/json",
+      "body": {},
+      "status": 204,
+      "form": "none"
     },
     {
       "name": "open a session",
@@ -793,6 +852,170 @@
       "form": "json",
       "reply": {
         "status": -1
+      }
+    },
+    {
+      "name": "start on a terminal of 24 rows and 80 columns",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sh",
+          "-c",
+          "stty size; echo err >&2"
+        ],
+        "terminal": {
+          "rows": 24,
+          "cols": 80
+        },
+        "key": "corpustermkeyaaa1"
+      },
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "id": "corpustermkeyaaa1"
+      }
+    },
+    {
+      "name": "its output: the terminal's, standard error merged, lines ending \\r\\n",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpustermkeyaaa1/stdout",
+      "status": 200,
+      "form": "raw",
+      "reply": "24 80\r\nerr\r\n"
+    },
+    {
+      "name": "its wait",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpustermkeyaaa1/wait",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "status": 0
+      }
+    },
+    {
+      "name": "its close",
+      "token": "all",
+      "method": "DELETE",
+      "path": "/v1/sessions/${session}/processes/corpustermkeyaaa1",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "status": 0
+      }
+    },
+    {
+      "name": "connect to a port that answers",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/connect",
+      "type": "application/json",
+      "body": {
+        "port": "${port}",
+        "key": "corpusconnaaaaa02"
+      },
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "id": "corpusconnaaaaa02"
+      }
+    },
+    {
+      "name": "send to it, to the end: the half-close",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes/corpusconnaaaaa02/stdin",
+      "type": "application/octet-stream",
+      "raw": "hello",
+      "status": 204,
+      "form": "none"
+    },
+    {
+      "name": "what it sends back",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpusconnaaaaa02/stdout",
+      "status": 200,
+      "form": "raw",
+      "reply": "HELLO"
+    },
+    {
+      "name": "close the stream",
+      "token": "all",
+      "method": "DELETE",
+      "path": "/v1/sessions/${session}/processes/corpusconnaaaaa02",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "status": 0
+      }
+    },
+    {
+      "name": "start the server echo",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/servers/echo/start",
+      "type": "application/json",
+      "body": {
+        "key": "corpusservaaaaa01"
+      },
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "id": "corpusservaaaaa01"
+      }
+    },
+    {
+      "name": "its input, to its end",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/processes/corpusservaaaaa01/stdin",
+      "type": "application/octet-stream",
+      "raw": "ping\n",
+      "status": 204,
+      "form": "none"
+    },
+    {
+      "name": "its output",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpusservaaaaa01/stdout",
+      "status": 200,
+      "form": "raw",
+      "reply": "ping\n"
+    },
+    {
+      "name": "its close",
+      "token": "all",
+      "method": "DELETE",
+      "path": "/v1/sessions/${session}/processes/corpusservaaaaa01",
+      "status": 200,
+      "form": "json",
+      "reply": {
+        "status": 0
+      }
+    },
+    {
+      "name": "start a server not offered: no_server",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/sessions/${session}/servers/nope/start",
+      "type": "application/json",
+      "body": {
+        "key": "corpusservaaaaa02"
+      },
+      "status": 404,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "no_server",
+          "message": "no such server in this workspace"
+        }
       }
     },
     {

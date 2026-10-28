@@ -370,15 +370,14 @@ func (p *process) Resize(size agentworkspace.TerminalSize) error {
 }
 
 // interrupt asks the server to end the process as the end of its
-// start's context would. A server without the method is not asked.
-func (p *process) interrupt() error {
+// start's context would, and reports whether it did: a server without
+// the method, or a request that failed, did not, and the caller closes
+// the process instead.
+func (p *process) interrupt() bool {
 	ctx, cancel := context.WithTimeout(p.ctx, requestTimeout)
 	defer cancel()
 	_, err := mcp.CallCustomMethod[*IDParams, *EmptyResult](ctx, p.c.Session, wire.MethodCancel, &IDParams{ProcessID: wire.ProcessID{ID: p.id}})
-	if err != nil && !notFound(err) {
-		return p.c.Err(fromWire(err))
-	}
-	return nil
+	return err == nil
 }
 
 // Close ends the process in the server, which closes its input, gives

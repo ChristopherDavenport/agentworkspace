@@ -13,15 +13,18 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/mcpworkspace/wire"
+	"github.com/ChristopherDavenport/agentworkspace/workspacetest"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -36,7 +39,8 @@ type corpus struct {
 }
 
 // exchange is one request, sent with the next id, and the reply's
-// result or error. ${root} stands for the served root, and "*" for a
+// result or error. Params' "${port}" is a port on the loopback that
+// answers what it is sent, upper-cased, once all of it is sent. ${root} stands for the served root, and "*" for a
 // value that differs from run to run (a modification time, the reach).
 type exchange struct {
 	Name   string          `json:"name"`
@@ -59,7 +63,25 @@ func kindRefusal(op, name string) error {
 	if !ok {
 		return nil
 	}
+	if kind == wire.KindOther {
+		return errors.New("a failure of no kind, at /srv/hidden/" + kind)
+	}
 	return &fs.PathError{Op: op, Path: "/srv/hidden/" + kind, Err: sentinelOf(kind)}
+}
+
+// corpusWorkspace is kindStarter offering two servers: echo, and
+// holder, which is given a secret.
+type corpusWorkspace struct {
+	kindStarter
+	offer *agentworkspace.Offering
+}
+
+func (c corpusWorkspace) Servers(ctx context.Context) ([]agentworkspace.Server, error) {
+	return c.offer.Servers(ctx)
+}
+
+func (c corpusWorkspace) StartServer(ctx context.Context, name string, stderr io.Writer) (agentworkspace.Process, error) {
+	return c.offer.StartServer(ctx, name, stderr)
 }
 
 func (k kindStarter) FS() fs.FS { return kindFiles{k.Local.FS().(fs.ReadLinkFS)} }
@@ -113,7 +135,15 @@ func TestTheWireCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
-	ws := kindStarter{l}
+	k := kindStarter{l}
+	o, err := agentworkspace.Offer(k, []agentworkspace.OfferedServer{
+		{Server: agentworkspace.Server{Name: "echo", Description: "says it back"}, Command: agentworkspace.Command{Args: []string{"cat"}}},
+		{Server: agentworkspace.Server{Name: "holder", Description: "holds a token"}, Command: agentworkspace.Command{Args: []string{"cat"}, Env: []string{"TOKEN=s3cr3t"}}, Secrets: []string{"TOKEN"}},
+	}, agentworkspace.WithOutputFilter(func(_ string, _ map[string]string, r io.Reader) io.Reader { return r }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := corpusWorkspace{k, o}
 	procs := NewProcesses(ws)
 	t.Cleanup(procs.Close)
 	srv := mcp.NewServer(&mcp.Implementation{Name: "corpus", Version: "test"}, &mcp.ServerOptions{
@@ -157,9 +187,10 @@ func TestTheWireCorpus(t *testing.T) {
 	if err := conn.Write(ctx, &jsonrpc.Request{Method: "notifications/initialized", Params: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
+	port := []byte(strconv.Itoa(workspacetest.Upper(t)))
 	for i := range c.Exchanges {
 		e := &c.Exchanges[i]
-		r := call(e.Method, e.Params)
+		r := call(e.Method, bytes.ReplaceAll(e.Params, []byte(`"${port}"`), port))
 		var result, rerr json.RawMessage
 		if r.Error != nil {
 			rerr = mustJSON(t, normalized(t, mustJSON(t, r.Error), dir))
@@ -239,15 +270,22 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	return b
 }
 
+// jsonEqual reports whether a and b are the same JSON value, types
+// and all: numbers by their text, so 0 and "0" differ, as do true and
+// "true", and ["a","b"] and ["a b"].
 func jsonEqual(a, b json.RawMessage) bool {
 	if len(a) == 0 || len(b) == 0 {
 		return len(a) == len(b)
 	}
-	var x, y any
-	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
-		return false
+	decode := func(m json.RawMessage) (any, bool) {
+		d := json.NewDecoder(bytes.NewReader(m))
+		d.UseNumber()
+		var v any
+		return v, d.Decode(&v) == nil
 	}
-	return fmt.Sprint(x) == fmt.Sprint(y)
+	x, okx := decode(a)
+	y, oky := decode(b)
+	return okx && oky && reflect.DeepEqual(x, y)
 }
 
 // Every refusal in the corpus, a method's error or a file's, maps on

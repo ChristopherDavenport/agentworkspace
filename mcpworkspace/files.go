@@ -25,8 +25,11 @@ import (
 // confined to the workspace's root, as an agentworkspace.Workspace's FS
 // is: a name that leaves it, by ".." or a link, is refused, and nothing
 // is ever written. The server checks each request itself, whatever the
-// client did.
-func ServeFiles(srv *mcp.Server, fsys fs.FS) {
+// client did. A refusal carries its kind and a message that names no
+// path of this machine's but the name asked for, unless WithErrorText
+// says otherwise.
+func ServeFiles(srv *mcp.Server, fsys fs.FS, opts ...ServeOption) {
+	cfg := configOf(opts)
 	srv.AddResourceTemplate(&mcp.ResourceTemplate{
 		Name:        "workspace-files",
 		Title:       "The workspace's files, read-only",
@@ -34,7 +37,7 @@ func ServeFiles(srv *mcp.Server, fsys fs.FS) {
 		MIMEType:    "application/json",
 		URITemplate: wire.FilesURITemplate,
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		reply := fileOp(fsys, req.Params.URI)
+		reply := cfg.fileOp(fsys, req.Params.URI)
 		data, err := json.Marshal(reply)
 		if err != nil {
 			return nil, err
@@ -48,26 +51,6 @@ func ServeFiles(srv *mcp.Server, fsys fs.FS) {
 
 func infoOf(fi fs.FileInfo) wire.FileInfo {
 	return wire.FileInfo{Name: fi.Name(), Size: fi.Size(), Mode: fi.Mode(), ModTime: fi.ModTime()}
-}
-
-// fileErrorOf is err as a reply's error.
-func fileErrorOf(err error) *wire.FileError {
-	kind := wire.KindOther
-	switch {
-	case errors.Is(err, agentworkspace.ErrOutside):
-		kind = wire.KindOutside
-	case errors.Is(err, fs.ErrNotExist):
-		kind = wire.KindNotExist
-	case errors.Is(err, fs.ErrInvalid):
-		kind = wire.KindInvalid
-	case errors.Is(err, fs.ErrPermission):
-		kind = wire.KindPermission
-	}
-	msg := err.Error()
-	if len(msg) > wire.MaxErrorBytes {
-		msg = msg[:wire.MaxErrorBytes]
-	}
-	return &wire.FileError{Kind: kind, Message: strings.ToValidUTF8(msg, "?")}
 }
 
 // checkName refuses a name that is not fs.ValidPath: one that is
@@ -85,8 +68,8 @@ func checkName(op, name string) error {
 }
 
 // fileOp answers one request.
-func fileOp(fsys fs.FS, uri string) wire.FileReply {
-	fail := func(err error) wire.FileReply { return wire.FileReply{Error: fileErrorOf(err)} }
+func (c serveConfig) fileOp(fsys fs.FS, uri string) wire.FileReply {
+	fail := func(err error) wire.FileReply { return wire.FileReply{Error: c.fileError(err)} }
 	op, name, err := wire.ParseFileURI(uri)
 	if err != nil {
 		return fail(err)
@@ -112,7 +95,7 @@ func fileOp(fsys fs.FS, uri string) wire.FileReply {
 			return fail(err)
 		}
 		if len(es) > wire.MaxDirEntries {
-			return fail(fmt.Errorf("%s holds %d entries, over the %d a listing gives", name, len(es), wire.MaxDirEntries))
+			return fail(refuse(nil, "%s holds %d entries, over the %d a listing gives", name, len(es), wire.MaxDirEntries))
 		}
 		out := make([]wire.FileInfo, 0, len(es))
 		for _, e := range es {
@@ -154,10 +137,11 @@ func readBounded(fsys fs.FS, name string) ([]byte, error) {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, &fs.PathError{Op: "read", Path: name, Err: errors.New("not a regular file")}
+		// The server's own words, of the name asked for.
+		return nil, refuse(nil, "read %s: not a regular file", name)
 	}
 	tooBig := func(n int64) error {
-		return &fs.PathError{Op: "read", Path: name, Err: fmt.Errorf("%d bytes, over the %d-byte limit of a read", n, wire.MaxFileBytes)}
+		return refuse(nil, "read %s: %d bytes, over the %d-byte limit of a read", name, n, wire.MaxFileBytes)
 	}
 	if fi.Size() > wire.MaxFileBytes {
 		return nil, tooBig(fi.Size())
@@ -295,17 +279,8 @@ func (f *remoteFS) kindErr(e *wire.FileError) error {
 		msg = msg[:wire.MaxErrorBytes]
 	}
 	msg = strings.ToValidUTF8(msg, "?")
-	var sentinel error
-	switch e.Kind {
-	case wire.KindNotExist:
-		sentinel = fs.ErrNotExist
-	case wire.KindOutside:
-		sentinel = agentworkspace.ErrOutside
-	case wire.KindInvalid:
-		sentinel = fs.ErrInvalid
-	case wire.KindPermission:
-		sentinel = fs.ErrPermission
-	default:
+	sentinel := sentinelOf(e.Kind)
+	if sentinel == nil {
 		return f.fail("%s", msg)
 	}
 	return &remoteErr{name: f.name, sentinel: sentinel, msg: msg}

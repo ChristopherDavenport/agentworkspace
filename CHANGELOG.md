@@ -7,6 +7,146 @@ versions may break the API.
 
 ## Unreleased
 
+- Added: the wire corpus (#42). `testdata/wire/remote.json` and
+  `mcpworkspace/testdata/wire/mcpworkspace.json` hold request and reply
+  exchanges for each wire, over a layout each file describes: the
+  files, writes, exec (a keyed one cancelled among them, with
+  `interrupted` and the output it wrote before the cancel), sessions,
+  processes (pipes, wait, signal, a cancel that keeps the output so
+  far, close), a terminal (its standard error merged, its lines ending
+  `\r\n`), a connect, the servers (listed with `secrets`,
+  started, not offered), and every error kind and a refusal of none;
+  not yet remote's stderr route, a successful resize or a lease's
+  lapse, for a server or client in another
+  language to check itself without Go. `TestTheWireCorpus` replays the
+  requests against the reference server (`-update` records the
+  replies), and `TestTheCorpusRefusalsMapBack` maps every refusal in it
+  back through the reference client and checks no served path is in
+  one. RFC 0001 §16 points at it.
+
+- Added: `connect(port)` (#31). `Connector`, `PortConn` (a stream with
+  `CloseWrite`), `Connect(ctx, ws, port)` and `Local.Connect`, which
+  dials the port on this machine's loopback, and `Forward(ctx, ws,
+  port)`, a listener on `127.0.0.1` alone that opens one stream per
+  connection it accepts. remote carries a stream as a process of the
+  session, `POST /v1/sessions/{s}/connect {port, key}` under `exec`,
+  then the process routes (the info route's `connect` says it is
+  offered), and its `StarterClient` and `StarterServerClient` are
+  connectors; mcpworkspace as `process.connect {port}` and the process
+  methods (`wire.MethodConnect`, `Connect` over a `Conn`). RFC 0001 §9
+  states it, and `workspacetest.Run`'s `Connect` case checks it.
+
+- Added: terminal mode (#29). `Command.Terminal`, a `TerminalSize`,
+  starts a command on a pseudo-terminal of that size as its controlling
+  terminal, in a session of its own, its standard error merged into its
+  output; closing its input sends `^D`. `Resizer` and `Resize(p, size)`
+  change the size. `Local.Start` gives one on Linux and refuses the
+  start with `errors.ErrUnsupported` elsewhere, never falling back to
+  pipes; a `Stream` beside a terminal is refused, and so is `Exec` with
+  one. remote carries it as the start's `terminal` and a `resize`
+  route, mcpworkspace as `process.start`'s `terminal` and
+  `process.resize` (`wire.TerminalSize`, `wire.MethodResize`).
+  RFC 0001 §7 states it, and `workspacetest.RunStarter` has a
+  `Terminal` case. The persistent shell of #29 is a tool, and is not
+  here.
+
+- Added: `Server.Secrets`, a mark on a listed server the offering gives
+  a secret (#23). `Offering.Servers` sets it for a server whose
+  `OfferedServer.Secrets` names any; remote's servers route and
+  mcpworkspace's `servers.list` carry it as `secrets` (`wire.ServerInfo`),
+  with no name or value. It informs a listing alone: a caller must not
+  take a server without it to hold no secret. RFC 0001 §11 states it,
+  and `workspacetest.RunServerProvider` checks it.
+
+- Changed: `Workspace.Root` is absolute, or `""` when the workspace does
+  not tell this side its root, never a partial path (#36). A remote
+  client dialled by a principal without `read` gave the root's last
+  element as its `Root`, `Served().Root` and `Descriptor().Root`; it now
+  gives `""` for each, while the server still sends the last element,
+  so an older client dials as before (`.` for a root of `/`, whose last
+  element is itself). RFC 0001 §1 states the rule, and
+  `workspacetest.Run` checks a readable workspace's root is absolute.
+
+- Changed: mcpworkspace carries the thirteen signals remote does (`HUP
+  INT QUIT KILL USR1 USR2 PIPE ALRM TERM CONT STOP TSTP WINCH`, the new
+  `wire.Signal*` constants), where it carried `INT`, `TERM` and `KILL`
+  (#40). A signal a starter does not carry is now
+  `errors.ErrUnsupported` on every backend: `Local`'s `Signal` of an
+  `os.Signal` that is no `syscall.Signal`, the remote and mcpworkspace
+  clients' of one their wire has no name for, and both servers' of a
+  name they do not know (remote answered `invalid`, mcpworkspace an
+  error of no kind). RFC 0001 §7 names the required set (`INT`, `TERM`,
+  `KILL`, `HUP`), and `workspacetest.RunStarter` sends each and checks
+  the refusal.
+
+- Added: the served workspace's reach crosses both wires. remote's info
+  route carries `reach`, and `(*remote.Client).Reach` states it, so
+  `agentworkspace.ReachOf` on a remote client is the served one's where
+  it was `""`. mcpworkspace adds `agentworkspace/process.info {} ->
+  {reach?, bounds}` (`wire.MethodInfo`, `wire.Info`), `ProcessInfo`, its
+  client, and `Conn.Reach`, where a program puts what it said. A reach
+  a client does not know is `""`.
+
+- Added: `mcpworkspace.Exec`, a command run to its end over the process
+  methods with `Workspace.Exec`'s rules (#33): its stdin written and
+  closed, its output kept or streamed, `TimedOut` from its timeout, and
+  the end of its context a cancel whose output is read to the end and
+  returned with `Interrupted` beside `ctx.Err()`; a failing `Stream`
+  ends the command. Against a server that does not answer the cancel,
+  the end of its context closes the process instead, as `Start`'s does,
+  and `Exec` still returns `Interrupted`, without what the command wrote
+  after the close. `workspacetest.RunExec`, with `Execer` and
+  `ExecBackend`, runs `Run`'s Exec table over a backend that carries
+  Exec without a whole workspace, and mcpworkspace runs it. Two of the
+  table's commands pause between their standard output and standard
+  error, which such a wire carries apart.
+
+- Fixed: mcpworkspace carries every error kind of RFC 0001 §2 both
+  ways (#38). Its files' errors had five kinds, so `fs.ErrExist`,
+  `errors.ErrUnsupported` and `fs.ErrClosed` reached the client as
+  other; its process and server methods' errors carried none. The wire
+  adds `KindExist`, `KindUnsupported`, `KindProcessDone`, `KindClosed`,
+  `KindNoServer` and `KindNoProcess` (`wire.Kinds`), and a method's
+  refusal is JSON-RPC error `wire.CodeRefused` (-32011), or
+  `CodeNoServer`, with a `wire.Refusal{Kind}` as its data, which the
+  client maps back, so `errors.Is` holds as over remote.
+- Changed: a refusal crosses either wire by an allow-list, never as the
+  served error's text, which may name a path of the serving side's
+  machine (#39). A refusal of a kind is the kind's words, or the
+  system's for an errno; a cancellation is the context's words; one of
+  no kind is "the workspace refused the operation". remote sent the
+  served text of a refusal of no kind with absolute paths cut, which
+  missed a path after a newline or a tab, as `key=/path`, as a
+  `file://` URL or with spaces; mcpworkspace sent its files' and its
+  methods' text whole, a cancellation's too, and its exits' error
+  text. Both now use `internal/wireerr.Message`. `WithErrorText`, a new
+  `ServeOption` of `ServeFiles` and `NewProcesses` (both now variadic),
+  sends the text as it is, for debugging. The server's own refusals
+  (a malformed request, a bound) keep their words. RFC 0001 §15 states
+  the rule for every wire; `workspacetest.Backend.Wire` marks a wire's
+  client, and `Run`'s new `RefusalsNameNoServedPath` checks no served
+  path crosses.
+
+- Fixed: a `remote` client's `Exec` that its context interrupts now
+  returns the output the command wrote until its end, where it returned
+  none (#5, the wire half). The exec request carries a key the client
+  chooses, the server sends the reply's header once the key is taken,
+  and the new route `POST /v1/exec/{key}/cancel` ends the command as a
+  hang-up does; the client cancels, reads on to the output frame, which
+  now carries `interrupted`, and hangs up only when the cancel is
+  refused or late. A key is its principal's: another's cancel is
+  `no_process`. An exec without a key is ended by a hang-up, as before.
+  `workspacetest.Run` now checks the kept output over remote and tunnel
+  too. RFC 0001 §6 states the rule for every wire.
+- Added: mcpworkspace's `agentworkspace/process.cancel {id}`
+  (`wire.MethodCancel`), which ends a process as the end of its start's
+  context does and leaves it in the session's table, so its output is
+  read to the end and its wait says `canceled`. Fixed: the end of a
+  `Start`'s context, over mcpworkspace, sent a close, which closes the
+  input and waits two seconds before the ladder; it now sends a cancel,
+  the ladder from SIGINT at once, as RFC 0001 §8 asks, and then the
+  close. A server without the method is sent the close alone.
+
 - Added: `Descriptor.Host` and `Descriptor.Instance`, agentsession
   0.14's `workspace.host` and `workspace.instance` (#3). `Local` sets
   `Host` to the system's host name, or to `WithHost`'s, a new

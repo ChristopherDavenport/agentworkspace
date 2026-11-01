@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/wireerr"
 )
 
 // Every bound is kept, by the server whatever the client sends, and is
@@ -114,10 +115,11 @@ func TestErrorsRoundTrip(t *testing.T) {
 			t.Errorf("the client was told a server path: %v", err)
 		}
 	}
-	// An error of no kind the wire names keeps its words, bounded.
+	// An error of no kind the wire names is the one generic message:
+	// its own words do not cross.
 	fw.err = errors.New("the workspace's own words" + strings.Repeat(".", 2*MaxErrorBytes))
 	err := ws.Remove(context.Background(), "x")
-	if err == nil || !strings.Contains(err.Error(), "the workspace's own words") || len(err.Error()) > MaxErrorBytes+64 {
+	if err == nil || strings.Contains(err.Error(), "the workspace's own words") || !strings.HasSuffix(err.Error(), wireerr.Other) {
 		t.Errorf("an unmapped error: %v", err)
 	}
 	for _, sentinel := range []error{agentworkspace.ErrOutside, fs.ErrNotExist, ErrLimit} {
@@ -190,13 +192,13 @@ func TestLocalsErrorsReachTheClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	if err := q.Signal(syscall.Signal(63)); err == nil {
-		t.Error("an unknown signal was sent")
+	if err := q.Signal(syscall.Signal(63)); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("an unknown signal: %v, want it unsupported", err)
 	}
-	if _, code := raw(t, "POST", url+q.(*process).route+"/signal", "", strings.NewReader(`{"signal":"SEGV"}`)); code != codeInvalid {
+	if _, code := raw(t, "POST", url+q.(*process).route+"/signal", "", strings.NewReader(`{"signal":"SEGV"}`)); code != codeUnsupported {
 		t.Errorf("the server took an unknown signal: %q", code)
 	}
-	if _, code := raw(t, "POST", url+q.(*process).route+"/signal", "", strings.NewReader(`{"signal":"15"}`)); code != codeInvalid {
+	if _, code := raw(t, "POST", url+q.(*process).route+"/signal", "", strings.NewReader(`{"signal":"15"}`)); code != codeUnsupported {
 		t.Errorf("the server took a signal's number: %q", code)
 	}
 }

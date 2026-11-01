@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,13 +14,16 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/lifetime"
 )
 
 // Workspace is what Dial returns: an agentworkspace.Workspace at the
@@ -280,23 +284,50 @@ func (c *Client) sessionRoute() string {
 	return routeSessions + "/" + c.session
 }
 
-// Root is the served workspace's Root; for a principal without read,
-// whom the server does not tell its path, its last element alone.
-func (c *Client) Root() string { return c.info.Root }
+// Root is the served workspace's Root, or "" for a principal without
+// read, whom the server does not tell it: the info route then gives the
+// root's last element alone, which is no path and is not passed on.
+func (c *Client) Root() string { return absolute(c.info.Root) }
+
+// absolute is root when it is an absolute path, and "" otherwise: a
+// root withheld (RFC 0001 §1).
+func absolute(root string) string {
+	if path.IsAbs(root) {
+		return root
+	}
+	return ""
+}
 
 // Env is the served workspace's Env, a copy, as it was at Dial; empty
 // for a principal without exec, whom the server does not tell it.
 func (c *Client) Env() []string { return slices.Clone(c.info.Env) }
 
+// Reach is how far the served workspace's end of a process reaches, as
+// the server said it at Dial (agentworkspace.ReachOf on the served
+// workspace), and "" when it said none or one this client does not
+// know. A served Local asks its system at each call; the client keeps
+// what it was told.
+func (c *Client) Reach() agentworkspace.Reach {
+	switch r := agentworkspace.Reach(c.info.Reach); r {
+	case agentworkspace.ReachGroup, agentworkspace.ReachDescendants, agentworkspace.ReachAll:
+		return r
+	}
+	return ""
+}
+
 // Descriptor names the remote: KindRemote, the base URL with no
 // userinfo, query or fragment as its Ref, and the served Root.
 func (c *Client) Descriptor() agentworkspace.Descriptor {
-	return agentworkspace.Descriptor{Kind: agentworkspace.KindRemote, Ref: c.base.String(), Root: c.info.Root}
+	return agentworkspace.Descriptor{Kind: agentworkspace.KindRemote, Ref: c.base.String(), Root: c.Root()}
 }
 
 // Served is the served workspace's own Descriptor, its Root as Root
-// gives it.
-func (c *Client) Served() agentworkspace.Descriptor { return c.info.Served.workspace() }
+// gives it: "" when it is withheld.
+func (c *Client) Served() agentworkspace.Descriptor {
+	d := c.info.Served.workspace()
+	d.Root = absolute(d.Root)
+	return d
+}
 
 // Scopes are the scopes the server said the principal holds when it
 // answered Dial, a copy, in the server's order: what the program's
@@ -468,19 +499,22 @@ func (c *Client) Remove(ctx context.Context, name string) error {
 	return nil
 }
 
-// Exec runs one command in the served workspace. The request's context
-// is the process's on the server: ctx's end, or Close, ends it and
-// everything it started. Ended by ctx, Exec returns an Output with
-// ExitCode -1 and Interrupted beside ctx.Err(), whose Stdout and Stderr
-// are empty: the wire carries nothing past the hang-up but what a
-// Command.Stream was given. Command.Timeout is sent, and the server ends
-// the process at it. Command.Stream gets the output as the server sends
-// it; when writing to it fails, the command is ended and Exec returns
-// that error.
+// Exec runs one command in the served workspace. The end of ctx ends
+// it and everything it started, as on the served workspace: the client
+// asks the server to end it, by the key it sent, and reads on, so the
+// Output it returns beside ctx.Err(), with ExitCode -1 and Interrupted,
+// holds what the command wrote until its end. A server that does not
+// answer the cancel, or does not answer it within a bound, is hung up
+// on, and the Output is then empty. Close ends it too, by hanging up.
+// Command.Timeout is sent, and the server ends the process at it.
+// Command.Stream gets the output as the server sends it; when writing
+// to it fails, the command is ended and Exec returns that error.
 func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentworkspace.Output, error) {
 	switch {
 	case len(cmd.Args) == 0:
 		return nil, errors.New("remote: no command")
+	case cmd.Terminal != nil:
+		return nil, fmt.Errorf("remote: exec %s: Exec gives standard output and standard error apart; a terminal is Start's: %w", cmd.Args[0], errors.ErrUnsupported)
 	case int64(len(cmd.Stdin)) > c.info.Limits.MaxWriteBytes:
 		return nil, fmt.Errorf("remote: exec %s: %w: stdin of %d bytes, over the server's %d", cmd.Args[0], ErrLimit, len(cmd.Stdin), c.info.Limits.MaxWriteBytes)
 	case c.isClosed():
@@ -489,11 +523,14 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	rctx, done := c.with(ctx)
-	defer done()
+	// The request outlives ctx, so the reply can carry the output after
+	// a cancel; hangUp ends it, and Close does.
+	rctx, hangUp := c.with(context.WithoutCancel(ctx))
+	defer hangUp()
+	key := rand.Text()
 	body, err := json.Marshal(execRequest{
 		Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, Stdin: cmd.Stdin,
-		TimeoutMs: millis(cmd.Timeout), Stream: cmd.Stream != nil,
+		TimeoutMs: millis(cmd.Timeout), Stream: cmd.Stream != nil, Key: key,
 	})
 	if err != nil {
 		return nil, err
@@ -508,22 +545,63 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 		}
 		return fmt.Errorf("remote: exec %s: %w", cmd.Args[0], err)
 	}
-	// fail answers a request that ended. One ctx ended is interrupted:
-	// what of its output the Stream was given is all the wire carries
-	// past a hang-up, so the Output holds none (#5's wire change is to
-	// come).
+	// fail answers a request that ended. One ctx ended is interrupted,
+	// with no output: the reply that would have carried it is gone.
 	fail := func(err error) (*agentworkspace.Output, error) {
 		if err = ended(err); ctx.Err() != nil && err == ctx.Err() {
 			return &agentworkspace.Output{ExitCode: -1, Interrupted: true}, err
 		}
 		return nil, err
 	}
-	resp, err := c.request(rctx, http.MethodPost, routeExec, nil, bytes.NewReader(body), "application/json")
-	if err != nil {
-		return fail(err)
+	// The server sends the reply's header once the key is taken, so
+	// that a cancel finds the command; until then ctx's end waits for it
+	// a request's bound.
+	type sent struct {
+		resp *http.Response
+		err  error
 	}
-	defer resp.Body.Close()
-	br := bufio.NewReader(resp.Body)
+	got := make(chan sent, 1)
+	go func() {
+		resp, err := c.request(rctx, http.MethodPost, routeExec, nil, bytes.NewReader(body), "application/json")
+		got <- sent{resp, err}
+	}()
+	var r sent
+	select {
+	case r = <-got:
+	case <-ctx.Done():
+		t := time.NewTimer(c.timeout)
+		select {
+		case r = <-got:
+		case <-t.C:
+			hangUp()
+			r = <-got
+		}
+		t.Stop()
+	}
+	if r.err != nil {
+		return fail(r.err)
+	}
+	defer r.resp.Body.Close()
+	// ctx's end is a cancel, and the reply read on for as long as the
+	// ladder and a request take; a cancel that fails is a hang-up.
+	var bound atomic.Pointer[time.Timer]
+	defer func() {
+		if t := bound.Load(); t != nil {
+			t.Stop()
+		}
+	}()
+	stop := context.AfterFunc(ctx, func() {
+		cctx, cancel := context.WithTimeout(rctx, c.timeout)
+		err := c.call(cctx, http.MethodPost, routeExec+"/"+key+"/cancel", nil, struct{}{}, nil)
+		cancel()
+		if err != nil && !errors.Is(err, ErrNoProcess) {
+			hangUp()
+			return
+		}
+		bound.Store(time.AfterFunc(cancelBound+c.timeout, hangUp))
+	})
+	defer stop()
+	br := bufio.NewReader(r.resp.Body)
 	limit := frameLimit(c.info.Limits.MaxOutputBytes)
 	for {
 		line, err := readFrame(br, limit)
@@ -542,7 +620,15 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 			return nil, fmt.Errorf("remote: exec %s: %w", cmd.Args[0], f.Error.err())
 		case f.Output != nil:
 			o := f.Output
-			return &agentworkspace.Output{Stdout: o.Stdout, Stderr: o.Stderr, ExitCode: o.ExitCode, TimedOut: o.TimedOut}, nil
+			out := &agentworkspace.Output{Stdout: o.Stdout, Stderr: o.Stderr, ExitCode: o.ExitCode, TimedOut: o.TimedOut, Interrupted: o.Interrupted}
+			switch {
+			case !o.Interrupted:
+				return out, nil
+			case ctx.Err() != nil:
+				return out, ctx.Err()
+			}
+			// Not this client's cancel: the server's close ended it.
+			return out, fmt.Errorf("remote: exec %s: the server ended it: %w", cmd.Args[0], fs.ErrClosed)
 		case len(f.Data) > 0 && cmd.Stream != nil:
 			if _, err := cmd.Stream.Write(f.Data); err != nil {
 				return nil, err
@@ -552,6 +638,11 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 		}
 	}
 }
+
+// cancelBound is how long an Exec's reply is read after its cancel was
+// answered, beyond a request's own bound: the ladder's two graces and
+// the grace its output is read for after the command exits.
+const cancelBound = 3 * lifetime.Grace
 
 // readFrame reads one line of an NDJSON reply, at most limit bytes of
 // it: a longer one is ErrLimit, read no further.

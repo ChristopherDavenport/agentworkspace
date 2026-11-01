@@ -32,6 +32,12 @@ type Server struct {
 	// Description says what the server is for, for a person choosing
 	// among them; empty when the workspace says nothing.
 	Description string
+	// Secrets says the workspace gives the server a secret (an
+	// OfferedServer that names Secrets); no name or value of one is
+	// told. It informs a listing and no more: a listing is the
+	// workspace's own word, and a caller must not take a server
+	// without the mark to hold no secret.
+	Secrets bool
 }
 
 // ValidServerName reports whether name may name a Server: one to 32
@@ -269,7 +275,10 @@ var _ ServerProvider = (*Offering)(nil)
 func (o *Offering) Servers(context.Context) ([]Server, error) {
 	out := make([]Server, 0, len(o.servers))
 	for _, name := range slices.Sorted(maps.Keys(o.servers)) {
-		out = append(out, o.servers[name].Server)
+		s := o.servers[name]
+		sv := s.Server
+		sv.Secrets = len(s.Secrets) > 0
+		out = append(out, sv)
 	}
 	return out, nil
 }

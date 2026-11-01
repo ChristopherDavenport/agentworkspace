@@ -1,6 +1,6 @@
 # RFC 0001: Workspace Contract
 
-Status: draft 0.2
+Status: draft 0.3
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding; `Local` is the reference backend, and
@@ -23,7 +23,9 @@ comments and package docs, with the module as the reference binding
 and its two wires, `remote` (HTTP) and `mcpworkspace` (MCP), as
 bindings given against it. Draft 0.1 added no rule that the code or
 its doc comments did not already state; draft 0.2 settles the issues
-listed under [changes since draft 0.1](#changes-since-draft-01). Where an open issue will add or change a rule, the section
+listed under [changes since draft 0.1](#changes-since-draft-01), and
+draft 0.3 those under [changes since draft 0.2](#changes-since-draft-02),
+the wires' half. Where an open issue will add or change a rule, the section
 says so in an **Open** note naming the issue, and the rule is written
 when that issue lands. Where the code and its doc comments disagree,
 the disagreement is listed under [open questions](#19-open-questions)
@@ -87,7 +89,14 @@ interpreted as in RFC 2119.
 - **Root**: the absolute path of the workspace's working directory as
   the workspace's own processes see it: the checkout on the agent's
   machine, `/workspace` in a container. It is what the model is told
-  and what the session records as its `cwd`.
+  and what the session records as its `cwd`. A backend MUST give it
+  absolute whenever it knows it. Where the serving side withholds it
+  (remote, to a principal that may not read) the backend MUST give the
+  **withheld** value, which is no path and which a caller can test for
+  (the empty string in Go; a descriptor then writes no `cwd`), and
+  MUST NOT give a partial path in its place: a caller that joins a
+  name with the root, or compares two roots, must not get an answer
+  that is wrong for some principals only (#36).
 - **Name**: a path relative to the root, as [section 2](#2-names-and-confinement)
   defines.
 - **Backend**: an implementation of the workspace: `Local`, a
@@ -153,26 +162,27 @@ A refusal has one of these kinds, which every binding maps to and from
 its own vocabulary so that a caller can test for the kind on either
 side of a wire:
 
-| Kind | Meaning | Go | remote code |
-| --- | --- | --- | --- |
-| outside | the name leaves the workspace | `ErrOutside` | `outside` |
-| not-exist | nothing has the name | `fs.ErrNotExist` | `not_exist` |
-| exist | something already has the name | `fs.ErrExist` | `exist` |
-| permission | the operation is not permitted | `fs.ErrPermission` | `permission` |
-| invalid | the name or argument is malformed | `fs.ErrInvalid` | `invalid` |
-| unsupported | this workspace cannot do the operation | `errors.ErrUnsupported` | `unsupported` |
-| process-done | the process has exited | `os.ErrProcessDone` | `process_done` |
-| closed | the workspace or the handle is closed | `fs.ErrClosed` | `closed` |
-| no-server | no server is offered by that name | `ErrNoServer` | `no_server` |
+| Kind | Meaning | Go | remote code | mcpworkspace kind |
+| --- | --- | --- | --- | --- |
+| outside | the name leaves the workspace | `ErrOutside` | `outside` | `outside` |
+| not-exist | nothing has the name | `fs.ErrNotExist` | `not_exist` | `notexist` |
+| exist | something already has the name | `fs.ErrExist` | `exist` | `exist` |
+| permission | the operation is not permitted | `fs.ErrPermission` | `permission` | `permission` |
+| invalid | the name or argument is malformed | `fs.ErrInvalid` | `invalid` | `invalid` |
+| unsupported | this workspace cannot do the operation | `errors.ErrUnsupported` | `unsupported` | `unsupported` |
+| process-done | the process has exited | `os.ErrProcessDone` | `process_done` | `processdone` |
+| closed | the workspace or the handle is closed | `fs.ErrClosed` | `closed` | `closed` |
+| no-server | no server is offered by that name | `ErrNoServer` | `no_server` | `noserver` |
 
 *outside* is matched before any other kind, since a link's refusal may
-also read as another.
+also read as another. Every binding over a wire MUST carry every kind
+both ways, for every operation it carries, so a test for the kind holds
+on the client side as on the serving side; a wire MAY add kinds of its
+own (remote's `limit`, both wires' no-process), and a refusal of none
+of these is *other*.
 
-Over remote, a mapped refusal's message is the system's or the kind's
-words, never the served error's own text, which may name a path on the
-serving side's machine. mcpworkspace's file kinds are a subset of this
-table, and its messages are the served error's text; both differences
-are listed under [open questions](#19-open-questions).
+A refusal's message is governed by [section 15](#15-security-considerations):
+it names no path of the serving side's machine.
 
 ## 3. Files
 
@@ -307,18 +317,31 @@ it ended:
   found) is an error, and nothing runs.
 
 A binding over a wire MUST deliver an interrupted command's output to
-the client, so its cancellation is a message, not a dropped connection.
-**Pending (#5, the wire half):** remote does not yet. `/v1/exec` sends
-its `{"output"}` frame only at the end, and the client hangs up when its
-context ends, so over remote an interrupted Exec returns −1 and
-*interrupted* with no output kept, beyond what a stream was given. The
-change gives exec a key and a cancel route, as processes already have
-`/cancel`, and the client reads on after it cancels. Until it lands,
-`workspacetest.Run` checks the kept output on every backend but a
-remote one.
+the client, so its cancellation is a message, not a dropped connection:
+the client names the command when it sends it, sends a cancel by that
+name when its context ends, and reads on until the outcome, which
+carries the output so far with *interrupted* set. The serving side
+MUST NOT run a cancel's command to its end, and MUST let a client that
+hangs up instead end the command as a cancel does; the output is then
+lost with the connection. A client MAY hang up when the cancel is
+refused or its outcome is late, past the ladder's two graces and the
+grace for output ([section 8](#8-ending-a-process)). A name is the
+principal's: another principal's cancel ends nothing. remote's exec
+carries a key, its reply's header is sent once the key is taken, and
+`POST /v1/exec/{key}/cancel` is the cancel (#5); `workspacetest.Run`
+checks the kept output on every backend, remote and tunnel among them.
 
-Open: #33 will give the mcpworkspace client an Exec composed over
-Start, held to this section.
+**Exec over a process carrier.** A binding whose wire carries
+processes but no Exec MAY compose Exec from a start, the pipes, a
+cancel and a wait, and MUST then give what a native Exec gives: the
+command's stdin written and its input closed, its output in full or to
+the stream, the timeout's and the interrupt's results as above (the
+interrupt a cancel, the ladder from INT, with the output read to its
+end after it), and a stream whose write fails ending the command. With
+a stream, a carrier that moves standard output and standard error apart
+keeps each in its order, and the two in the order they arrive. The
+mcpworkspace client's Exec is such a composition (#33);
+`workspacetest.RunExec` holds it to the Exec table.
 
 ## 7. Processes
 
@@ -350,15 +373,43 @@ A process's operations MUST be safe to use at once: one reader of its
 output, one writer of its input and one waiter. A caller that is done
 with a process closes it, even after it exited.
 
-Signals are named on a wire by their POSIX names without the `SIG`
-prefix. remote carries `HUP INT QUIT KILL USR1 USR2 PIPE ALRM TERM CONT
-STOP TSTP WINCH`; mcpworkspace carries `INT TERM KILL`. A binding MUST
-refuse a signal it does not carry rather than send another.
+**Signals.** A signal is named on a wire by its POSIX name without the
+`SIG` prefix. Every starter, and every binding that carries one, MUST
+carry the **required set**, `INT`, `TERM`, `KILL` and `HUP`: the ladder
+of [section 8](#8-ending-a-process) is the first three, and `HUP` is a
+terminal's hang-up, which a caller sends a process that should reload
+or end. The **named set** is the required set and `QUIT USR1 USR2 PIPE
+ALRM CONT STOP TSTP WINCH`; a binding SHOULD carry it whole, and MUST
+use these names for any of it that it carries. A signal a starter or a
+binding does not carry MUST be refused as *unsupported*, and nothing is
+sent: never another signal in its place, and never a number, which
+differs between systems (`USR1` is 10 on Linux and 30 on macOS).
+remote and mcpworkspace carry the named set; `Local` carries whatever
+signal its system has, and refuses one that is not a system signal.
+`workspacetest.RunStarter` sends each of the required set and checks
+a signal no starter carries is refused as *unsupported*.
 
-Open: #29 will add a terminal mode: a process started with a
-pseudo-terminal of a given size as its controlling terminal, a resize,
-and a refusal, never a fallback to pipes, where a backend cannot give
-one.
+**Terminal.** A command started with a **terminal** of a given size
+(rows and columns) runs with a pseudo-terminal of that size as its
+controlling terminal, in a session of its own. Its standard input is
+the terminal's input and its standard output the terminal's output,
+standard error merged into it; what is written is echoed as the
+terminal echoes it, and lines end as the terminal ends them (`\r\n`).
+Closing its input sends the terminal's end of file (`^D`). A
+**resize** changes the size, and the system sends the terminal's
+foreground group `WINCH`; a resize of a process with no terminal is
+refused as *unsupported*. A stream beside a terminal is refused as
+*invalid*, since standard error is in the output, and Exec refuses a
+terminal as *unsupported*, since it gives the two apart. A backend
+that cannot give a terminal MUST refuse the start as *unsupported*,
+and MUST NOT run the command on pipes instead (#29). Over remote it is
+the start's `terminal {rows, cols}` and `POST …/processes/{p}/resize`;
+over mcpworkspace, `process.start {…, terminal}` and `process.resize`.
+The reference binding gives one on Linux (`/dev/ptmx`) and refuses
+elsewhere; `workspacetest.RunStarter`'s `Terminal` case checks the
+size, the merge, the resize and the refusals, and is skipped where the
+start is refused. A persistent shell over a terminal is a tool, not
+this contract's.
 
 ## 8. Ending a process
 
@@ -420,7 +471,14 @@ its end of a process goes:
 
 A caller MUST NOT take a backend that states no reach to reach `all`.
 A container backend reaches `all` by ending its instance's PID
-namespace.
+namespace. A binding over a wire MUST tell the client the serving
+side's reach, as the served workspace states it, and its client states
+that reach and no other: remote's info route carries `reach`, and
+mcpworkspace's `process.info` does. A client states none when the
+server says none, or a value it does not know. What a client was told
+is the reach when it asked; a served workspace whose reach changes
+(the reference binding's, when `/proc` is not its own) is asked
+again by asking again.
 
 A backend that walks a process table to find descendants MUST NOT
 signal the program's own process or group. It SHOULD send a descendant
@@ -463,18 +521,49 @@ On macOS it is `group`: `Local` does not read that system's process table
 (`sysctl kern.proc`), so a descendant that left the group outlives the
 end there. On both, a descendant whose parent exited before any signal
 was sent (a daemon's double fork, a job its shell left) is not found.
-remote's info route does not carry the served workspace's reach yet,
-so a remote client states none.
+A remote client states the reach the info route gave at Dial, and an
+mcpworkspace program the reach `process.info` gives
+(`mcpworkspace.ProcessInfo`, put in `Conn.Reach`).
 
 ## 9. Ports
 
-The contract has no port operation at draft 0.1. A process in the
-workspace may listen, and nothing in the contract reaches it from the
-agent's side.
+Connecting is optional, as starting is. **connect(port)** opens one
+bidirectional byte stream to TCP `port` (1 to 65535; any other is
+*invalid*) on the workspace's loopback, as its own processes reach it:
+what is written is sent to the port, a **half-close** ends what is
+sent (the port reads end of file, and the stream may still be read),
+what the port sends is read, and **close** ends the stream. The
+workspace's close ends every stream it opened. A port nothing listens
+on is refused, and a workspace that cannot connect refuses as
+*unsupported* (#31).
 
-Open: #31 will define `connect(port)`, one byte stream to a TCP port on
-the workspace's loopback as its own processes reach it, the wire
-carriers for it, and the scope it takes.
+Connecting is as much power as running a command (a server in the
+workspace may take requests no tool would make), so a wire grants it
+with the scope that grants commands: remote's `exec`.
+
+A binding over a wire carries a stream natively, as a process of the
+session that the connect starts: its input is what is sent and the
+input's close the half-close, its output what is received, and the
+process's close the stream's. remote's is `POST
+/v1/sessions/{s}/connect {port, key} → {id}`, then the process routes;
+mcpworkspace's is `process.connect {port} → {id}`, then the process
+methods. A backend with no native carrier MAY relay a stream through a
+started process (bash's `/dev/tcp`, or a program it ships) as a
+fallback binding of its own; the contract does not require bash, and a
+relay is not a native carrier.
+
+A **forwarder** exposes a port on the agent's machine: it MUST bind the
+loopback alone, never another address, and opens one stream per
+connection it accepts, copying both ways. It is a binding helper over
+connect, not a wire operation.
+
+The reference binding's `Local.Connect` dials `127.0.0.1`, then `::1`;
+`Forward(ctx, ws, port)` is the forwarder, on `127.0.0.1` and a port
+the system picks. `workspacetest.Run`'s `Connect` case checks a
+stream, its half-close, the forwarder's address and the refusals, on a
+port it listens on in the test's own loopback, so it holds for a
+backend whose loopback is the test's; it is skipped for a workspace
+that is no connector.
 
 ## 10. Roots
 
@@ -501,9 +590,9 @@ so a program can prefix a server's tools with its name and a separator
 of underscores (`mcp__<name>__<tool>`) without two servers' tools
 running together.
 
-**List.** The provider lists the servers it offers, each a name and an
-optional description for a person choosing among them, in a stable
-order.
+**List.** The provider lists the servers it offers, each a name, an
+optional description for a person choosing among them and the secrets
+mark below, in a stable order.
 
 **Start.** Starting a server by name returns at once, as Start does,
 with the same lifetime ([section 8](#8-ending-a-process)): its close,
@@ -543,9 +632,14 @@ be offered only to a client that may neither run commands in the
 workspace nor write it: remote's `servers` scope alone, or a workspace
 that runs and writes nothing for that client.
 
-Open: #23 will add a `secrets` mark to a listed server, informative
-only: a client MUST NOT read its absence as a statement that a server
-holds none.
+**The secrets mark.** A listed server carries `secrets: true` when the
+offering gives it any secret; no name or value crosses with it. The
+mark informs a listing and no more: a listing is the workspace's own
+word ([section 13](#13-isolation-statement)), so a client MAY show the
+mark, and MUST NOT take its absence as a statement that a server holds
+none (#23). Both wires' listings carry it (remote's `GET /v1/servers`,
+mcpworkspace's `servers.list`), and `workspacetest.RunServerProvider`
+checks a server given a secret is marked and one given none is not.
 
 ## 12. Descriptor
 
@@ -595,7 +689,7 @@ lands in session files that a program may publish, so a redactor
 SHOULD know the member.
 
 Over remote, a principal without `read` is told the served descriptor
-without its host, as it is told the root's last element alone.
+without its host and with its root withheld.
 
 A descriptor's members are fixed for the workspace's life: asking
 twice gives the same answer, and a binding MAY cache it.
@@ -634,16 +728,17 @@ The root module is the reference binding.
 | bounded read | `Read(w, name, max)` |
 | write, remove | `Workspace.WriteFile(ctx, name, data, perm)`, `Workspace.Remove(ctx, name)` |
 | environment | `Workspace.Env()`, a copy |
-| command | `Command{Args, Dir, Env, Stdin, Timeout, Stream}` |
+| command | `Command{Args, Dir, Env, Stdin, Timeout, Stream, Terminal}`; `TerminalSize{Rows, Cols}` |
 | exec | `Workspace.Exec(ctx, cmd)` → `*Output{Stdout, Stderr, ExitCode, TimedOut, Interrupted}`, beside `ctx.Err()` when interrupted |
 | descriptor | `Workspace.Descriptor()` → `Descriptor{Kind, Ref, Host, Instance, Root}`; `KindLocal`, `KindContainer`, `KindRemote` |
 | close | `Workspace.Close()` |
 | starter | `Starter` interface; `Start(ctx, ws, cmd)` refuses a non-starter with `errors.ErrUnsupported` |
-| process | `Process{Stdin, Stdout, Wait, Signal, Close}` |
+| process | `Process{Stdin, Stdout, Wait, Signal, Close}`; `Resizer`, `Resize(p, size)` for a terminal's |
 | reach | `ReachOf(ws)` → `Reach`: `ReachGroup`, `ReachDescendants`, `ReachAll`, or `""` when the workspace states none; a workspace states it with a `Reach()` method |
 | owner's context | the `ctx` given to `Start` or `StartServer` |
-| server provider | `ServerProvider{Servers, StartServer}`, `Server{Name, Description}`, `ValidServerName`, `ErrNoServer` |
+| server provider | `ServerProvider{Servers, StartServer}`, `Server{Name, Description, Secrets}`, `ValidServerName`, `ErrNoServer` |
 | offering | `Offer(ws, servers, opts...)` → `*Offering`; `OfferedServer{Server, Command, Secrets}`; `WithOutputFilter(OutputFilter)`; `ErrOutputFilter` |
+| connect | `Connector{Connect(ctx, port)}` → `PortConn{Read, Write, CloseWrite, Close}`; `Connect(ctx, ws, port)` refuses a non-connector with `errors.ErrUnsupported`; `Forward(ctx, ws, port)` → a loopback `net.Listener` |
 | reference backend | `NewLocal(dir, env, opts...)` → `*Local`, over an `os.Root`; `WithHost(name)`; Unix (Linux and macOS) |
 
 ### mcpworkspace
@@ -655,17 +750,21 @@ the standard library alone.
 
 | Contract | mcpworkspace |
 | --- | --- |
-| start | `agentworkspace/process.start {args, dir?, env?, timeoutMs?, stderr?} → {id}` |
+| start | `agentworkspace/process.start {args, dir?, env?, timeoutMs?, stderr?, terminal?} → {id}` |
+| resize | `process.resize {id, rows, cols} → {}` |
 | standard input | `process.write {id, data}`, at most `MaxWriteBytes` (1 MiB) each; `process.closeStdin {id}` |
 | standard output, standard error | `process.read {id, fd: 1\|2, max?} → {data?, eof?}`, a long poll, at most `MaxReadBytes` (64 KiB) |
-| signal | `process.signal {id, signal: INT\|TERM\|KILL} → {done?}` |
+| signal | `process.signal {id, signal} → {done?}`, a name of the named set ([section 7](#7-processes)) |
 | wait | `process.wait {id} → {status, ended?, error?}` |
 | close | `process.close {id} → {status, ended?, error?, stderr?}` |
+| cancel (the owner's context ended) | `process.cancel {id} → {}`: the ladder from INT, input left open, the process left to read and wait on |
+| reach, bounds | `process.info {} → {reach?, bounds}` |
+| connect | `process.connect {port} → {id}`, then the process methods: write, closeStdin (the half-close), read fd 1, close |
 | owner | the MCP session: each session has its own process table, at most `MaxProcesses` (32) open; its end ends them |
-| list servers | `agentworkspace/servers.list {} → {servers: [{name, description?}]}` |
+| list servers | `agentworkspace/servers.list {} → {servers: [{name, description?, secrets?}]}` |
 | start a server | `agentworkspace/servers.start {name, stderr?} → {id}`, a process of the session; not offered is JSON-RPC error `-32010` |
 | files | resource template `agentworkspace:///{op}{?path}`, op `stat`, `lstat`, `readdir`, `readlink` or `read`; at most `MaxFileBytes` (1 MiB) a read and `MaxDirEntries` (10000) a listing |
-| error kinds (files) | `notexist`, `outside`, `invalid`, `permission`, `other` |
+| error kinds | a file's in its reply's `error {kind, message}`; a method's as JSON-RPC error `-32011` (`-32010` for no-server) with data `{kind}`: every kind of [section 2](#error-kinds), `noprocess` and `other` |
 
 The process and server methods are custom JSON-RPC methods, never
 tools: a tool would be offered to the model of any harness connected
@@ -673,9 +772,10 @@ to the server, and starting a process is arbitrary execution. A server
 offering no servers need not answer the server methods; a client takes
 *method not found* as none offered.
 
-It does not carry write, remove, Exec, the environment, the root or
-the descriptor. Its client side is a starter's Start and a read-only
-file system, not a workspace.
+It does not carry write, remove, the environment, the root or the
+descriptor. Its client side is a starter's Start, Exec composed over
+the process methods ([section 6](#6-exec)), and a read-only file
+system, not a workspace.
 
 ### remote
 
@@ -685,22 +785,25 @@ does not repeat. In summary:
 
 | Contract | remote | Scope |
 | --- | --- | --- |
-| root, descriptor, bounds, environment | `GET /v1/info` | `read` or `servers`; environment only with `exec` |
+| root, descriptor, bounds, reach, environment | `GET /v1/info` | `read` or `servers`; environment only with `exec` |
 | files | `GET /v1/fs/{stat,lstat,readlink,readdir,file}?path=N` | `read` |
 | write, remove | `PUT`, `DELETE /v1/fs/file?path=N` | `write` |
-| exec | `POST /v1/exec`, NDJSON frames back: `{"data"}` for the stream, then one `{"output"}` or `{"error"}` | `exec` |
+| exec | `POST /v1/exec {…, key}`, NDJSON frames back: `{"data"}` for the stream, then one `{"output"}` or `{"error"}`; `output.interrupted` for a cancelled one | `exec` |
+| cancel an exec | `POST /v1/exec/{key}/cancel`, the principal's own key | `exec` |
 | list servers | `GET /v1/servers` | `servers` |
 | owner | a session, `POST /v1/sessions`, renewed on a lease; its lapse or close ends every process in it | `exec` or `servers` |
-| start | `POST /v1/sessions/{s}/processes`, keyed by the client | `exec` |
+| start | `POST /v1/sessions/{s}/processes`, keyed by the client, a `terminal` optional | `exec` |
 | start a server | `POST /v1/sessions/{s}/servers/{n}/start`, keyed | `servers` |
-| pipes, wait, signal, cancel, close | `/v1/sessions/{s}/processes/{p}/…` | the scope it was started under |
+| connect | `POST /v1/sessions/{s}/connect {port, key}`, then the process routes; info's `connect` says it is offered | `exec` |
+| pipes, wait, signal, cancel, resize, close | `/v1/sessions/{s}/processes/{p}/…` | the scope it was started under |
 | error kinds | every kind of [section 2](#error-kinds), and the wire's own (`unauthenticated`, `forbidden`, `limit`, `no_session`, `no_process`, `media_type`) | |
 
 `exec` and `servers` imply neither the other; `servers` needs no
 `read`. A principal holding `servers` alone is a server provider and no
 starter, reads no file, runs no command and is told no environment. A
-principal without `read` is told the root's last element alone, not a
-path on the serving side's machine.
+principal without `read` is not told the root: the info route gives
+its last element alone, for a client older than draft 0.3, and a
+client MUST take a root that is not absolute as withheld.
 
 The server says its bounds in the info route, and the client sends no
 more. Exec without a stream gives back at most the output bound of each
@@ -723,7 +826,8 @@ bounds) are in its package doc.
   its scopes; without one, every request is refused. A binding MUST
   NOT carry a credential in a URL, an error or a descriptor.
 - **Scopes are capabilities.** `exec` is never implied by another
-  scope. Running commands exposes a running server's environment, and
+  scope, and it is what grants connecting to a port in the workspace
+  ([section 9](#9-ports)); a forwarder binds the loopback alone. Running commands exposes a running server's environment, and
   writing defeats any output filter, so secret holders are offered
   under `servers` alone.
 - **No browser clients.** A remote handler refuses a request carrying
@@ -731,10 +835,29 @@ bounds) are in its package doc.
   or a body of another media type than its route's. One made without
   authentication for a loopback listener answers a loopback `Host`
   alone, so a rebound name is refused.
-- **Paths do not leak over remote.** A mapped error crossing remote
-  carries no path on the serving side's machine, and the root is told
-  in full only to a principal that may read. mcpworkspace does not
-  promise the first (see [open questions](#19-open-questions)).
+- **Refusals cross by an allow-list.** A binding over a wire MUST send
+  a refusal as its kind and fixed words, never the served error's own
+  text: a refusal of a kind is that kind's words, or the system's fixed
+  words for the error number it holds (`ENOSPC`, but for *outside*,
+  whose words stand); a cancellation is the context's words; and a
+  refusal of no kind is one generic message ("the workspace refused the
+  operation"). The served text may name a path of the serving side's
+  machine (a home directory, a mount's layout) in any form (after a
+  newline, as `key=/path`, as a `file://` URL, with spaces in it), so
+  no filter over it is trusted; draft 0.3's first text cut paths out
+  of it, and leaked. A binding MAY add what it builds from the request
+  itself: the name asked for, relative to the root, a signal's name, a
+  port; and a refusal of the wire's own (a malformed request, a bound)
+  is the server's words, made of the request alone. The serving side
+  applies it, so a client cannot opt out; a server MAY send the served
+  text as it is behind an option the program names for debugging, off
+  by default (mcpworkspace's `WithErrorText`). The reference binding's
+  is `internal/wireerr.Message`, which both wires use;
+  `workspacetest.Run`'s `RefusalsNameNoServedPath` and `RunExec` check
+  it over every wire's client, and the wire corpus holds a refusal of
+  each kind and of none (#39).
+- **The root over remote** is told in full only to a principal that
+  may read.
 - **Process ids** are random, and a process is reached only through
   the session that started it, by the principal that opened that
   session.
@@ -766,9 +889,10 @@ The reference suite is Go package `workspacetest`:
 
 | Table | Holds |
 | --- | --- |
-| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names, the descriptor's members for its kind, concurrent use |
-| `RunStarter` | a starter: the pipes, the directory and environment (argv resolution, the environment as given), the lifetimes (context, timeout, close, exit, the workspace's close, a descendant that left the group), signals, refusals, concurrency |
-| `RunServerProvider` | a server provider: the list, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
+| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names, the descriptor's members for its kind and an absolute root, concurrent use, refusals that name no served path over a wire (`Backend.Wire`), connect where offered |
+| `RunStarter` | a starter: the pipes, the directory and environment (argv resolution, the environment as given), the lifetimes (context, timeout, close, exit, the workspace's close, a descendant that left the group), the required signals and the refusal of others, a terminal, refusals, concurrency |
+| `RunExec` | the Exec table alone, over an `Execer`: a wire's client that carries Exec without a whole workspace (mcpworkspace's) |
+| `RunServerProvider` | a server provider: the list and its secrets mark, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
 | `Confined` | the layout `Run` uses: a workspace beside a directory holding a secret, with links that lead out and one that stays in |
 
 A backend runs the tables from its own tests, as `Local`, remote, the
@@ -784,11 +908,26 @@ its wire. A server that speaks remote's `/v1` is dialled with
 `remote.Dial` and run under `Run`, `RunStarter` and
 `RunServerProvider`, which is how the remote and tunnel bindings are
 themselves checked. A server that speaks mcpworkspace's methods is
-reached with the mcpworkspace client: `RunServerProvider` runs over it
-today, while its process and file methods are checked by mcpworkspace's
-own tests rather than by the shared tables, since its client is not a
-workspace (Open: #33). A fixture corpus of wire exchanges, checkable
-without Go, is an open question.
+reached with the mcpworkspace client: `RunServerProvider` and
+`RunExec` run over it, while its other process methods and its files
+are checked by mcpworkspace's own tests, since its client is not a
+workspace.
+
+**The wire corpus.** A server or a client in any language can check
+itself without Go against the corpus of each wire: request and reply
+exchanges, in order, over a served workspace laid out as the file's
+`doc` says, covering the operations of each wire (but remote's stderr
+route, a successful resize and a lease's lapse) and every error kind
+(#42). `testdata/wire/remote.json` holds remote's (method, path, token,
+body; status and reply), and `mcpworkspace/testdata/wire/mcpworkspace.json`
+mcpworkspace's (JSON-RPC method and params after an MCP
+initialization; result or error). A server replays the requests and
+compares its replies, with what differs between servers or runs
+(`${root}`, `${host}`, `${PATH}`, `${session}`, `*`) as placeholders; a
+client maps each reply's refusal to its kind. The reference server and
+client replay it in `remote/corpus_test.go` and
+`mcpworkspace/corpus_test.go`, so it stays true; `-update` records the
+replies of a changed server for review.
 
 Open: #30 will hold a container backend to `Run` and `RunStarter`, to
 [section 12](#12-descriptor)'s members, and to ending its instance at
@@ -823,54 +962,63 @@ conforming client of the old wire cannot read takes a new one.
 
 The issues that will add or change a rule here:
 
-- #5, the wire half: remote carrying an interrupted Exec's output, by an
-  exec key and a cancel route ([section 6](#6-exec)).
 - #9: an offered server's isolation, beyond the trust rule
   ([section 13](#13-isolation-statement)); waits for a second product.
-- #23: the `secrets` mark on a listed server
-  ([section 11](#11-servers-offered)).
-- #29: terminal mode, with size and resize ([section 7](#7-processes)).
 - #30: a container backend: conformance, descriptor, its instance
   ended at close.
-- #31: `connect(port)` ([section 9](#9-ports)).
-- #33: Exec over mcpworkspace's process methods
-  ([sections 6](#6-exec) and [14](#mcpworkspace)).
 - #34: named roots ([section 10](#10-roots)).
 
-Where the code and its doc comments disagree today. This draft does
-not pick a side; each is settled by the issue named, or by a later
-draft:
+Draft 0.2 listed four places where the code and its doc comments
+disagreed (the root, error kinds and messages over mcpworkspace, the
+signals), and two questions with no issue (reach over a wire, a wire
+corpus); draft 0.3 settles each, as its changes below say.
 
-- **`Workspace.Root`.** Its doc comment says it is the absolute path of
-  the working directory; a remote client dialled by a principal without
-  `read` is told the root's last element alone, so its `Root()`, and
-  its `Served().Root`, are not absolute.
-- **Error kinds over mcpworkspace.** remote maps every kind of
-  [section 2](#error-kinds) both ways; mcpworkspace's file errors have
-  five kinds, so *exist*, *unsupported* and *closed* reach its client as
-  `other`, and a test for the kind does not hold there as it does over
-  remote.
-- **Error messages over mcpworkspace.** remote sends a mapped error's
-  kind words alone, so a served error's text, which may name a path on
-  the serving side's machine, never crosses; mcpworkspace's file
-  errors carry the served error's text (at most `MaxErrorBytes`), as
-  `FileError`'s doc says ("the server's words"). Whether the contract
-  requires remote's rule of every wire is open.
-- **Signals.** remote carries thirteen signal names, mcpworkspace
-  three, and `Local` any the system has. The contract names no minimum
-  set a starter must carry.
+## Changes since draft 0.2
 
-Questions with no issue yet:
-
-- **Reach over a wire.** remote's info route does not carry the served
-  workspace's reach ([section 8](#8-ending-a-process)), nor does
-  mcpworkspace, so a client of either states none, and a caller cannot
-  tell a served `Local` on macOS from one on Linux.
-
-- **A wire fixture corpus.** A non-Go server is checked only through a
-  Go client. A corpus of request and reply exchanges per wire, as
-  agenttool keeps for schemas, would let another language check one
-  without Go.
+- [Section 6](#6-exec): a wire's cancel (#5, the wire half). A client
+  names its command, cancels it by that name and reads the output so
+  far; remote's exec takes a key, answers its header once the key is
+  taken, and has a cancel route, and its output frame carries
+  *interrupted*. mcpworkspace gains `process.cancel`, which ends a
+  process as its context's end does and leaves it to read, and its
+  client sends it when a start's context ends, rather than a close.
+- [Section 6](#6-exec): Exec composed over a process carrier gives
+  what a native Exec gives (#33); mcpworkspace's client has one
+  (`mcpworkspace.Exec`), and `workspacetest.RunExec` runs the Exec table
+  over an `Execer`.
+- [Section 8](#8-ending-a-process): a wire tells its client the
+  serving side's reach, and the client states it: remote's info route
+  carries `reach`, and mcpworkspace gains `process.info`.
+- [Section 7](#7-processes): a required set of signals (`INT`, `TERM`,
+  `KILL`, `HUP`) every starter carries, the named set of thirteen a
+  binding should, and a signal not carried refused as *unsupported*
+  (#40). mcpworkspace carries the thirteen, where it carried three.
+- [Section 1](#1-terminology): the root is absolute whenever it is
+  known, and otherwise the withheld value, never a partial path (#36);
+  a remote client takes the last element its info route gives a
+  principal without `read` as withheld.
+- [Section 11](#11-servers-offered): the `secrets` mark on a listed
+  server, and that its absence proves nothing (#23).
+- [Section 7](#7-processes): terminal mode (#29): a start with a
+  pseudo-terminal of a given size, standard error merged, a resize, and
+  a refusal as *unsupported*, never pipes, where a backend cannot give
+  one; both wires carry it.
+- [Section 9](#9-ports): `connect(port)`, a stream with a half-close
+  to a port on the workspace's loopback, carried natively by both wires
+  as a process of the session and granted with `exec`; a forwarder
+  binds the loopback alone; a relay through a started process is a
+  fallback binding, not the contract (#31).
+- [Section 16](#16-conformance): the wire corpus (#42), request and
+  reply exchanges per wire, replayed by the reference server and
+  client.
+- [Section 2](#error-kinds): every wire carries every kind both ways
+  (#38). mcpworkspace's files carry the nine, and its process and
+  server methods carry them too, as JSON-RPC error `-32011` with a
+  `{kind}` datum.
+- [Section 15](#15-security-considerations): a refusal over any wire
+  crosses by an allow-list, its kind's fixed words, the system's for an
+  error number, or one generic message, never the served text (#39);
+  mcpworkspace sends that text only under `WithErrorText`.
 
 ## Changes since draft 0.1
 

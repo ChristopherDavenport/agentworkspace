@@ -29,14 +29,14 @@ func ListServers(ctx context.Context, c Conn) ([]agentworkspace.Server, error) {
 		if notFound(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("list servers: %w", err)
+		return nil, fmt.Errorf("list servers: %w", fromWire(err))
 	}
 	out := make([]agentworkspace.Server, 0, len(res.Servers))
 	for _, s := range res.Servers {
 		if !agentworkspace.ValidServerName(s.Name) {
 			return nil, fmt.Errorf("list servers: the workspace offers a server called %q, which agentworkspace.ValidServerName refuses", s.Name)
 		}
-		out = append(out, agentworkspace.Server{Name: s.Name, Description: s.Description})
+		out = append(out, agentworkspace.Server{Name: s.Name, Description: s.Description, Secrets: s.Secrets})
 	}
 	return out, nil
 }
@@ -65,14 +65,10 @@ func StartServer(ctx context.Context, c Conn, name string, stderr io.Writer) (ag
 		Name: name, Stderr: stderr != nil,
 	}})
 	if err != nil {
-		var we *jsonrpc.Error
-		switch {
-		case notFound(err):
+		if notFound(err) {
 			return nil, fmt.Errorf("start server %s: the workspace offers no servers: %w", name, agentworkspace.ErrNoServer)
-		case errors.As(err, &we) && we.Code == wire.CodeNoServer:
-			return nil, fmt.Errorf("start server %s: %w", name, agentworkspace.ErrNoServer)
 		}
-		return nil, fmt.Errorf("start server %s: %w", name, err)
+		return nil, fmt.Errorf("start server %s: %w", name, fromWire(err))
 	}
 	return attach(ctx, c, res.ID, stderr), nil
 }

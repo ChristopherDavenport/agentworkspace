@@ -130,8 +130,8 @@ func TestClosingAProcessKillsIt(t *testing.T) {
 	if err := q.Signal(syscall.SIGTERM); !errors.Is(err, os.ErrProcessDone) {
 		t.Errorf("signal after exit: %v", err)
 	}
-	if err := q.Signal(syscall.SIGHUP); err == nil {
-		t.Error("SIGHUP was sent")
+	if err := q.Signal(syscall.Signal(63)); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("a signal the wire has no name for: %v, want it unsupported", err)
 	}
 }
 
@@ -150,6 +150,64 @@ func TestAProcessEndsWithItsContext(t *testing.T) {
 		t.Errorf("wait: %v, want canceled", err)
 	}
 	gone(t, pid)
+}
+
+// trapsINT prints ready, then waits until SIGINT, on which it prints
+// int and exits; it does not read its input.
+var trapsINT = agentworkspace.Command{Args: []string{"sh", "-c", "trap 'echo int; exit 0' INT; echo ready; while :; do sleep 0.1; done"}}
+
+// The end of the start's context is an interrupt, not a shutdown: the
+// ladder begins at INT at once, rather than a grace after the input's
+// close.
+func TestTheContextsEndInterrupts(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	p, err := Start(ctx, conn(t, cs), trapsINT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	if line, _ := bufio.NewReader(p.Stdout()).ReadString('\n'); line != "ready\n" {
+		t.Fatalf("first line %q", line)
+	}
+	begun := time.Now()
+	cancel()
+	if _, err := p.Wait(); !errors.Is(err, context.Canceled) {
+		t.Errorf("wait: %v, want canceled", err)
+	}
+	if d := time.Since(begun); d >= time.Second {
+		t.Errorf("the process took %v to end; INT should have come at once", d)
+	}
+}
+
+// A cancel ends the process as its context's end does and leaves it in
+// the table: its output is read to the end, and its wait says it was
+// canceled. A cancel after it exited changes nothing.
+func TestACancelLeavesTheProcessReadable(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	p := start(t, conn(t, cs), trapsINT)
+	out := bufio.NewReader(p.Stdout())
+	if line, _ := out.ReadString('\n'); line != "ready\n" {
+		t.Fatalf("first line %q", line)
+	}
+	id := wire.ProcessID{ID: idOf(t, p)}
+	ctx := context.Background()
+	if _, err := mcp.CallCustomMethod[*IDParams, *EmptyResult](ctx, cs, wire.MethodCancel, &IDParams{ProcessID: id}); err != nil {
+		t.Fatal(err)
+	}
+	rest, err := io.ReadAll(out)
+	if err != nil || string(rest) != "int\n" {
+		t.Errorf("the rest of the output: %q, %v", rest, err)
+	}
+	r, err := mcp.CallCustomMethod[*IDParams, *ExitResult](ctx, cs, wire.MethodWait, &IDParams{ProcessID: id})
+	if err != nil || r.Ended != wire.EndedCanceled {
+		t.Errorf("wait: %+v, %v; want it canceled", r, err)
+	}
+	if _, err := mcp.CallCustomMethod[*IDParams, *EmptyResult](ctx, cs, wire.MethodCancel, &IDParams{ProcessID: id}); err != nil {
+		t.Errorf("a cancel after the exit: %v", err)
+	}
 }
 
 // A Conn with no Done is refused: the session's close would wait on
@@ -387,8 +445,8 @@ func TestTheProcessMethodsAreBounded(t *testing.T) {
 			_, err := mcp.CallCustomMethod[*ReadParams, *ReadResult](ctx, cs, wire.MethodRead, &ReadParams{ReadArgs: wire.ReadArgs{ID: id, FD: 3}})
 			return err
 		},
-		"HUP": func() error {
-			_, err := mcp.CallCustomMethod[*SignalParams, *SignalResult](ctx, cs, wire.MethodSignal, &SignalParams{SignalArgs: wire.SignalArgs{ID: id, Signal: "HUP"}})
+		"SEGV": func() error {
+			_, err := mcp.CallCustomMethod[*SignalParams, *SignalResult](ctx, cs, wire.MethodSignal, &SignalParams{SignalArgs: wire.SignalArgs{ID: id, Signal: "SEGV"}})
 			return err
 		},
 		"no command": func() error {
@@ -549,5 +607,53 @@ func TestTheParamsAreTheWiresShapes(t *testing.T) {
 		if err != nil || string(got) != tc.want {
 			t.Errorf("%T: %s %v, want %s", tc.v, got, err, tc.want)
 		}
+	}
+}
+
+// A start with a terminal runs the process on one of that size, its
+// standard error in its output, and a resize changes the size; a
+// process with none refuses a resize as unsupported.
+func TestATerminalCrosses(t *testing.T) {
+	s := newTestServer(t)
+	cs, _ := s.connect(t)
+	c := conn(t, cs)
+	p, err := Start(context.Background(), c, agentworkspace.Command{
+		Args:     []string{"sh", "-c", "stty size; echo err >&2; read x; stty size"},
+		Terminal: &agentworkspace.TerminalSize{Rows: 24, Cols: 80},
+	})
+	if errors.Is(err, errors.ErrUnsupported) {
+		t.Skipf("no terminal here: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	out := bufio.NewReader(p.Stdout())
+	line := func() string {
+		for {
+			l, err := out.ReadString('\n')
+			if l = strings.TrimRight(l, "\r\n"); l != "" || err != nil {
+				return l
+			}
+		}
+	}
+	within(t, 10*time.Second, "the terminal", func() {
+		if a, b := line(), line(); a != "24 80" || b != "err" {
+			t.Errorf("the terminal said %q, %q", a, b)
+		}
+		if err := agentworkspace.Resize(p, agentworkspace.TerminalSize{Rows: 30, Cols: 100}); err != nil {
+			t.Error(err)
+		}
+		io.WriteString(p.Stdin(), "\n")
+		if got := line(); got != "30 100" {
+			t.Errorf("after the resize: %q", got)
+		}
+	})
+	q := start(t, c, sleeper)
+	if err := agentworkspace.Resize(q, agentworkspace.TerminalSize{Rows: 1, Cols: 1}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("resizing a process with no terminal: %v", err)
+	}
+	if _, err := Exec(context.Background(), c, agentworkspace.Command{Args: []string{"true"}, Terminal: &agentworkspace.TerminalSize{Rows: 1, Cols: 1}}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("Exec with a terminal: %v", err)
 	}
 }

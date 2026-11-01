@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -51,6 +52,62 @@ func TestCancellingAnExecEndsItsProcessGroup(t *testing.T) {
 		}
 	})
 	groupGone(t, pgid)
+}
+
+// An Exec's key is its principal's: another principal's cancel finds
+// nothing and ends nothing, a key in use is refused, and the owner's
+// cancel ends the command with its output so far in the reply.
+func TestAnExecKeyIsItsPrincipals(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	_, url := serve(t, l, WithAuthenticator(grant(map[string]Principal{
+		"a": {Name: "alice", Scopes: allScopes()},
+		"b": {Name: "bob", Scopes: allScopes()},
+	})))
+	key := rand.Text()
+	body := `{"args":["sh","-c","echo started; sleep 30"],"key":"` + key + `"}`
+	req, _ := http.NewRequest(http.MethodPost, url+routeExec, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer a")
+	req.Header.Set("Content-Type", jsonType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("exec: %s", resp.Status)
+	}
+	// The header came before the command ended: the key is taken.
+	if status, code := raw(t, http.MethodPost, url+routeExec, "a", strings.NewReader(body)); code != codeInvalid {
+		t.Errorf("a second exec under a key in use: %d %q, want invalid", status, code)
+	}
+	cancelRoute := url + routeExec + "/" + key + "/cancel"
+	if status, code := raw(t, http.MethodPost, cancelRoute, "b", strings.NewReader("{}")); code != codeNoProcess {
+		t.Errorf("another principal's cancel: %d %q, want no_process", status, code)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if status, _ := raw(t, http.MethodPost, cancelRoute, "a", strings.NewReader("{}")); status != http.StatusNoContent {
+		t.Errorf("the owner's cancel: %d", status)
+	}
+	var out *execOutput
+	within(t, 10*time.Second, "the reply after the cancel", func() {
+		sc := bufio.NewScanner(resp.Body)
+		for sc.Scan() {
+			var f execFrame
+			if err := json.Unmarshal(sc.Bytes(), &f); err != nil {
+				t.Fatal(err)
+			}
+			if f.Output != nil {
+				out = f.Output
+				return
+			}
+		}
+	})
+	if out == nil || !out.Interrupted || out.ExitCode != -1 || string(out.Stdout) != "started\n" {
+		t.Errorf("the cancelled exec's output = %+v, want started, -1 and interrupted", out)
+	}
+	if status, code := raw(t, http.MethodPost, cancelRoute, "a", strings.NewReader("{}")); code != codeNoProcess {
+		t.Errorf("a cancel after the exec ended: %d %q, want no_process", status, code)
+	}
 }
 
 // A Command.Stream whose write fails ends the command, and Exec says
@@ -582,5 +639,19 @@ func TestCloseWaitsAGraceForStandardError(t *testing.T) {
 	}
 	if got := stream.String(); got != "bye\n" {
 		t.Errorf("the stream has %q, want %q", got, "bye\n")
+	}
+}
+
+// The served workspace's reach is the client's: Local's, told at Dial,
+// and none for a workspace that says none, to every principal.
+func TestTheServedReachIsTheClients(t *testing.T) {
+	l, _ := newLocal(t, pathEnv())
+	_, url := serve(t, l, WithInsecureNoAuth())
+	if got, want := agentworkspace.ReachOf(dial(t, url)), l.Reach(); got != want || got == "" {
+		t.Errorf("the client's reach = %q, want Local's, %q", got, want)
+	}
+	_, url = serve(t, struct{ agentworkspace.Workspace }{l}, WithInsecureNoAuth())
+	if got := agentworkspace.ReachOf(dial(t, url)); got != "" {
+		t.Errorf("the client of a workspace that says no reach says %q", got)
 	}
 }

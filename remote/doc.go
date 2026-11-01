@@ -22,7 +22,7 @@
 // relative to the served Root; both halves refuse any other, one that
 // leaves as agentworkspace.ErrOutside.
 //
-//	GET    /v1/info                              read or servers  root, the served descriptor, links, the bounds; Start with exec, Servers with servers, Env with exec
+//	GET    /v1/info                              read or servers  root, the served descriptor, links, the bounds, the served reach; Start with exec, Servers with servers, Env with exec
 //	GET    /v1/fs/stat?path=N                    read
 //	GET    /v1/fs/lstat?path=N                   read     unsupported when the served FS cannot read links
 //	GET    /v1/fs/readlink?path=N                read     ditto
@@ -30,12 +30,14 @@
 //	GET    /v1/fs/file?path=N                    read     a regular file's content, streamed
 //	PUT    /v1/fs/file?path=N&perm=M             write    the body is the content, at most the write bound; perm's permission bits alone
 //	DELETE /v1/fs/file?path=N                    write
-//	POST   /v1/exec                              exec     NDJSON frames back
-//	GET    /v1/servers                           servers  -> {servers: [{name, description}]}, in the served order; unsupported when it is no ServerProvider
+//	POST   /v1/exec                              exec     {args, dir, env, stdin, timeoutMs, stream, key} -> NDJSON frames
+//	POST   /v1/exec/{key}/cancel                 exec     ends the exec running under key as its context's end does; its reply carries the output so far
+//	GET    /v1/servers                           servers  -> {servers: [{name, description, secrets}]}, in the served order; unsupported when it is no ServerProvider
 //	POST   /v1/sessions                          either   -> {id, leaseMs}
 //	POST   /v1/sessions/{s}/renew                either
 //	DELETE /v1/sessions/{s}                      either   ends every process it started
-//	POST   /v1/sessions/{s}/processes            exec     {args, dir, env, timeoutMs, stderr, key} -> {id}, the key
+//	POST   /v1/sessions/{s}/processes            exec     {args, dir, env, timeoutMs, stderr, terminal: {rows, cols}, key} -> {id}, the key
+//	POST   /v1/sessions/{s}/connect              exec     {port, key} -> {id}, the key: a stream to port on the served workspace's loopback, a process of the session whose stdin, stdout and close are the stream's
 //	POST   /v1/sessions/{s}/servers/{n}/start    servers  {stderr, key} -> {id}, the key: the server called n, a process of the session
 //	POST   /v1/sessions/{s}/processes/{p}/stdin  its own  the body, streamed to its input; its end is end of file
 //	GET    /v1/sessions/{s}/processes/{p}/stdout its own  its output, streamed
@@ -43,6 +45,7 @@
 //	GET    /v1/sessions/{s}/processes/{p}/wait   its own  a long poll -> {status, ended?, error?}, the same each time; one at a time: another while one waits is invalid, ask again
 //	POST   /v1/sessions/{s}/processes/{p}/signal its own  {signal: "TERM"}, a name: HUP INT QUIT KILL USR1 USR2 PIPE ALRM TERM CONT STOP TSTP WINCH
 //	POST   /v1/sessions/{s}/processes/{p}/cancel its own  ends it as its context's end does
+//	POST   /v1/sessions/{s}/processes/{p}/resize its own  {rows, cols}: its terminal's size; unsupported for one with none
 //	DELETE /v1/sessions/{s}/processes/{p}        its own  ends it as Process.Close does -> {status, ...}
 //
 // A session's routes take exec or servers, either one ("either"). A
@@ -65,7 +68,12 @@
 // a line: {"data": base64} for Command.Stream's output as it arrives,
 // at most 32 KiB of it a frame, when the request asked for a stream,
 // then one {"output": {...}} or one {"error": {...}}, which is the
-// last. A refusal before the command runs is an HTTP error. A start
+// last. A refusal before the command runs is an HTTP error. An exec
+// with a key (chosen at random, as a start's) is the principal's to
+// cancel by it: the server sends the reply's header once the key is
+// taken, a cancel ends the command and what it started as a hang-up
+// would, and the reply goes on to its output frame, with interrupted
+// set and the output so far, which a hang-up loses. A start
 // carries a key the client chose at random, which becomes the
 // process's id: a start sent again is answered with the same process,
 // one whose reply was lost is closed by its key, and a key whose
@@ -106,10 +114,11 @@
 // offers: their list, a server's start, the sessions they run in and
 // the routes of the processes it started so, and nothing else. It does
 // not imply exec, nor exec it, and it needs no read: the info route
-// answers it too, with nothing but the root's last element (Root, and
-// the served descriptor's, are not the host's path to a principal
-// without read), the descriptor without its Host, the bounds and that
-// servers are offered. A principal holding servers
+// answers it too, with nothing but the root's last element, the
+// descriptor without its Host, the bounds and that servers are
+// offered; the client takes a root that is not absolute as withheld,
+// and its Root, and its Served and Descriptor roots, are "", never a
+// partial path. A principal holding servers
 // alone dials, lists and starts the offered servers and talks to them
 // over their pipes, and reads no file (its client's FS, WriteFile and
 // Remove are ErrForbidden), runs no command (no Exec, no Start, no

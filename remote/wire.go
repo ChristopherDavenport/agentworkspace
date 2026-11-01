@@ -138,6 +138,13 @@ type infoReply struct {
 	Scopes []Scope  `json:"scopes"`
 	Env    []string `json:"env,omitempty"` // only to a principal with exec
 	Limits limits   `json:"limits"`
+	// Connect says the principal may connect to a port here: the
+	// served workspace is an agentworkspace.Connector and the principal
+	// holds exec.
+	Connect bool `json:"connect,omitempty"`
+	// Reach is how far the served workspace's end of a process reaches
+	// (agentworkspace.ReachOf), "" for one that says none.
+	Reach string `json:"reach,omitempty"`
 }
 
 // fileInfo is an fs.FileInfo on the wire. Raw is the name's bytes when
@@ -200,6 +207,10 @@ type execRequest struct {
 	// Stream asks for the output as it arrives, in data frames, and
 	// none in the Output.
 	Stream bool `json:"stream,omitempty"`
+	// Key is the client's name for the exec, chosen at random as a
+	// start's is, which the exec cancel route ends it by; without one,
+	// only a hang-up ends it, and the output so far is lost with it.
+	Key string `json:"key,omitempty"`
 }
 
 // execFrame is one line of Exec's NDJSON reply: Command.Stream's
@@ -216,6 +227,8 @@ type execOutput struct {
 	Stderr   []byte `json:"stderr,omitempty"`
 	ExitCode int    `json:"exitCode"`
 	TimedOut bool   `json:"timedOut,omitempty"`
+	// Interrupted says a cancel, or the server's close, ended it.
+	Interrupted bool `json:"interrupted,omitempty"`
 }
 
 // startRequest is a process's start.
@@ -227,6 +240,9 @@ type startRequest struct {
 	// Stderr asks for standard error, on the stderr route; without it,
 	// it is discarded.
 	Stderr bool `json:"stderr,omitempty"`
+	// Terminal asks for a pseudo-terminal of this size
+	// (agentworkspace.Command.Terminal).
+	Terminal *terminalSize `json:"terminal,omitempty"`
 	// Key is the client's name for the start, which becomes the
 	// process's id: a start repeated with the same key is answered
 	// with the same process, and a client whose reply was lost closes
@@ -249,6 +265,9 @@ type serverStartRequest struct {
 type serverInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+	// Secrets marks a server the workspace gives a secret; its absence
+	// proves nothing.
+	Secrets bool `json:"secrets,omitempty"`
 }
 
 // serverList is the servers route's reply, in the served workspace's
@@ -261,8 +280,22 @@ type startedReply struct {
 	ID string `json:"id"`
 }
 
+// connectRequest is a connect's body: the port, and the key that names
+// the process the stream is carried as.
+type connectRequest struct {
+	Port int    `json:"port"`
+	Key  string `json:"key,omitempty"`
+}
+
 type signalRequest struct {
 	Signal string `json:"signal"`
+}
+
+// terminalSize is an agentworkspace.TerminalSize on the wire: a
+// terminal start's, and a resize's body.
+type terminalSize struct {
+	Rows uint16 `json:"rows"`
+	Cols uint16 `json:"cols"`
 }
 
 // The values of exitReply's Ended.

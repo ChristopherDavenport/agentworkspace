@@ -18,6 +18,7 @@ import (
 
 	"github.com/ChristopherDavenport/agentworkspace"
 	"github.com/ChristopherDavenport/agentworkspace/internal/lifetime"
+	"github.com/ChristopherDavenport/agentworkspace/internal/portproc"
 )
 
 // session is one client's: the processes it started, which live no
@@ -200,7 +201,7 @@ func cutAt(w http.ResponseWriter, done <-chan struct{}) (stop func()) {
 
 // exit is how the process ended, once it has, its error's words as
 // errorOf gives them for root.
-func (sp *proc) exit(root string) exitReply {
+func (sp *proc) exit() exitReply {
 	r := exitReply{Status: sp.status}
 	switch {
 	case errors.Is(sp.err, context.DeadlineExceeded):
@@ -208,7 +209,7 @@ func (sp *proc) exit(root string) exitReply {
 	case errors.Is(sp.err, context.Canceled):
 		r.Ended = endedCanceled
 	case sp.err != nil:
-		r.Error = errorOf(root, sp.err).Message
+		r.Error = errorOf(sp.err).Message
 	}
 	return r
 }
@@ -439,11 +440,37 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cmd := agentworkspace.Command{Args: req.Args, Dir: req.Dir, Env: req.Env, Timeout: time.Duration(req.TimeoutMs) * time.Millisecond}
+	if t := req.Terminal; t != nil {
+		cmd.Terminal = &agentworkspace.TerminalSize{Rows: t.Rows, Cols: t.Cols}
+	}
 	h.launch(w, s, req.Key, req.Stderr, &proc{scope: ScopeExec}, func(ctx context.Context, stderr io.Writer) (agentworkspace.Process, error) {
 		if stderr != nil {
 			cmd.Stream = stderr
 		}
 		return agentworkspace.Start(ctx, h.ws, cmd)
+	})
+}
+
+// connect opens a stream to the request's port in the served workspace
+// (agentworkspace.Connect) as a process of the session, keyed as a
+// start is: its input route sends to the port, its close ends what is
+// sent, its output route is what the port sends, and its close ends
+// the stream.
+func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
+	s := h.sessionOf(w, r)
+	if s == nil {
+		return
+	}
+	var req connectRequest
+	if !decode(w, r, MaxRequestBytes, &req) {
+		return
+	}
+	h.launch(w, s, req.Key, false, &proc{scope: ScopeExec}, func(ctx context.Context, _ io.Writer) (agentworkspace.Process, error) {
+		c, err := agentworkspace.Connect(ctx, h.ws, req.Port)
+		if err != nil {
+			return nil, err
+		}
+		return portproc.Process(ctx, c), nil
 	})
 }
 
@@ -555,7 +582,7 @@ func (h *Handler) servers(w http.ResponseWriter, r *http.Request) {
 	}
 	reply := serverList{Servers: make([]serverInfo, 0, len(list))}
 	for _, sv := range list {
-		reply.Servers = append(reply.Servers, serverInfo{Name: sv.Name, Description: sv.Description})
+		reply.Servers = append(reply.Servers, serverInfo{Name: sv.Name, Description: sv.Description, Secrets: sv.Secrets})
 	}
 	writeJSON(w, reply)
 }
@@ -694,7 +721,7 @@ func (h *Handler) wait(w http.ResponseWriter, r *http.Request) {
 	defer sp.release()
 	select {
 	case <-sp.exited:
-		writeJSON(w, sp.exit(h.ws.Root()))
+		writeJSON(w, sp.exit())
 	case <-r.Context().Done():
 	}
 }
@@ -710,10 +737,28 @@ func (h *Handler) signal(w http.ResponseWriter, r *http.Request) {
 	}
 	sig, ok := signals[req.Signal]
 	if !ok {
-		writeError(w, wireError{Code: codeInvalid, Message: fmt.Sprintf("no signal named %q", bounded(req.Signal))})
+		writeError(w, wireError{Code: codeUnsupported, Message: fmt.Sprintf("no signal named %q is carried", bounded(req.Signal))})
 		return
 	}
 	if err := sp.p.Signal(sig); err != nil {
+		h.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resize changes the size of the process's terminal; one started with
+// none is unsupported.
+func (h *Handler) resize(w http.ResponseWriter, r *http.Request) {
+	sp := h.procOf(w, r)
+	if sp == nil {
+		return
+	}
+	var req terminalSize
+	if !decode(w, r, MaxRequestBytes, &req) {
+		return
+	}
+	if err := agentworkspace.Resize(sp.p, agentworkspace.TerminalSize{Rows: req.Rows, Cols: req.Cols}); err != nil {
 		h.fail(w, err)
 		return
 	}
@@ -790,7 +835,7 @@ func (h *Handler) closeProcess(w http.ResponseWriter, r *http.Request) {
 		}()
 	}()
 	sp.close()
-	writeJSON(w, sp.exit(h.ws.Root()))
+	writeJSON(w, sp.exit())
 }
 
 // stderrBuffer is what a process wrote to its standard error that the

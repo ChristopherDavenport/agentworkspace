@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/wireerr"
 )
 
 // A dial takes no session; the first Start opens one, and one
@@ -268,8 +269,8 @@ func TestATimeoutPastADurationIsRefused(t *testing.T) {
 	}
 }
 
-// An unmapped errno is sent as its words alone, and any other error
-// without the served Root or another absolute path's directories.
+// An unmapped errno is sent as its words alone, and any other error as
+// the one generic message, nothing of its text.
 func TestUnmappedErrorsNameNoServerPath(t *testing.T) {
 	l, _ := newLocal(t, pathEnv())
 	fw := &failingWorkspace{Local: l}
@@ -282,7 +283,7 @@ func TestUnmappedErrorsNameNoServerPath(t *testing.T) {
 	}{
 		{&fs.PathError{Op: "open", Path: root + "/sub/x", Err: syscall.ENOSPC}, []string{"no space left on device"}, []string{root, "sub/x", "open"}},
 		{fmt.Errorf("exec: %w", &os.PathError{Op: "fork/exec", Path: "/usr/libexec/tool", Err: syscall.ENOEXEC}), []string{"exec format error"}, []string{"/usr", "tool"}},
-		{fmt.Errorf("cannot frob %s/sub/x or \"/etc/secret/y\", in %s", root, root), []string{"cannot frob sub/x", `".../y"`, "in ."}, []string{root, "/etc", "secret"}},
+		{fmt.Errorf("cannot frob %s/sub/x or \"/etc/secret/y\", in %s", root, root), []string{wireerr.Other}, []string{root, "/etc", "secret", "frob"}},
 	} {
 		fw.err = c.served
 		err := ws.Remove(context.Background(), "x")

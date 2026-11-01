@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/portproc"
 	"github.com/ChristopherDavenport/agentworkspace/mcpworkspace/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -49,6 +51,11 @@ type Conn struct {
 	// through Err, as the loss it is, and one that ends under any other
 	// cause as the process's close.
 	Lost error
+	// Reach is how far the server's end of a process reaches, as it
+	// says it (ProcessInfo), and "" when it says none: what a program
+	// reports for the workspace at the other end, never a claim of its
+	// own. Nothing here acts on it.
+	Reach agentworkspace.Reach
 	// Err, when not nil, is what a failed request's error about a
 	// started process becomes for the process's caller, such as a
 	// program's word for a lost connection; nil leaves it as it is.
@@ -63,7 +70,9 @@ type Conn struct {
 // and a read at a time; its standard error, when cmd.Stream is set, is
 // read in the background and written to cmd.Stream as it arrives. It
 // ends with Close, the end of ctx, cmd.Timeout, the end of c.Done or the
-// server's. It lives on c alone: when the connection ends, the server
+// server's. The end of ctx is a cancel, the ladder from its first step,
+// and then a Close; a server that does not answer the cancel method is
+// sent the Close alone. It lives on c alone: when the connection ends, the server
 // ends the process with its session, and the process's requests fail.
 // cmd.Stdin is refused; write to the process's input instead, and a
 // Conn with no Done is refused (see Conn.Done: end it, or close every
@@ -84,13 +93,67 @@ func Start(ctx context.Context, c Conn, cmd agentworkspace.Command) (agentworksp
 	}
 	sctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	res, err := mcp.CallCustomMethod[*StartParams, *StartResult](sctx, c.Session, wire.MethodStart, &StartParams{StartArgs: wire.StartArgs{
-		Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: cmd.Timeout.Milliseconds(), Stderr: cmd.Stream != nil,
-	}})
+	args := wire.StartArgs{Args: cmd.Args, Dir: cmd.Dir, Env: cmd.Env, TimeoutMs: cmd.Timeout.Milliseconds(), Stderr: cmd.Stream != nil}
+	if t := cmd.Terminal; t != nil {
+		args.Terminal = &wire.TerminalSize{Rows: t.Rows, Cols: t.Cols}
+	}
+	res, err := mcp.CallCustomMethod[*StartParams, *StartResult](sctx, c.Session, wire.MethodStart, &StartParams{StartArgs: args})
 	if err != nil {
-		return nil, fmt.Errorf("start %s: %w", cmd.Args[0], err)
+		return nil, fmt.Errorf("start %s: %w", cmd.Args[0], fromWire(err))
 	}
 	return attach(ctx, c, res.ID, cmd.Stream), nil
+}
+
+// ProcessInfo asks the server at the other end of cs what it keeps: how far
+// its end of a process reaches and its bounds, which a program puts in
+// the Conn it starts processes over (Conn.Reach, Conn.Bounds). A reach
+// this side does not know is "". A server that does not answer the
+// method is errors.ErrUnsupported.
+func ProcessInfo(ctx context.Context, cs *mcp.ClientSession) (agentworkspace.Reach, wire.Bounds, error) {
+	sctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	res, err := mcp.CallCustomMethod[*InfoParams, *InfoResult](sctx, cs, wire.MethodInfo, &InfoParams{})
+	switch {
+	case notFound(err):
+		return "", wire.Bounds{}, fmt.Errorf("process info: the server does not answer it: %w", errors.ErrUnsupported)
+	case err != nil:
+		return "", wire.Bounds{}, fmt.Errorf("process info: %w", fromWire(err))
+	}
+	reach := agentworkspace.Reach(res.Reach)
+	switch reach {
+	case agentworkspace.ReachGroup, agentworkspace.ReachDescendants, agentworkspace.ReachAll:
+	default:
+		reach = ""
+	}
+	return reach, res.Bounds, nil
+}
+
+// Connect opens a stream to port on the loopback of the workspace at the
+// other end of c (agentworkspace.Connector), carried as a process of
+// the session: writes go to the port, CloseWrite ends what is sent,
+// reads are what the port sends, and Close ends the stream. ctx bounds
+// the connecting alone; the stream lives on c, and ends with it. A
+// workspace that cannot connect is errors.ErrUnsupported.
+func Connect(ctx context.Context, c Conn, port int) (agentworkspace.PortConn, error) {
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("mcpworkspace: connect to port %d: want 1 to 65535: %w", port, fs.ErrInvalid)
+	}
+	if err := checkConn(c); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	res, err := mcp.CallCustomMethod[*ConnectParams, *StartResult](sctx, c.Session, wire.MethodConnect, &ConnectParams{ConnectArgs: wire.ConnectArgs{Port: port}})
+	switch {
+	case notFound(err):
+		return nil, fmt.Errorf("connect to port %d: the server does not answer it: %w", port, errors.ErrUnsupported)
+	case err != nil:
+		return nil, fmt.Errorf("connect to port %d: %w", port, fromWire(err))
+	}
+	return portproc.Conn(attach(context.Background(), c, res.ID, nil)), nil
 }
 
 // checkConn refuses a Conn a process cannot be started over.
@@ -133,6 +196,9 @@ func attach(ctx context.Context, c Conn, id string, stream io.Writer) *process {
 			p.ending = ctx.Err()
 		}
 		p.mu.Unlock()
+		// An interrupt, not a shutdown: the ladder from its first step,
+		// and the close after it.
+		p.interrupt()
 		p.Close()
 	})
 	p.mu.Lock()
@@ -234,7 +300,7 @@ func (p *process) waitFor() {
 		return
 	default:
 		// The connection is lost, and the process with it.
-		err = p.c.Err(err)
+		err = p.c.Err(fromWire(err))
 	}
 	p.finish(r, err)
 }
@@ -266,8 +332,9 @@ func (p *process) Wait() (int, error) {
 	return p.status, p.err
 }
 
-// Signal sends INT, TERM or KILL; any other signal is refused. A process
-// that has exited is os.ErrProcessDone.
+// Signal sends sig by its name on the wire (wire.SignalOf's); a signal
+// the wire has no name for is errors.ErrUnsupported, and nothing is
+// sent. A process that has exited is os.ErrProcessDone.
 func (p *process) Signal(sig os.Signal) error {
 	s, ok := sig.(syscall.Signal)
 	var name string
@@ -275,18 +342,42 @@ func (p *process) Signal(sig os.Signal) error {
 		name, ok = wire.SignalName(s)
 	}
 	if !ok {
-		return fmt.Errorf("mcpworkspace: cannot send %v", sig)
+		return fmt.Errorf("mcpworkspace: cannot send %v: %w", sig, errors.ErrUnsupported)
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, requestTimeout)
 	defer cancel()
 	r, err := mcp.CallCustomMethod[*SignalParams, *SignalResult](ctx, p.c.Session, wire.MethodSignal, &SignalParams{SignalArgs: wire.SignalArgs{ID: p.id, Signal: name}})
 	if err != nil {
-		return p.c.Err(err)
+		return p.c.Err(fromWire(err))
 	}
 	if r.Done {
 		return os.ErrProcessDone
 	}
 	return nil
+}
+
+// Resize changes the size of the process's terminal, as the served
+// process's Resize does: errors.ErrUnsupported for one started with no
+// terminal.
+func (p *process) Resize(size agentworkspace.TerminalSize) error {
+	ctx, cancel := context.WithTimeout(p.ctx, requestTimeout)
+	defer cancel()
+	_, err := mcp.CallCustomMethod[*ResizeParams, *EmptyResult](ctx, p.c.Session, wire.MethodResize, &ResizeParams{ResizeArgs: wire.ResizeArgs{ID: p.id, TerminalSize: wire.TerminalSize{Rows: size.Rows, Cols: size.Cols}}})
+	if err != nil {
+		return p.c.Err(fromWire(err))
+	}
+	return nil
+}
+
+// interrupt asks the server to end the process as the end of its
+// start's context would, and reports whether it did: a server without
+// the method, or a request that failed, did not, and the caller closes
+// the process instead.
+func (p *process) interrupt() bool {
+	ctx, cancel := context.WithTimeout(p.ctx, requestTimeout)
+	defer cancel()
+	_, err := mcp.CallCustomMethod[*IDParams, *EmptyResult](ctx, p.c.Session, wire.MethodCancel, &IDParams{ProcessID: wire.ProcessID{ID: p.id}})
+	return err == nil
 }
 
 // Close ends the process in the server, which closes its input, gives
@@ -305,7 +396,7 @@ func (p *process) Close() error {
 		r, err := mcp.CallCustomMethod[*IDParams, *ExitResult](ctx, p.c.Session, wire.MethodClose, &IDParams{ProcessID: wire.ProcessID{ID: p.id}})
 		cancel()
 		if err != nil {
-			p.closeErr = p.c.Err(err)
+			p.closeErr = p.c.Err(fromWire(err))
 			p.cancel()
 		}
 		p.finish(r, err)
@@ -338,7 +429,7 @@ func (w *stdin) Write(b []byte) (int, error) {
 	for len(b) > 0 {
 		k := min(len(b), w.p.maxWrite)
 		if _, err := mcp.CallCustomMethod[*WriteParams, *EmptyResult](w.p.ctx, w.p.c.Session, wire.MethodWrite, &WriteParams{WriteArgs: wire.WriteArgs{ID: w.p.id, Data: b[:k]}}); err != nil {
-			return n, w.p.c.Err(err)
+			return n, w.p.c.Err(fromWire(err))
 		}
 		n += k
 		b = b[k:]
@@ -357,7 +448,7 @@ func (w *stdin) Close() error {
 	ctx, cancel := context.WithTimeout(w.p.ctx, requestTimeout)
 	defer cancel()
 	if _, err := mcp.CallCustomMethod[*IDParams, *EmptyResult](ctx, w.p.c.Session, wire.MethodCloseStdin, &IDParams{ProcessID: wire.ProcessID{ID: w.p.id}}); err != nil {
-		return w.p.c.Err(err)
+		return w.p.c.Err(fromWire(err))
 	}
 	return nil
 }
@@ -388,7 +479,7 @@ func (r *stdout) Read(b []byte) (int, error) {
 			if r.p.ctx.Err() != nil && !r.p.lost() {
 				return 0, os.ErrClosed
 			}
-			return 0, r.p.c.Err(err)
+			return 0, r.p.c.Err(fromWire(err))
 		}
 		if len(res.Data) > len(b) {
 			return 0, fmt.Errorf("mcpworkspace: a read of %d bytes gave %d", len(b), len(res.Data))

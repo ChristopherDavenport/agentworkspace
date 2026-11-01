@@ -1,0 +1,961 @@
+{
+  "doc": [
+    "The exchanges of RFC 0001's mcpworkspace wire, in order, each a JSON-RPC request sent with the next id after an MCP initialization, and its result or error.",
+    "The served workspace: inside.txt (ok), sub/a.txt (a), alias.txt -> inside.txt, linkout -> ../outside/secret.txt; a file k/<kind>, and a start of kind:<kind>, refused with that kind (other: with none), its served text naming /srv/hidden/<kind>; two servers offered, echo and holder (given a secret), both cat.",
+    "A params' \"${port}\" is a port on the loopback that answers what it is sent, upper-cased, once all of it is sent.",
+    "A read asks for less than all the process wrote, so that whether it reaches the end does not depend on timing.",
+    "A resource's text is JSON, shown with its keys sorted; ${root} stands for the served root, and * for what differs between runs.",
+    "mcpworkspace/corpus_test.go replays it against the reference server, and maps its refusals back through the reference client."
+  ],
+  "exchanges": [
+    {
+      "name": "what the server keeps",
+      "method": "agentworkspace/process.info",
+      "params": {},
+      "result": {
+        "bounds": {
+          "maxProcesses": 32,
+          "maxReadBytes": 65536,
+          "maxWriteBytes": 1048576
+        },
+        "reach": "*"
+      }
+    },
+    {
+      "name": "list the servers offered: holder is marked as given a secret, and nothing of it is told",
+      "method": "agentworkspace/servers.list",
+      "params": {},
+      "result": {
+        "servers": [
+          {
+            "description": "says it back",
+            "name": "echo"
+          },
+          {
+            "description": "holds a token",
+            "name": "holder",
+            "secrets": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "stat a file",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=inside.txt"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"info\":{\"modTime\":\"*\",\"mode\":420,\"name\":\"inside.txt\",\"size\":2}}",
+            "uri": "agentworkspace:///stat?path=inside.txt"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "lstat a link",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///lstat?path=alias.txt"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"info\":{\"modTime\":\"*\",\"mode\":134218239,\"name\":\"alias.txt\",\"size\":10}}",
+            "uri": "agentworkspace:///lstat?path=alias.txt"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "readlink",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///readlink?path=alias.txt"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"target\":\"inside.txt\"}",
+            "uri": "agentworkspace:///readlink?path=alias.txt"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "readdir",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///readdir?path=sub"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"entries\":[{\"modTime\":\"*\",\"mode\":420,\"name\":\"a.txt\",\"size\":1}]}",
+            "uri": "agentworkspace:///readdir?path=sub"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "read a file",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///read?path=inside.txt"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"data\":\"b2s=\"}",
+            "uri": "agentworkspace:///read?path=inside.txt"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a name that leaves: outside",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=..%2Fx"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"outside\",\"message\":\"path is outside the workspace\"}}",
+            "uri": "agentworkspace:///stat?path=..%2Fx"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a link that leads out: outside",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///read?path=linkout"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"outside\",\"message\":\"path is outside the workspace\"}}",
+            "uri": "agentworkspace:///read?path=linkout"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "nothing by that name: notexist",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=missing"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"notexist\",\"message\":\"no such file or directory\"}}",
+            "uri": "agentworkspace:///stat?path=missing"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a name that is not valid: invalid",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=a%2F..%2Fb"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"invalid\",\"message\":\"invalid argument\"}}",
+            "uri": "agentworkspace:///stat?path=a%2F..%2Fb"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a file refused as exist, its served text naming /srv/hidden: the kind's words alone",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=k%2Fexist"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"exist\",\"message\":\"file already exists\"}}",
+            "uri": "agentworkspace:///stat?path=k%2Fexist"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a file refused as permission, its served text naming /srv/hidden: the kind's words alone",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=k%2Fpermission"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"permission\",\"message\":\"permission denied\"}}",
+            "uri": "agentworkspace:///stat?path=k%2Fpermission"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a file refused as unsupported, its served text naming /srv/hidden: the kind's words alone",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=k%2Funsupported"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"unsupported\",\"message\":\"unsupported operation\"}}",
+            "uri": "agentworkspace:///stat?path=k%2Funsupported"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a file refused as processdone, its served text naming /srv/hidden: the kind's words alone",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=k%2Fprocessdone"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"processdone\",\"message\":\"os: process already finished\"}}",
+            "uri": "agentworkspace:///stat?path=k%2Fprocessdone"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a file refused as closed, its served text naming /srv/hidden: the kind's words alone",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=k%2Fclosed"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"closed\",\"message\":\"file already closed\"}}",
+            "uri": "agentworkspace:///stat?path=k%2Fclosed"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a file refused as noserver, its served text naming /srv/hidden: the kind's words alone",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=k%2Fnoserver"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"noserver\",\"message\":\"no such server in this workspace\"}}",
+            "uri": "agentworkspace:///stat?path=k%2Fnoserver"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a file refused as noprocess, its served text naming /srv/hidden: the kind's words alone",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=k%2Fnoprocess"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"noprocess\",\"message\":\"no such process in this session\"}}",
+            "uri": "agentworkspace:///stat?path=k%2Fnoprocess"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "a file refused with no kind, its served text naming /srv/hidden: the one generic message",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=k%2Fother"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"other\",\"message\":\"the workspace refused the operation\"}}",
+            "uri": "agentworkspace:///stat?path=k%2Fother"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
+      "name": "start cat",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "cat"
+        ]
+      },
+      "result": {
+        "id": "p1"
+      }
+    },
+    {
+      "name": "write to its input",
+      "method": "agentworkspace/process.write",
+      "params": {
+        "id": "p1",
+        "data": "YWJj"
+      },
+      "result": {}
+    },
+    {
+      "name": "close its input",
+      "method": "agentworkspace/process.closeStdin",
+      "params": {
+        "id": "p1"
+      },
+      "result": {}
+    },
+    {
+      "name": "its wait",
+      "method": "agentworkspace/process.wait",
+      "params": {
+        "id": "p1"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "read two bytes of its output: at most max",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p1",
+        "fd": 1,
+        "max": 2
+      },
+      "result": {
+        "data": "YWI="
+      }
+    },
+    {
+      "name": "a signal after its exit",
+      "method": "agentworkspace/process.signal",
+      "params": {
+        "id": "p1",
+        "signal": "TERM"
+      },
+      "result": {
+        "done": true
+      }
+    },
+    {
+      "name": "a resize of a process with no terminal: unsupported",
+      "method": "agentworkspace/process.resize",
+      "params": {
+        "id": "p1",
+        "rows": 24,
+        "cols": 80
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "unsupported"
+        },
+        "message": "unsupported operation"
+      }
+    },
+    {
+      "name": "a fd that is not 1 or 2: invalid",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p1",
+        "fd": 3
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "invalid"
+        },
+        "message": "fd 3: want 1 or 2"
+      }
+    },
+    {
+      "name": "its close",
+      "method": "agentworkspace/process.close",
+      "params": {
+        "id": "p1"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "a closed process: noprocess",
+      "method": "agentworkspace/process.wait",
+      "params": {
+        "id": "p1"
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "noprocess"
+        },
+        "message": "process \"p1\": no such process in this session"
+      }
+    },
+    {
+      "name": "start a command that writes to both outputs, then sleeps",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "sh",
+          "-c",
+          "printf 'before\\n.'; printf 'err\\n.' >&2; touch ready; exec sleep 30"
+        ],
+        "stderr": true
+      },
+      "result": {
+        "id": "p2"
+      }
+    },
+    {
+      "name": "start one that waits until it has written",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "sh",
+          "-c",
+          "while [ ! -e ready ]; do sleep 0.01; done"
+        ]
+      },
+      "result": {
+        "id": "p3"
+      }
+    },
+    {
+      "name": "wait for that one",
+      "method": "agentworkspace/process.wait",
+      "params": {
+        "id": "p3"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "close it",
+      "method": "agentworkspace/process.close",
+      "params": {
+        "id": "p3"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "a signal the wire does not carry: unsupported",
+      "method": "agentworkspace/process.signal",
+      "params": {
+        "id": "p2",
+        "signal": "SEGV"
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "unsupported"
+        },
+        "message": "no signal named \"SEGV\" is carried"
+      }
+    },
+    {
+      "name": "a cancel: ended as its context's end ends it",
+      "method": "agentworkspace/process.cancel",
+      "params": {
+        "id": "p2"
+      },
+      "result": {}
+    },
+    {
+      "name": "its wait says canceled",
+      "method": "agentworkspace/process.wait",
+      "params": {
+        "id": "p2"
+      },
+      "result": {
+        "ended": "canceled",
+        "status": -1
+      }
+    },
+    {
+      "name": "what it wrote before the cancel is kept: its output",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p2",
+        "fd": 1,
+        "max": 7
+      },
+      "result": {
+        "data": "YmVmb3JlCg=="
+      }
+    },
+    {
+      "name": "and its standard error",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p2",
+        "fd": 2,
+        "max": 4
+      },
+      "result": {
+        "data": "ZXJyCg=="
+      }
+    },
+    {
+      "name": "its close",
+      "method": "agentworkspace/process.close",
+      "params": {
+        "id": "p2"
+      },
+      "result": {
+        "ended": "canceled",
+        "status": -1,
+        "stderr": "Lg=="
+      }
+    },
+    {
+      "name": "start on a terminal of 24 rows and 80 columns, writing to standard error",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "sh",
+          "-c",
+          "stty size >&2; printf ."
+        ],
+        "terminal": {
+          "rows": 24,
+          "cols": 80
+        }
+      },
+      "result": {
+        "id": "p4"
+      }
+    },
+    {
+      "name": "its wait",
+      "method": "agentworkspace/process.wait",
+      "params": {
+        "id": "p4"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "its output: the terminal's, standard error merged, the line ending \\r\\n",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p4",
+        "fd": 1,
+        "max": 7
+      },
+      "result": {
+        "data": "MjQgODANCg=="
+      }
+    },
+    {
+      "name": "its close",
+      "method": "agentworkspace/process.close",
+      "params": {
+        "id": "p4"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "connect to a port that answers",
+      "method": "agentworkspace/process.connect",
+      "params": {
+        "port": "${port}"
+      },
+      "result": {
+        "id": "p5"
+      }
+    },
+    {
+      "name": "send to it",
+      "method": "agentworkspace/process.write",
+      "params": {
+        "id": "p5",
+        "data": "aGVsbG8="
+      },
+      "result": {}
+    },
+    {
+      "name": "the half-close",
+      "method": "agentworkspace/process.closeStdin",
+      "params": {
+        "id": "p5"
+      },
+      "result": {}
+    },
+    {
+      "name": "what it sends back: four bytes, at most max",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p5",
+        "fd": 1,
+        "max": 4
+      },
+      "result": {
+        "data": "SEVMTA=="
+      }
+    },
+    {
+      "name": "close the stream",
+      "method": "agentworkspace/process.close",
+      "params": {
+        "id": "p5"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "start the server echo",
+      "method": "agentworkspace/servers.start",
+      "params": {
+        "name": "echo"
+      },
+      "result": {
+        "id": "p6"
+      }
+    },
+    {
+      "name": "its input",
+      "method": "agentworkspace/process.write",
+      "params": {
+        "id": "p6",
+        "data": "cGluZwo="
+      },
+      "result": {}
+    },
+    {
+      "name": "its input's end",
+      "method": "agentworkspace/process.closeStdin",
+      "params": {
+        "id": "p6"
+      },
+      "result": {}
+    },
+    {
+      "name": "its wait",
+      "method": "agentworkspace/process.wait",
+      "params": {
+        "id": "p6"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "its output: four bytes, at most max",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p6",
+        "fd": 1,
+        "max": 4
+      },
+      "result": {
+        "data": "cGluZw=="
+      }
+    },
+    {
+      "name": "its close",
+      "method": "agentworkspace/process.close",
+      "params": {
+        "id": "p6"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "start a server not offered: noserver, -32010",
+      "method": "agentworkspace/servers.start",
+      "params": {
+        "name": "nope"
+      },
+      "error": {
+        "code": -32010,
+        "data": {
+          "kind": "noserver"
+        },
+        "message": "no such server in this workspace"
+      }
+    },
+    {
+      "name": "a start with no command: invalid",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": []
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "invalid"
+        },
+        "message": "no command"
+      }
+    },
+    {
+      "name": "a start refused as outside: its kind as data, its served text not sent",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:outside"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "outside"
+        },
+        "message": "path is outside the workspace"
+      }
+    },
+    {
+      "name": "a start refused as notexist: its kind as data, its served text not sent",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:notexist"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "notexist"
+        },
+        "message": "file does not exist"
+      }
+    },
+    {
+      "name": "a start refused as exist: its kind as data, its served text not sent",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:exist"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "exist"
+        },
+        "message": "file already exists"
+      }
+    },
+    {
+      "name": "a start refused as permission: its kind as data, its served text not sent",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:permission"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "permission"
+        },
+        "message": "permission denied"
+      }
+    },
+    {
+      "name": "a start refused as invalid: its kind as data, its served text not sent",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:invalid"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "invalid"
+        },
+        "message": "invalid argument"
+      }
+    },
+    {
+      "name": "a start refused as unsupported: its kind as data, its served text not sent",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:unsupported"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "unsupported"
+        },
+        "message": "unsupported operation"
+      }
+    },
+    {
+      "name": "a start refused as processdone: its kind as data, its served text not sent",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:processdone"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "processdone"
+        },
+        "message": "os: process already finished"
+      }
+    },
+    {
+      "name": "a start refused as closed: its kind as data, its served text not sent",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:closed"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "closed"
+        },
+        "message": "file already closed"
+      }
+    },
+    {
+      "name": "a start refused as noserver: its kind as data, its served text not sent",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:noserver"
+        ]
+      },
+      "error": {
+        "code": -32010,
+        "data": {
+          "kind": "noserver"
+        },
+        "message": "no such server in this workspace"
+      }
+    },
+    {
+      "name": "a start refused as noprocess: its kind as data, its served text not sent",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:noprocess"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "noprocess"
+        },
+        "message": "no such process in this session"
+      }
+    },
+    {
+      "name": "a start refused with no kind: the one generic message",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "kind:other"
+        ]
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "other"
+        },
+        "message": "the workspace refused the operation"
+      }
+    },
+    {
+      "name": "connect to port 0: invalid",
+      "method": "agentworkspace/process.connect",
+      "params": {
+        "port": 0
+      },
+      "error": {
+        "code": -32011,
+        "data": {
+          "kind": "invalid"
+        },
+        "message": "invalid argument"
+      }
+    }
+  ]
+}

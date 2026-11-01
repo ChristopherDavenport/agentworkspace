@@ -12,18 +12,37 @@
 // be offered to the model of any harness connected to the server, and
 // starting a process is arbitrary execution. The methods are:
 //
-//	agentworkspace/process.start      {args, dir?, env?, timeoutMs?, stderr?} -> {id}
+//	agentworkspace/process.start      {args, dir?, env?, timeoutMs?, stderr?, terminal?: {rows, cols}} -> {id}
 //	agentworkspace/process.write      {id, data (base64, at most MaxWriteBytes)} -> {}
 //	agentworkspace/process.read       {id, fd: 1|2, max?} -> {data?, eof?}
 //	agentworkspace/process.closeStdin {id} -> {}
-//	agentworkspace/process.signal     {id, signal: INT|TERM|KILL} -> {done?}
+//	agentworkspace/process.signal     {id, signal} -> {done?}
 //	agentworkspace/process.wait       {id} -> {status, ended?, error?}
 //	agentworkspace/process.close      {id} -> {status, ended?, error?, stderr?}
+//	agentworkspace/process.cancel     {id} -> {}
+//	agentworkspace/process.info       {} -> {reach?, bounds}
+//	agentworkspace/process.resize     {id, rows, cols} -> {}
+//	agentworkspace/process.connect    {port} -> {id}
 //
 // A read is a long poll: it returns as soon as there is output, at most
 // max bytes (at most MaxReadBytes), or end of file, and waits otherwise.
 // A wait waits for the process to exit. A close ends the process and
-// gives back the standard error no read took. Each MCP session has its
+// gives back the standard error no read took. A cancel ends it as the
+// end of its start's context does, an interrupt rather than a shutdown:
+// the ladder begins at INT, with its input left open, and the process
+// stays in the table, so its output is read to its end and its wait
+// says EndedCanceled; a cancel of one that has exited changes nothing.
+// A start with a terminal runs the process on a pseudo-terminal of that
+// size (agentworkspace.Command.Terminal): fd 1 is the terminal's
+// output, standard error merged into it, and a resize changes its
+// size; a server that cannot give one refuses the start as
+// KindUnsupported. A connect opens a stream to port on the workspace's
+// loopback, as its own processes reach it, and carries it as a process
+// of the session: a write sends to the port, closeStdin ends what is
+// sent, a read of fd 1 is what the port sends, and a close ends the
+// stream. Info says what the server keeps: how far its end of a process reaches
+// (agentworkspace.Reach's values; absent for a workspace that says
+// none) and its bounds. Each MCP session has its
 // own table of processes, at most MaxProcesses open at once: an id
 // another session started is refused as one that does not exist. When
 // the session ends, every process it started ends with it.
@@ -33,7 +52,7 @@
 // A workspace may offer MCP servers of its own (agentworkspace's
 // ServerProvider), each a stdio server it starts by name:
 //
-//	agentworkspace/servers.list  {} -> {servers: [{name, description?}]}
+//	agentworkspace/servers.list  {} -> {servers: [{name, description?, secrets?}]}
 //	agentworkspace/servers.start {name, stderr?} -> {id}
 //
 // A started server is a process like any other: its id takes the
@@ -84,12 +103,16 @@ const (
 	MethodSignal     = MethodPrefix + "signal"
 	MethodWait       = MethodPrefix + "wait"
 	MethodClose      = MethodPrefix + "close"
+	MethodCancel     = MethodPrefix + "cancel"
+	MethodInfo       = MethodPrefix + "info"
+	MethodResize     = MethodPrefix + "resize"
+	MethodConnect    = MethodPrefix + "connect"
 )
 
 // Methods are the process methods, in the order above, as a new slice
 // each call.
 func Methods() []string {
-	return []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose}
+	return []string{MethodStart, MethodWrite, MethodRead, MethodCloseStdin, MethodSignal, MethodWait, MethodClose, MethodCancel, MethodInfo, MethodResize, MethodConnect}
 }
 
 // ServersPrefix begins every server method.
@@ -110,6 +133,9 @@ type ServerInfo struct {
 	// Name is agentworkspace.ValidServerName's.
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+	// Secrets marks a server the workspace gives a secret; no name or
+	// value crosses, and its absence proves nothing.
+	Secrets bool `json:"secrets,omitempty"`
 }
 
 // CodeNoServer is the JSON-RPC error code of a servers.start refused
@@ -157,20 +183,48 @@ func DefaultBounds() Bounds {
 // Valid reports whether every bound is positive.
 func (b Bounds) Valid() bool { return b.MaxProcesses > 0 && b.MaxWriteBytes > 0 && b.MaxReadBytes > 0 }
 
-// The signals a process may be sent, by name.
+// The signals a process may be sent, by their POSIX names without the
+// SIG prefix: RFC 0001 §7's required set (INT, TERM, KILL, HUP) and the
+// rest of the set it names, the thirteen remote carries too. A name
+// not among them is refused as KindUnsupported.
 const (
-	SignalINT  = "INT"
-	SignalTERM = "TERM"
-	SignalKILL = "KILL"
+	SignalHUP   = "HUP"
+	SignalINT   = "INT"
+	SignalQUIT  = "QUIT"
+	SignalKILL  = "KILL"
+	SignalUSR1  = "USR1"
+	SignalUSR2  = "USR2"
+	SignalPIPE  = "PIPE"
+	SignalALRM  = "ALRM"
+	SignalTERM  = "TERM"
+	SignalCONT  = "CONT"
+	SignalSTOP  = "STOP"
+	SignalTSTP  = "TSTP"
+	SignalWINCH = "WINCH"
 )
 
 // signals are the signals a process may be sent, by name. Unexported,
 // so that what a server accepts cannot be changed by anyone who imports
-// the package.
-var signals = map[string]syscall.Signal{SignalINT: syscall.SIGINT, SignalTERM: syscall.SIGTERM, SignalKILL: syscall.SIGKILL}
+// the package. The wire carries names, not numbers: a number is the
+// client's platform's, and USR1 is 10 on Linux and 30 on macOS.
+var signals = map[string]syscall.Signal{
+	SignalHUP:   syscall.SIGHUP,
+	SignalINT:   syscall.SIGINT,
+	SignalQUIT:  syscall.SIGQUIT,
+	SignalKILL:  syscall.SIGKILL,
+	SignalUSR1:  syscall.SIGUSR1,
+	SignalUSR2:  syscall.SIGUSR2,
+	SignalPIPE:  syscall.SIGPIPE,
+	SignalALRM:  syscall.SIGALRM,
+	SignalTERM:  syscall.SIGTERM,
+	SignalCONT:  syscall.SIGCONT,
+	SignalSTOP:  syscall.SIGSTOP,
+	SignalTSTP:  syscall.SIGTSTP,
+	SignalWINCH: syscall.SIGWINCH,
+}
 
-// SignalOf is the signal named name on the wire, false for a name that
-// is not INT, TERM or KILL.
+// SignalOf is the signal named name on the wire, false for a name the
+// wire does not carry.
 func SignalOf(name string) (syscall.Signal, bool) {
 	s, ok := signals[name]
 	return s, ok
@@ -191,10 +245,20 @@ func SignalName(sig syscall.Signal) (string, bool) {
 const (
 	// EndedTimeout is a process the start's timeout ended.
 	EndedTimeout = "timeout"
-	// EndedCanceled is a process the session's end, or the server's,
-	// ended.
+	// EndedCanceled is a process a cancel, the session's end, or the
+	// server's, ended.
 	EndedCanceled = "canceled"
 )
+
+// Info is process.info's result: what the server keeps.
+type Info struct {
+	// Reach is how far its end of a process reaches, among what the
+	// process started: "group", "descendants" or "all", as
+	// agentworkspace.Reach names them; empty for a workspace that says
+	// none, which is no claim of "all".
+	Reach  string `json:"reach,omitempty"`
+	Bounds Bounds `json:"bounds"`
+}
 
 // StartArgs is process.start's parameters.
 type StartArgs struct {
@@ -205,6 +269,26 @@ type StartArgs struct {
 	// Stderr asks for the process's standard error, read as fd 2;
 	// without it, it is discarded.
 	Stderr bool `json:"stderr,omitempty"`
+	// Terminal asks for a pseudo-terminal of this size.
+	Terminal *TerminalSize `json:"terminal,omitempty"`
+}
+
+// TerminalSize is a terminal's size in character cells.
+type TerminalSize struct {
+	Rows uint16 `json:"rows"`
+	Cols uint16 `json:"cols"`
+}
+
+// ConnectArgs is process.connect's parameters; its result is a
+// Started.
+type ConnectArgs struct {
+	Port int `json:"port"`
+}
+
+// ResizeArgs is process.resize's parameters.
+type ResizeArgs struct {
+	ID string `json:"id"`
+	TerminalSize
 }
 
 // Started is process.start's result.
@@ -272,8 +356,7 @@ const MaxFileBytes = 1 << 20
 // MaxDirEntries bounds one listing, so a reply stays a few megabytes.
 const MaxDirEntries = 10000
 
-// MaxErrorBytes bounds a FileError's message, which is the server's
-// text.
+// MaxErrorBytes bounds a refusal's message.
 const MaxErrorBytes = 512
 
 // The operations of FilesURITemplate.
@@ -291,14 +374,41 @@ var ops = []string{OpStat, OpLstat, OpReadDir, OpReadLink, OpRead}
 // Ops are the operations of FilesURITemplate, as a new slice each call.
 func Ops() []string { return slices.Clone(ops) }
 
-// The kinds of a FileError.
+// The kinds of a refusal, RFC 0001 §2's and the process methods' own
+// (KindNoProcess), which a FileError carries and a refused method's
+// error its Refusal: the client maps each back to its sentinel, so a
+// test for the kind holds on either side.
 const (
-	KindNotExist   = "notexist"
-	KindOutside    = "outside"
-	KindInvalid    = "invalid"
-	KindPermission = "permission"
-	KindOther      = "other"
+	KindOutside     = "outside"     // agentworkspace.ErrOutside
+	KindNotExist    = "notexist"    // fs.ErrNotExist
+	KindExist       = "exist"       // fs.ErrExist
+	KindPermission  = "permission"  // fs.ErrPermission
+	KindInvalid     = "invalid"     // fs.ErrInvalid
+	KindUnsupported = "unsupported" // errors.ErrUnsupported
+	KindProcessDone = "processdone" // os.ErrProcessDone
+	KindClosed      = "closed"      // fs.ErrClosed
+	KindNoServer    = "noserver"    // agentworkspace.ErrNoServer
+	KindNoProcess   = "noprocess"   // an id the session did not start, or closed
+	KindOther       = "other"       // none of these
 )
+
+// Kinds are the kinds but KindOther, in the order a served error is
+// matched (KindOutside first, since a link's refusal may also read as
+// another), as a new slice each call.
+func Kinds() []string {
+	return []string{KindOutside, KindNotExist, KindExist, KindPermission, KindInvalid, KindUnsupported, KindProcessDone, KindClosed, KindNoServer, KindNoProcess}
+}
+
+// CodeRefused is the JSON-RPC error code of a process or server
+// method's refusal (but a servers.start's of a name not offered, which
+// is CodeNoServer), with a Refusal as its data, in the range JSON-RPC
+// leaves to an implementation's server errors.
+const CodeRefused = -32011
+
+// Refusal is the data of a CodeRefused or CodeNoServer error: its kind.
+type Refusal struct {
+	Kind string `json:"kind"`
+}
 
 // FileReply is the JSON of one reply: the field of its op, or Error.
 type FileReply struct {
@@ -317,8 +427,9 @@ type FileInfo struct {
 	ModTime time.Time   `json:"modTime"`
 }
 
-// FileError is a refusal: Kind is one of the Kind constants, Message the
-// server's words.
+// FileError is a refusal: Kind is one of the Kind constants, Message
+// the kind's words, or the served error's with no path of the serving
+// side's machine but a name relative to the workspace's root.
 type FileError struct {
 	Kind    string `json:"kind"`
 	Message string `json:"message"`

@@ -6,11 +6,9 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"path"
-	"strings"
-	"syscall"
 
 	"github.com/ChristopherDavenport/agentworkspace"
+	"github.com/ChristopherDavenport/agentworkspace/internal/wireerr"
 )
 
 // The errors of the wire's own, which the client returns as they are
@@ -103,73 +101,31 @@ func statusOf(code string) int {
 	return http.StatusInternalServerError
 }
 
-// errorOf is err, a served workspace's whose Root is root, as the wire
-// carries it. A mapped error's message is the system's words for it (an
-// errno's text) or the sentinel's, never the error's own text, which
-// may name a path on the server's machine; the request's name is the
-// client's to add. So is an unmapped errno's (ENOSPC, ENOTDIR, EIO):
-// its text alone. Any other error's message is its text, scrubbed and
-// bounded: the served workspace's words, such as "x is not a regular
-// file", with root cut from it. An offered server's OutputFilter that
-// failed is agentworkspace.ErrOutputFilter's words alone, never the
-// panic's value its error holds.
-func errorOf(root string, err error) wireError {
+// errorOf is err, a served workspace's, as the wire carries it: its
+// code and an allow-listed message (wireerr.Message), the sentinel's
+// words or the system's for an errno, and wireerr.Other for an error of
+// no kind; never the error's own text, which may name a path on the
+// server's machine in any form. The request's name is the client's to
+// add. An offered server's OutputFilter that failed is
+// agentworkspace.ErrOutputFilter's words alone, never the panic's value
+// its error holds.
+func errorOf(err error) wireError {
 	switch {
 	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 		return wireError{Code: codeOther, Message: "the request ended"}
 	case errors.Is(err, agentworkspace.ErrOutputFilter):
-		// Its words alone: the panic's value it wraps may hold a
-		// secret the filter was given.
 		return wireError{Code: codeOther, Message: agentworkspace.ErrOutputFilter.Error()}
 	}
 	for _, c := range codes {
-		if !errors.Is(err, c.err) {
-			continue
-		}
-		msg := c.err.Error()
-		var errno syscall.Errno
-		if c.code != codeOutside && errors.As(err, &errno) {
-			msg = errno.Error()
-		}
-		return wireError{Code: c.code, Message: bounded(msg)}
-	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		return wireError{Code: codeOther, Message: errno.Error()}
-	}
-	return wireError{Code: codeOther, Message: bounded(scrub(root, err.Error()))}
-}
-
-// scrub is msg with the served root cut from it, a name under it left
-// relative to it and the root itself ".", and every other word that is
-// an absolute path cut to its last element ("/usr/bin/tool" is
-// ".../tool"). What remains is the served workspace's words and the
-// last element of any path in them.
-func scrub(root, msg string) string {
-	if root != "" && root != "/" {
-		msg = strings.ReplaceAll(msg, root+"/", "")
-	}
-	words := strings.Split(msg, " ")
-	for i, w := range words {
-		lead := len(w) - len(strings.TrimLeft(w, `"'(`))
-		core := strings.TrimRight(w[lead:], `"'):,;`)
-		switch {
-		case core == root && root != "":
-			words[i] = w[:lead] + "." + w[lead+len(core):]
-		case len(core) > 1 && core[0] == '/':
-			words[i] = w[:lead] + ".../" + path.Base(core) + w[lead+len(core):]
+		if errors.Is(err, c.err) {
+			return wireError{Code: c.code, Message: bounded(wireerr.Message(err, c.err, c.code != codeOutside))}
 		}
 	}
-	return strings.Join(words, " ")
+	return wireError{Code: codeOther, Message: wireerr.Message(err, nil, false)}
 }
 
 // bounded is s cut to MaxErrorBytes and made valid UTF-8.
-func bounded(s string) string {
-	if len(s) > MaxErrorBytes {
-		s = s[:MaxErrorBytes]
-	}
-	return strings.ToValidUTF8(s, "?")
-}
+func bounded(s string) string { return wireerr.Bounded(s, MaxErrorBytes) }
 
 // err is e as the client's error: its code's sentinel, wrapped with
 // the server's words, or those words alone for a code it does not

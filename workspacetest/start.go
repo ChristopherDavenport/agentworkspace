@@ -56,6 +56,7 @@ func RunStarter(t *testing.T, starters ...Starter) {
 		{"FindsItsProgramOnItsOwnPath", []string{"A=1"}, false, findsItsProgramOnItsOwnPath},
 		{"EnvIsWhatItWasGiven", givenEnv, false, envIsWhatItWasGiven},
 		{"EndsWhatLeftItsGroup", path, false, startEndsWhatLeftItsGroup},
+		{"Terminal", path, false, startTerminal},
 	} {
 		t.Run(table.name, func(t *testing.T) {
 			if table.secret {
@@ -216,18 +217,34 @@ func startClose(t *testing.T, l agentworkspace.Starter, _ string) {
 	}
 }
 
-// Signal reaches the process.
+// Signal reaches the process, for each of RFC 0001 §7's required set,
+// and a signal the starter does not carry is errors.ErrUnsupported.
 func startSignal(t *testing.T, l agentworkspace.Starter, _ string) {
-	p := start(t, context.Background(), l, agentworkspace.Command{Args: []string{"sleep", "30"}})
-	if err := p.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	within(t, 10*time.Second, "the signalled process", func() {
-		if status, err := p.Wait(); status != -1 || err != nil {
-			t.Errorf("Wait = %d, %v; want -1, nil", status, err)
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL, syscall.SIGHUP} {
+		// exec, so that sleep is the process the signal reaches, and its
+		// default action ends it, where a shell would ignore INT.
+		p := start(t, context.Background(), l, agentworkspace.Command{Args: []string{"sh", "-c", "echo; exec sleep 30"}})
+		readLine(t, p)
+		if err := p.Signal(sig); err != nil {
+			t.Fatalf("%v: %v", sig, err)
 		}
-	})
+		within(t, 10*time.Second, "the signalled process", func() {
+			if status, err := p.Wait(); status != -1 || err != nil {
+				t.Errorf("%v: Wait = %d, %v; want -1, nil", sig, status, err)
+			}
+		})
+	}
+	p := start(t, context.Background(), l, agentworkspace.Command{Args: []string{"sleep", "30"}})
+	if err := p.Signal(notASignal{}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("a signal no starter carries: %v, want errors.ErrUnsupported", err)
+	}
 }
+
+// notASignal is an os.Signal no starter carries.
+type notASignal struct{}
+
+func (notASignal) Signal()        {}
+func (notASignal) String() string { return "not a signal" }
 
 // When the process exits by itself, what it left running goes with
 // it: the background child holding the output is killed, so the output
@@ -398,4 +415,87 @@ func startConcurrently(t *testing.T, l agentworkspace.Starter, _ string) {
 		})
 	}
 	wg.Wait()
+}
+
+// readLine reads one line of p's output, so that the process has run
+// that far.
+func readLine(t *testing.T, p agentworkspace.Process) {
+	t.Helper()
+	within(t, 10*time.Second, "a line of output", func() {
+		if _, err := bufio.NewReader(p.Stdout()).ReadString('\n'); err != nil {
+			t.Errorf("a line of output: %v", err)
+		}
+	})
+}
+
+// A command started with a terminal has it as its controlling terminal,
+// of the size given and then of the size a resize gives, its standard
+// error merged into its output; Exec, and a Stream beside it, are
+// refused. A starter that cannot give a terminal refuses the start as
+// unsupported, and the case is skipped; it never runs the command on
+// pipes.
+func startTerminal(t *testing.T, s agentworkspace.Starter, _ string) {
+	ctx := context.Background()
+	cmd := agentworkspace.Command{
+		Args:     []string{"sh", "-c", `stty size; tty >/dev/null && echo a terminal; echo err >&2; read x; stty size`},
+		Terminal: &agentworkspace.TerminalSize{Rows: 24, Cols: 80},
+	}
+	p, err := s.Start(ctx, cmd)
+	if errors.Is(err, errors.ErrUnsupported) {
+		t.Skipf("no terminal here: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	out := bufio.NewReader(p.Stdout())
+	// line is the next line that is not empty, its terminal's \r cut.
+	line := func() string {
+		t.Helper()
+		var got string
+		within(t, 10*time.Second, "a line from the terminal", func() {
+			for got == "" {
+				l, err := out.ReadString('\n')
+				if err != nil {
+					t.Errorf("reading the terminal: %q, %v", l, err)
+					return
+				}
+				got = strings.TrimRight(l, "\r\n")
+			}
+		})
+		return got
+	}
+	for _, want := range []string{"24 80", "a terminal", "err"} {
+		if got := line(); got != want {
+			t.Errorf("the terminal said %q, want %q", got, want)
+		}
+	}
+	if err := agentworkspace.Resize(p, agentworkspace.TerminalSize{Rows: 30, Cols: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(p.Stdin(), "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := line(); got != "30 100" {
+		t.Errorf("after the resize the terminal said %q, want 30 100", got)
+	}
+	within(t, 10*time.Second, "the process's exit", func() {
+		if status, err := p.Wait(); status != 0 || err != nil {
+			t.Errorf("Wait = %d, %v", status, err)
+		}
+	})
+
+	c := cmd
+	c.Stream = io.Discard
+	if q, err := s.Start(ctx, c); err == nil {
+		q.Close()
+		t.Error("a Stream beside a terminal was taken")
+	}
+	if _, err := s.Exec(ctx, cmd); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("Exec with a terminal: %v, want errors.ErrUnsupported", err)
+	}
+	plain := start(t, ctx, s, agentworkspace.Command{Args: []string{"sleep", "30"}})
+	if err := agentworkspace.Resize(plain, agentworkspace.TerminalSize{Rows: 1, Cols: 1}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("resizing a process with no terminal: %v, want errors.ErrUnsupported", err)
+	}
 }

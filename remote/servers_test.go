@@ -163,9 +163,13 @@ func TestAServersPrincipalRunsNoCommand(t *testing.T) {
 	if info := clientOf(ws).info; info.Start || !info.Servers || len(info.Env) != 0 {
 		t.Errorf("the info route told a servers principal start %v, servers %v, env %q", info.Start, info.Servers, info.Env)
 	}
-	// Nor the host's path: the root's last element alone.
-	if base := filepath.Base(o.Root()); ws.Root() != base || ws.Served().Root != base || ws.Descriptor().Root != base {
-		t.Errorf("a servers principal was told the root %q, served %q, descriptor %q; want %q alone", ws.Root(), ws.Served().Root, ws.Descriptor().Root, base)
+	// Nor the host's path: the root is withheld, "" and no partial
+	// path, though the info route gives its last element.
+	if ws.Root() != "" || ws.Served().Root != "" || ws.Descriptor().Root != "" {
+		t.Errorf("a servers principal was told the root %q, served %q, descriptor %q; want it withheld", ws.Root(), ws.Served().Root, ws.Descriptor().Root)
+	}
+	if base := filepath.Base(o.Root()); clientOf(ws).info.Root != base {
+		t.Errorf("the info route gave a servers principal the root %q, want its last element %q", clientOf(ws).info.Root, base)
 	}
 	if h := ws.Served().Host; h != "" {
 		t.Errorf("a servers principal was told the host %q", h)
@@ -438,7 +442,7 @@ func TestErrNoServerRoundTrips(t *testing.T) {
 	if err := (wireError{Code: codeNoServer, Message: "x"}).err(); !errors.Is(err, agentworkspace.ErrNoServer) {
 		t.Errorf("the code maps to %v", err)
 	}
-	if e := errorOf("", fmt.Errorf("server %q: %w", "x", agentworkspace.ErrNoServer)); e.Code != codeNoServer {
+	if e := errorOf(fmt.Errorf("server %q: %w", "x", agentworkspace.ErrNoServer)); e.Code != codeNoServer {
 		t.Errorf("ErrNoServer is sent as %q", e.Code)
 	}
 

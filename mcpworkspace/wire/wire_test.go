@@ -43,10 +43,15 @@ func TestTheTablesAreCopies(t *testing.T) {
 	}
 }
 
-// A signal's name and the signal it names go both ways, for the three
-// the wire has and no other.
+// A signal's name and the signal it names go both ways, for the
+// thirteen the wire has (RFC 0001 §7's set) and no other.
 func TestSignalNames(t *testing.T) {
-	for name, sig := range map[string]syscall.Signal{SignalINT: syscall.SIGINT, SignalTERM: syscall.SIGTERM, SignalKILL: syscall.SIGKILL} {
+	for name, sig := range map[string]syscall.Signal{
+		SignalHUP: syscall.SIGHUP, SignalINT: syscall.SIGINT, SignalQUIT: syscall.SIGQUIT, SignalKILL: syscall.SIGKILL,
+		SignalUSR1: syscall.SIGUSR1, SignalUSR2: syscall.SIGUSR2, SignalPIPE: syscall.SIGPIPE, SignalALRM: syscall.SIGALRM,
+		SignalTERM: syscall.SIGTERM, SignalCONT: syscall.SIGCONT, SignalSTOP: syscall.SIGSTOP, SignalTSTP: syscall.SIGTSTP,
+		SignalWINCH: syscall.SIGWINCH,
+	} {
 		if got, ok := SignalOf(name); !ok || got != sig {
 			t.Errorf("SignalOf(%s) = %v, %v", name, got, ok)
 		}
@@ -54,10 +59,10 @@ func TestSignalNames(t *testing.T) {
 			t.Errorf("SignalName(%v) = %q, %v", sig, got, ok)
 		}
 	}
-	if _, ok := SignalOf("HUP"); ok {
-		t.Error("HUP has a signal")
+	if _, ok := SignalOf("SEGV"); ok {
+		t.Error("SEGV has a signal")
 	}
-	if _, ok := SignalName(syscall.SIGHUP); ok {
-		t.Error("SIGHUP has a name")
+	if _, ok := SignalName(syscall.SIGSEGV); ok {
+		t.Error("SIGSEGV has a name")
 	}
 }

@@ -24,6 +24,7 @@ type testServer struct {
 	dir   string
 	ws    agentworkspace.Workspace
 	procs *Processes // nil when ws is not a Starter
+	opts  []ServeOption
 }
 
 func newTestServer(t *testing.T) *testServer {
@@ -54,7 +55,7 @@ func (s *testServer) server(t *testing.T) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "workspace", Version: "test"}, &mcp.ServerOptions{
 		Capabilities: &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{}},
 	})
-	ServeFiles(srv, s.ws.FS())
+	ServeFiles(srv, s.ws.FS(), s.opts...)
 	if s.procs != nil {
 		if err := s.procs.Register(srv); err != nil {
 			t.Fatal(err)

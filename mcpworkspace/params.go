@@ -47,7 +47,22 @@ type (
 		mcp.ResultBase
 		wire.Exit
 	}
-	EmptyResult struct{ mcp.ResultBase }
+	EmptyResult   struct{ mcp.ResultBase }
+	ConnectParams struct {
+		mcp.ParamsBase
+		wire.ConnectArgs
+	}
+	ResizeParams struct {
+		mcp.ParamsBase
+		wire.ResizeArgs
+	}
+	InfoParams struct {
+		mcp.ParamsBase
+	}
+	InfoResult struct {
+		mcp.ResultBase
+		wire.Info
+	}
 
 	ServersParams struct {
 		mcp.ParamsBase
@@ -76,5 +91,9 @@ func RegisterClient(c *mcp.Client) error {
 		mcp.AddSendingCustomMethod[*SignalParams, *SignalResult](c, wire.MethodSignal),
 		mcp.AddSendingCustomMethod[*IDParams, *ExitResult](c, wire.MethodWait),
 		mcp.AddSendingCustomMethod[*IDParams, *ExitResult](c, wire.MethodClose),
+		mcp.AddSendingCustomMethod[*IDParams, *EmptyResult](c, wire.MethodCancel),
+		mcp.AddSendingCustomMethod[*InfoParams, *InfoResult](c, wire.MethodInfo),
+		mcp.AddSendingCustomMethod[*ResizeParams, *EmptyResult](c, wire.MethodResize),
+		mcp.AddSendingCustomMethod[*ConnectParams, *StartResult](c, wire.MethodConnect),
 	)
 }

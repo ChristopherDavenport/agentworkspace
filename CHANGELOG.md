@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.11 - 2026-11-01
 
 - Added: the wire corpus (#42). `testdata/wire/remote.json` and
   `mcpworkspace/testdata/wire/mcpworkspace.json` hold request and reply

@@ -8,7 +8,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -51,6 +53,9 @@ func RunStarter(t *testing.T, starters ...Starter) {
 		{"KillsWhatTheProcessLeft", path, false, startKillsWhatTheProcessLeft},
 		{"ClosingTheWorkspaceEndsItsProcesses", path, false, closingTheWorkspaceEndsItsProcesses},
 		{"Concurrently", path, false, startConcurrently},
+		{"FindsItsProgramOnItsOwnPath", []string{"A=1"}, false, findsItsProgramOnItsOwnPath},
+		{"EnvIsWhatItWasGiven", givenEnv, false, envIsWhatItWasGiven},
+		{"EndsWhatLeftItsGroup", path, false, startEndsWhatLeftItsGroup},
 	} {
 		t.Run(table.name, func(t *testing.T) {
 			if table.secret {
@@ -291,6 +296,85 @@ func startRefuses(t *testing.T, l agentworkspace.Starter) {
 			p.Close()
 		}
 		t.Errorf("a cancelled context: %v", err)
+	}
+}
+
+// Close ends what the process started that left its group, in a
+// session of its own: here a child that called setsid, ignores SIGINT
+// and SIGTERM, and beats into a file until it is killed.
+func startEndsWhatLeftItsGroup(t *testing.T, s agentworkspace.Starter, dir string) {
+	leavesItsGroup(t, s, dir)
+	p := start(t, context.Background(), s, agentworkspace.Command{Args: []string{"sh", "-c", "setsid sh beat.sh & echo started; wait"}})
+	if line, err := bufio.NewReader(p.Stdout()).ReadString('\n'); err != nil || line != "started\n" {
+		t.Fatalf("first line = %q, %v", line, err)
+	}
+	if !beating(t, dir) {
+		t.Fatal("the child that left the group never beat")
+	}
+	within(t, 15*time.Second, "closing it", func() { p.Close() })
+	if beating(t, dir) {
+		t.Error("the child that left the group outlived Close")
+	}
+}
+
+// givenEnv is an environment with a name that holds a credential, as a
+// program that left it in would give it.
+var givenEnv = []string{"A=1", "ANTHROPIC_API_KEY=sk-not-a-key", "PATH=" + os.Getenv("PATH")}
+
+// Env reports the environment the workspace was given, nothing added
+// and nothing removed, a credential included: keeping one out is the
+// program's, and the process sees it too.
+func envIsWhatItWasGiven(t *testing.T, s agentworkspace.Starter, _ string) {
+	if got := s.Env(); !slices.Equal(got, givenEnv) {
+		t.Errorf("Env = %q, want what it was given, %q", got, givenEnv)
+	}
+	out, err := s.Exec(context.Background(), agentworkspace.Command{Args: []string{"sh", "-c", "echo $ANTHROPIC_API_KEY"}})
+	if err != nil || string(out.Stdout) != "sk-not-a-key\n" {
+		t.Errorf("the process saw %q, %v", out.Stdout, err)
+	}
+}
+
+// A bare program name is looked up on the PATH of the environment the
+// process starts with, the workspace's and then the command's, as the
+// workspace's own processes see the file system, and never on this
+// process's: with no PATH it is not found, nor is it in a relative
+// entry. A name with a slash runs as it is, relative to Dir. The
+// workspace here has no PATH.
+func findsItsProgramOnItsOwnPath(t *testing.T, s agentworkspace.Starter, dir string) {
+	hello(t, dir)
+	ctx := context.Background()
+	for name, c := range map[string]agentworkspace.Command{
+		"no PATH":          {Args: []string{"sh", "-c", "echo ran"}},
+		"an empty PATH":    {Args: []string{"hello"}, Env: []string{"PATH="}},
+		"a relative entry": {Args: []string{"hello"}, Env: []string{"PATH=bin"}},
+	} {
+		if out, err := s.Exec(ctx, c); err == nil {
+			t.Errorf("Exec, %s: ran %v, %q", name, c.Args, out.Stdout)
+		}
+		if p, err := s.Start(ctx, c); err == nil {
+			p.Close()
+			t.Errorf("Start, %s: started %v", name, c.Args)
+		}
+	}
+	onPath := []string{"PATH=" + path.Join(s.Root(), "bin")}
+	for name, c := range map[string]agentworkspace.Command{
+		"on the command's PATH": {Args: []string{"hello"}, Env: onPath},
+		"a name with a slash":   {Args: []string{"./hello"}, Dir: "bin"},
+	} {
+		if out, err := s.Exec(ctx, c); err != nil || string(out.Stdout) != "hello\n" {
+			t.Errorf("Exec, %s: %v", name, err)
+		}
+		p, err := s.Start(ctx, c)
+		if err != nil {
+			t.Errorf("Start, %s: %v", name, err)
+			continue
+		}
+		within(t, 10*time.Second, "hello", func() {
+			if got, err := io.ReadAll(p.Stdout()); err != nil || string(got) != "hello\n" {
+				t.Errorf("Start, %s: %q, %v", name, got, err)
+			}
+		})
+		p.Close()
 	}
 }
 

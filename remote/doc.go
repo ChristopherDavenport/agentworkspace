@@ -108,8 +108,8 @@
 // not imply exec, nor exec it, and it needs no read: the info route
 // answers it too, with nothing but the root's last element (Root, and
 // the served descriptor's, are not the host's path to a principal
-// without read), the descriptor, the bounds and that servers are
-// offered. A principal holding servers
+// without read), the descriptor without its Host, the bounds and that
+// servers are offered. A principal holding servers
 // alone dials, lists and starts the offered servers and talks to them
 // over their pipes, and reads no file (its client's FS, WriteFile and
 // Remove are ErrForbidden), runs no command (no Exec, no Start, no

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"sync"
@@ -16,21 +17,302 @@ import (
 )
 
 // grace is how long a process's end waits at each step: for the
-// process to exit after its input closes, and again after SIGTERM,
-// before it is killed. workspacetest checks against the same value.
+// process to exit after its input closes, after SIGINT and after
+// SIGTERM, before it is killed. workspacetest checks against the same
+// value.
 const grace = lifetime.Grace
+
+// ladder is how Local ends a process and what it started, the one way
+// for Exec, a started process's context and timeout, Process.Close and
+// the workspace's Close: SIGINT, the interrupt a terminal's user sends,
+// which lets a program that buffers its output write it; then SIGTERM,
+// which a job a non-interactive shell put in the background does not
+// ignore, as it does SIGINT, and which the MCP stdio transport's
+// shutdown names; then SIGKILL. Each but the last is a grace apart.
+var ladder = [...]syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}
+
+// group is a process Local started as the leader of a process group of
+// its own, and what it started: the group's members, and the
+// descendants that left it (setsid, setpgid, a shell's job control)
+// that a walk of the process table finds. A descendant is found while
+// its parent lives: one whose parent exited before any signal was sent
+// has been given to another parent, and is not (see Reach).
+type group struct {
+	pgid  int
+	start uint64 // the leader's start time; 0 when unknown
+	// mu is held while a signal is sent and while reaped is set, so no
+	// signal goes to the group's ID once its leader is reaped.
+	mu     sync.Mutex
+	reaped bool
+	sys    procOS
+	found  map[int]uint64 // descendants found so far, in the group or out of it, by pid, with their start time
+}
+
+// newGroup is the group of the process pid, just started.
+func newGroup(pid int) *group {
+	start, _ := startOf(pid)
+	return &group{pgid: pid, start: start}
+}
+
+// procOS is how a group reads the process table and signals: the
+// system's when a func is nil. A test gives a group a table of its own
+// here, never by replacing what every group uses, since a group of an
+// earlier test may still be ending.
+type procOS struct {
+	table func() (map[int]procInfo, bool)
+	start func(int) (uint64, bool)
+	send  func(int, syscall.Signal) error
+}
+
+func (o procOS) procs() (map[int]procInfo, bool) {
+	if o.table != nil {
+		return o.table()
+	}
+	return processes()
+}
+
+func (o procOS) startOf(pid int) (uint64, bool) {
+	if o.start != nil {
+		return o.start(pid)
+	}
+	return startOf(pid)
+}
+
+func (o procOS) kill(pid int, sig syscall.Signal) error {
+	if o.send != nil {
+		return o.send(pid, sig)
+	}
+	return syscall.Kill(pid, sig)
+}
+
+// procInfo is what a walk needs of a process.
+type procInfo struct {
+	ppid, pgrp int
+	start      uint64 // since boot: a pid reused is another start
+	zombie     bool
+}
+
+// signal sends sig to the group and to every descendant that left it,
+// while the group's leader is not yet reaped, and is os.ErrProcessDone
+// after.
+func (g *group) signal(sig syscall.Signal) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.reaped {
+		return os.ErrProcessDone
+	}
+	if sig == syscall.SIGKILL {
+		g.kill(true)
+		return nil
+	}
+	g.descend(sig, true)
+	return g.sys.kill(-g.pgid, sig)
+}
+
+// reap records that the leader has been waited for, killing what is
+// left of the group, and the descendants that left it, first when kill
+// is set. Here, as the leader is reaped, the group's ID cannot yet name
+// another group; later it could.
+func (g *group) reap(kill bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if kill {
+		g.kill(false)
+	}
+	g.reaped = true
+}
+
+// kill kills the group and every descendant out of it, stopping them
+// first and walking again until a walk finds no more, so that none
+// forks a child the kill would miss: a child whose parent is killed
+// before it is found is given to another parent, and found no more.
+//
+// A walk reads the table before it signals, so a descendant that exits
+// in between can have its ID taken by another process, which the stop
+// then reaches. Once the stops are sent, each process stopped by its
+// own ID or its own group's is read again, and one whose start time
+// no longer matches is continued: it is not a descendant, and the
+// kill's walk, which reads start times again, passes it by.
+func (g *group) kill(leader bool) {
+	g.sys.kill(-g.pgid, syscall.SIGSTOP)
+	stopped := map[int]uint64{}
+	for range 8 {
+		added, sent := g.descend(syscall.SIGSTOP, leader)
+		maps.Copy(stopped, sent)
+		if added == 0 {
+			break
+		}
+	}
+	for target, start := range stopped {
+		pid := target
+		if pid < 0 {
+			pid = -pid
+		}
+		if now, ok := g.sys.startOf(pid); ok && now != start {
+			g.sys.kill(target, syscall.SIGCONT)
+		}
+	}
+	g.descend(syscall.SIGKILL, leader)
+	g.sys.kill(-g.pgid, syscall.SIGKILL)
+	// A kill is sent, not done: what it reached dies when it next runs,
+	// and one inside a system call (a rename, say) finishes that first,
+	// so the end could return while the workspace is still being
+	// changed. And a descendant a walk missed would not be reached at
+	// all. So the end waits, for a bounded while, until a walk finds
+	// nothing of the group's that is not yet a zombie, killing again
+	// what it finds.
+	for range 20 {
+		if running, ok := g.running(leader); ok && !running {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+		g.descend(syscall.SIGKILL, leader)
+		g.sys.kill(-g.pgid, syscall.SIGKILL)
+	}
+}
+
+// running reports whether a walk finds anything of the group's still
+// running: a member, or a descendant found, that is not yet a zombie.
+// ok is false when the table could not be read.
+func (g *group) running(leader bool) (running, ok bool) {
+	ps, ok := g.sys.procs()
+	if !ok {
+		return false, false
+	}
+	for pid, p := range ps {
+		if pid == g.pgid && !leader {
+			continue
+		}
+		if start, ok := g.found[pid]; (p.pgrp == g.pgid || ok && start == p.start) && !p.zombie {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// descend sends sig to every descendant of the leader that left its
+// group: a process whose parent is the leader (while leader says it is
+// not reaped), a member of the group, a descendant found before, or one
+// of these, and so on down. It remembers every descendant it finds, the
+// group's members among them, with its start time, so a later walk
+// finds one that left the group after this one, though its parent has
+// exited, and does not take a reused ID for it. A descendant that leads
+// its own group, as one that called setsid or setpgid does, is sent sig
+// by that group, so what it starts there is too; any other alone. It
+// never signals this process or its group. It returns how many
+// descendants it found that earlier walks had not, and what it
+// signalled: each ID, or a group's as its negative, with the start
+// time the walk read for that process or the group's leader.
+//
+// A descendant that is not stopped can exit between the walk's read of
+// /proc and the signal, and its ID be given to another process in that
+// moment; the kill stops every descendant first, so it does not race.
+func (g *group) descend(sig syscall.Signal, leader bool) (int, map[int]uint64) {
+	ps, ok := g.sys.procs()
+	if !ok {
+		return 0, nil
+	}
+	in := map[int]bool{}
+	// The leader may have been reaped by now though leader says not, as
+	// Exec's is before its output is read: its ID is trusted only while
+	// its start time says it is still the leader's.
+	if p, ok := ps[g.pgid]; leader && ok && (g.start == 0 || p.start == g.start) {
+		in[g.pgid] = true
+	}
+	for pid, p := range ps {
+		if start, ok := g.found[pid]; p.pgrp == g.pgid || ok && start == p.start {
+			in[pid] = true
+		}
+	}
+	for grew := true; grew; {
+		grew = false
+		for pid, p := range ps {
+			if !in[pid] && in[p.ppid] {
+				in[pid], grew = true, true
+			}
+		}
+	}
+	self, selfGroup := os.Getpid(), syscall.Getpgrp()
+	found := make(map[int]uint64, len(g.found))
+	added := 0
+	signalled := map[int]uint64{}
+	for pid := range in {
+		p, ok := ps[pid]
+		if !ok || pid == g.pgid || pid == self {
+			continue
+		}
+		// A member of the group is remembered too: one that leaves
+		// it later, and whose parent then exits, is found by this.
+		if start, ok := g.found[pid]; !ok || start != p.start {
+			added++
+		}
+		found[pid] = p.start
+		if p.zombie || p.pgrp == g.pgid {
+			continue // the group's own are sent sig by the group
+		}
+		target, start := pid, p.start
+		if in[p.pgrp] && p.pgrp != selfGroup {
+			target, start = -p.pgrp, ps[p.pgrp].start
+		}
+		if _, ok := signalled[target]; !ok {
+			signalled[target] = start
+			g.sys.kill(target, sig)
+		}
+	}
+	// One found before and not read now (gone, or its entry not
+	// readable this once) is kept: forgetting it would lose it for
+	// good once it has left the group and its parent has exited. A
+	// later walk seeds it only while its start time matches.
+	for pid, start := range g.found {
+		if _, read := ps[pid]; !read {
+			found[pid] = start
+		}
+	}
+	g.found = found
+	return added, signalled
+}
+
+// end climbs the ladder until exited, given how long to wait, reports
+// the leader gone; the last step waits for nothing.
+func (g *group) end(exited func(time.Duration) bool) {
+	for i, sig := range ladder {
+		g.signal(sig)
+		if i == len(ladder)-1 || exited(grace) {
+			return
+		}
+	}
+}
+
+// closedWithin reports whether ch is closed within d.
+func closedWithin(ch <-chan struct{}, d time.Duration) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ch:
+		return true
+	case <-t.C:
+		return false
+	}
+}
 
 // Start runs a command in its own process group, with pipes for its
 // standard input and output, and returns at once. Its standard error
 // goes to Command.Stream, or nowhere. The process, and everything it
 // started, is ended by Process.Close, by the end of ctx, by
-// Command.Timeout, or by the workspace's Close; when it exits by
-// itself, anything left in its group is killed.
+// Command.Timeout, or by the workspace's Close, each with Local's
+// ladder (SIGINT, SIGTERM, SIGKILL, a grace apart), which Close
+// begins by closing the process's input; when it exits by itself,
+// anything left in its group is killed.
 func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 	if c.Stdin != nil {
 		return nil, errors.New("agentworkspace: Start takes no Command.Stdin; write to Process.Stdin")
 	}
-	dir, env, err := l.prepare(c)
+	dir, env, prog, err := l.prepare(c)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +353,8 @@ func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 			return nil, err
 		}
 	}
-	cmd := exec.Command(c.Args[0], c.Args[1:]...)
+	cmd := exec.Command(prog, c.Args[1:]...)
+	cmd.Args[0] = c.Args[0]
 	cmd.Dir, cmd.Env = dir, env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin, cmd.Stdout = inR, outW
@@ -103,9 +386,10 @@ func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 	p := &localProcess{
 		owner:   l,
 		cmd:     cmd,
-		pgid:    cmd.Process.Pid,
+		group:   newGroup(cmd.Process.Pid),
 		stdin:   inW,
 		stdout:  outR,
+		reaped:  make(chan struct{}),
 		done:    make(chan struct{}),
 		closing: make(chan struct{}),
 		ended:   make(chan struct{}),
@@ -132,20 +416,17 @@ func (l *Local) Start(ctx context.Context, c Command) (Process, error) {
 type localProcess struct {
 	owner  *Local
 	cmd    *exec.Cmd
-	pgid   int
+	group  *group
 	stdin  *os.File // the write end
 	stdout *os.File // the read end
 
-	// reap is held across the reaping's group kill and while a signal is
-	// sent, so no signal goes to the group's ID after reaped is set.
-	reap   sync.Mutex
-	reaped bool
-
 	mu     sync.Mutex
-	ending error // the context's error, once the context began ending it
+	exited bool  // the process has been reaped
+	ending error // the context's error, once the context began ending it before the process exited
 	status int
 	err    error
 
+	reaped    chan struct{} // closed once the process has exited and been reaped
 	done      chan struct{} // closed once the process has exited and status and err are set
 	closing   chan struct{} // closed by Close
 	closeOnce sync.Once
@@ -165,18 +446,7 @@ func (p *localProcess) Signal(sig os.Signal) error {
 	if !ok {
 		return fmt.Errorf("agentworkspace: cannot send %v", sig)
 	}
-	return p.signal(s)
-}
-
-// signal sends sig to the process group while its leader is not yet
-// reaped, and is os.ErrProcessDone after.
-func (p *localProcess) signal(sig syscall.Signal) error {
-	p.reap.Lock()
-	defer p.reap.Unlock()
-	if p.reaped {
-		return os.ErrProcessDone
-	}
-	return syscall.Kill(-p.pgid, sig)
+	return p.group.signal(s)
 }
 
 func (p *localProcess) Close() error {
@@ -195,12 +465,12 @@ func (p *localProcess) Close() error {
 // until copied is closed.
 func (p *localProcess) wait(errR *os.File, copied chan struct{}) {
 	err := p.cmd.Wait()
-	// Anything the process started goes with it. Here, as it is reaped,
-	// the group's ID cannot yet name another group; later it could.
-	p.reap.Lock()
-	syscall.Kill(-p.pgid, syscall.SIGKILL)
-	p.reaped = true
-	p.reap.Unlock()
+	p.mu.Lock()
+	p.exited = true
+	p.mu.Unlock()
+	close(p.reaped)
+	// Anything the process started goes with it.
+	p.group.reap(true)
 	if errR != nil {
 		// What the group wrote is read to the end, unless something
 		// outside the group holds the pipe open.
@@ -240,9 +510,7 @@ func (p *localProcess) watch(ctx context.Context, cancel context.CancelFunc) {
 	select {
 	case <-ctx.Done():
 		p.mu.Lock()
-		select {
-		case <-p.done:
-		default:
+		if !p.exited {
 			p.ending = ctx.Err()
 		}
 		p.mu.Unlock()
@@ -254,37 +522,17 @@ func (p *localProcess) watch(ctx context.Context, cancel context.CancelFunc) {
 
 // end ends the process group, unless the process has exited, when
 // wait already has: politely, by closing the process's input and
-// waiting a moment, when Close asked; then with SIGTERM, then SIGKILL.
-// Signals go to the group only while its leader has not been reaped,
-// so they cannot reach a later group that reused its ID.
+// waiting a moment, when Close asked; then with the ladder.
 func (p *localProcess) end(polite bool) {
 	if polite {
 		p.stdin.Close()
-		if p.exited(grace) {
+		if p.exitsWithin(grace) {
 			return
 		}
 	}
-	p.signal(syscall.SIGTERM)
-	if p.exited(grace) {
-		return
-	}
-	p.signal(syscall.SIGKILL)
+	p.group.end(p.exitsWithin)
 	<-p.done
 }
 
-// exited reports whether the process exits within d.
-func (p *localProcess) exited(d time.Duration) bool {
-	select {
-	case <-p.done:
-		return true
-	default:
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-p.done:
-		return true
-	case <-t.C:
-		return false
-	}
-}
+// exitsWithin reports whether the process exits within d.
+func (p *localProcess) exitsWithin(d time.Duration) bool { return closedWithin(p.reaped, d) }

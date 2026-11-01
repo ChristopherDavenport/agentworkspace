@@ -7,6 +7,81 @@ versions may break the API.
 
 ## Unreleased
 
+- Added: `Descriptor.Host` and `Descriptor.Instance`, agentsession
+  0.14's `workspace.host` and `workspace.instance` (#3). `Local` sets
+  `Host` to the system's host name, or to `WithHost`'s, a new
+  `LocalOption` of `NewLocal` for machines that share one (it refuses
+  an empty name), or, where the system gives none, to a stable name
+  hashed from the machine ID; it leaves `Ref` empty. `remote` carries both in the served descriptor (`Served`),
+  without the host to a principal lacking `read`. `Descriptor.Ref`'s
+  doc no longer lists a host or an instance among what it holds, and
+  `Workspace`'s says its methods are safe for concurrent use. RFC 0001
+  §12 states which kind sets which, and `workspacetest.Run` checks the
+  members and concurrent use.
+
+- Fixed: on Linux, ending a process `Local` started (`Process.Close`,
+  the context's end, `Command.Timeout`, the workspace's `Close`,
+  `Process.Signal`, and an `Exec` its context or timeout ends) now
+  reaches the descendants that left its process group, by `setsid`,
+  `setpgid` or a shell's job control, which outlived it before (#32).
+  Before each signal `Local` walks `/proc` by parent links, sends a
+  descendant that leads a group of its own the signal by that group,
+  remembers every descendant it finds (the group's members too, so one
+  that leaves the group later is still found, and one a walk could not
+  read is kept) by its start time, stops them all before it kills them,
+  and returns only once a walk finds nothing it killed still running,
+  killing again what it finds, for up to 200 ms. A descendant whose parent
+  exited before any signal was sent is still not found. On macOS, or
+  where `/proc` is not this process's, `Local` signals the group alone.
+- Added: `Reach`, `ReachOf` and `(*Local).Reach`, how far a starter's
+  end of a process reaches (`ReachGroup`, `ReachDescendants`,
+  `ReachAll`): `Local` is `ReachDescendants` on Linux while `/proc` is
+  its own, asked at each call, and `ReachGroup` otherwise. RFC 0001 §8 names the capability, and
+  `workspacetest.Run` and `RunStarter` check a `setsid` child is gone
+  after a timeout and a `Close`, skipping a backend whose reach is
+  `ReachGroup`.
+
+- Added: `Output.Interrupted`. When `Exec`'s context ends while the
+  command runs, `Local.Exec` now returns the output collected so far,
+  with `ExitCode` -1 and `Interrupted`, beside `ctx.Err()`, where it
+  returned nil (#5). A context that ends after the command exited, while
+  a child it left holds its output open, leaves its exit status, for
+  `Exec` and for a started process's `Wait` alike. A `remote` client returns the same `Output`,
+  without the output kept: the wire half of #5 (an exec key and a
+  cancel route, so a hang-up keeps the output) is to come. RFC 0001 §6
+  states the rule, and `workspacetest.Run` checks it.
+- Changed: one ladder ends a process, however it is ended (#5):
+  SIGINT, then SIGTERM two seconds later, then SIGKILL two seconds
+  after that, to the process's group. `Process.Close` still closes the
+  process's input and waits two seconds first. Before, `Local.Exec`
+  sent SIGKILL at once on its context's end or its timeout, and a
+  started process got SIGTERM then SIGKILL, so a process that ignores
+  SIGINT and SIGTERM now takes two seconds longer to end. RFC 0001 §8
+  states the ladder and why.
+
+- Fixed (documentation): `Workspace.Env`'s doc comment said the
+  environment had "the provider's key and other credentials already
+  removed"; no backend removes anything (#37). It now says a workspace
+  reports what it was given, nothing added or removed, and that keeping
+  credentials out is the program's. RFC 0001 §4 states the rule, and
+  `workspacetest.RunStarter` checks that `Env` is what the workspace
+  was given.
+
+- Changed: `Local` builds a process's environment itself, the
+  workspace's with `Command.Env` over it name by name, each name once
+  with the last value given it, rather than leave a repeated name to
+  `os/exec` (#41). What a process sees is unchanged; the rule is now
+  the contract's (RFC 0001 §4), and `workspacetest.Run` checks it.
+
+- Fixed: `Local.Exec` and `Local.Start` find a bare program name on the
+  `PATH` of the environment the process starts with (the workspace's,
+  then the command's), as execvp(3) does, and no longer on the `PATH`
+  of the program holding the workspace (#4). A relative `PATH` entry,
+  the empty one included, is skipped, and with no `PATH` a bare name is
+  not found, so a workspace built with an environment that has no
+  `PATH` now runs only programs named with a slash. RFC 0001 §5 states
+  the rule, and `workspacetest.Run` and `RunStarter` check it.
+
 - Added (documentation): RFC 0001, the workspace contract
   (`docs/rfcs/0001-workspace-contract.md`), draft 0.1. It states what
   the module already promises (names and confinement, files, the

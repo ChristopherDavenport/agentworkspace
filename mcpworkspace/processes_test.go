@@ -459,7 +459,8 @@ func TestTheProcessMethodsAreBounded(t *testing.T) {
 // errors.ErrUnsupported, and nothing runs.
 func TestAWorkspaceThatCannotStartRefuses(t *testing.T) {
 	dir := t.TempDir()
-	ws, err := agentworkspace.NewLocal(dir, nil)
+	// On a PATH, so it is the refusal that keeps touch from running.
+	ws, err := agentworkspace.NewLocal(dir, []string{"PATH=" + os.Getenv("PATH")})
 	if err != nil {
 		t.Fatal(err)
 	}

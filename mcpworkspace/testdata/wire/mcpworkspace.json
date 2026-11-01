@@ -3,6 +3,7 @@
     "The exchanges of RFC 0001's mcpworkspace wire, in order, each a JSON-RPC request sent with the next id after an MCP initialization, and its result or error.",
     "The served workspace: inside.txt (ok), sub/a.txt (a), alias.txt -> inside.txt, linkout -> ../outside/secret.txt; a file k/<kind>, and a start of kind:<kind>, refused with that kind (other: with none), its served text naming /srv/hidden/<kind>; two servers offered, echo and holder (given a secret), both cat.",
     "A params' \"${port}\" is a port on the loopback that answers what it is sent, upper-cased, once all of it is sent.",
+    "A read asks for less than all the process wrote, so that whether it reaches the end does not depend on timing.",
     "A resource's text is JSON, shown with its keys sorted; ${root} stands for the served root, and * for what differs between runs.",
     "mcpworkspace/corpus_test.go replays it against the reference server, and maps its refusals back through the reference client."
   ],
@@ -462,16 +463,52 @@
       }
     },
     {
-      "name": "start a sleeper",
+      "name": "start a command that writes to both outputs, then sleeps",
       "method": "agentworkspace/process.start",
       "params": {
         "args": [
-          "sleep",
-          "30"
-        ]
+          "sh",
+          "-c",
+          "printf 'before\\n.'; printf 'err\\n.' >&2; touch ready; exec sleep 30"
+        ],
+        "stderr": true
       },
       "result": {
         "id": "p2"
+      }
+    },
+    {
+      "name": "start one that waits until it has written",
+      "method": "agentworkspace/process.start",
+      "params": {
+        "args": [
+          "sh",
+          "-c",
+          "while [ ! -e ready ]; do sleep 0.01; done"
+        ]
+      },
+      "result": {
+        "id": "p3"
+      }
+    },
+    {
+      "name": "wait for that one",
+      "method": "agentworkspace/process.wait",
+      "params": {
+        "id": "p3"
+      },
+      "result": {
+        "status": 0
+      }
+    },
+    {
+      "name": "close it",
+      "method": "agentworkspace/process.close",
+      "params": {
+        "id": "p3"
+      },
+      "result": {
+        "status": 0
       }
     },
     {
@@ -509,6 +546,30 @@
       }
     },
     {
+      "name": "what it wrote before the cancel is kept: its output",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p2",
+        "fd": 1,
+        "max": 7
+      },
+      "result": {
+        "data": "YmVmb3JlCg=="
+      }
+    },
+    {
+      "name": "and its standard error",
+      "method": "agentworkspace/process.read",
+      "params": {
+        "id": "p2",
+        "fd": 2,
+        "max": 4
+      },
+      "result": {
+        "data": "ZXJyCg=="
+      }
+    },
+    {
       "name": "its close",
       "method": "agentworkspace/process.close",
       "params": {
@@ -516,17 +577,18 @@
       },
       "result": {
         "ended": "canceled",
-        "status": -1
+        "status": -1,
+        "stderr": "Lg=="
       }
     },
     {
-      "name": "start on a terminal of 24 rows and 80 columns",
+      "name": "start on a terminal of 24 rows and 80 columns, writing to standard error",
       "method": "agentworkspace/process.start",
       "params": {
         "args": [
           "sh",
           "-c",
-          "stty size"
+          "stty size >&2; printf ."
         ],
         "terminal": {
           "rows": 24,
@@ -534,36 +596,36 @@
         }
       },
       "result": {
-        "id": "p3"
+        "id": "p4"
       }
     },
     {
       "name": "its wait",
       "method": "agentworkspace/process.wait",
       "params": {
-        "id": "p3"
+        "id": "p4"
       },
       "result": {
         "status": 0
       }
     },
     {
-      "name": "five bytes of its output: the terminal's",
+      "name": "its output: the terminal's, standard error merged, the line ending \\r\\n",
       "method": "agentworkspace/process.read",
       "params": {
-        "id": "p3",
+        "id": "p4",
         "fd": 1,
-        "max": 5
+        "max": 7
       },
       "result": {
-        "data": "MjQgODA="
+        "data": "MjQgODANCg=="
       }
     },
     {
       "name": "its close",
       "method": "agentworkspace/process.close",
       "params": {
-        "id": "p3"
+        "id": "p4"
       },
       "result": {
         "status": 0
@@ -576,14 +638,14 @@
         "port": "${port}"
       },
       "result": {
-        "id": "p4"
+        "id": "p5"
       }
     },
     {
       "name": "send to it",
       "method": "agentworkspace/process.write",
       "params": {
-        "id": "p4",
+        "id": "p5",
         "data": "aGVsbG8="
       },
       "result": {}
@@ -592,7 +654,7 @@
       "name": "the half-close",
       "method": "agentworkspace/process.closeStdin",
       "params": {
-        "id": "p4"
+        "id": "p5"
       },
       "result": {}
     },
@@ -600,7 +662,7 @@
       "name": "what it sends back: four bytes, at most max",
       "method": "agentworkspace/process.read",
       "params": {
-        "id": "p4",
+        "id": "p5",
         "fd": 1,
         "max": 4
       },
@@ -612,7 +674,7 @@
       "name": "close the stream",
       "method": "agentworkspace/process.close",
       "params": {
-        "id": "p4"
+        "id": "p5"
       },
       "result": {
         "status": 0
@@ -625,14 +687,14 @@
         "name": "echo"
       },
       "result": {
-        "id": "p5"
+        "id": "p6"
       }
     },
     {
       "name": "its input",
       "method": "agentworkspace/process.write",
       "params": {
-        "id": "p5",
+        "id": "p6",
         "data": "cGluZwo="
       },
       "result": {}
@@ -641,7 +703,7 @@
       "name": "its input's end",
       "method": "agentworkspace/process.closeStdin",
       "params": {
-        "id": "p5"
+        "id": "p6"
       },
       "result": {}
     },
@@ -649,7 +711,7 @@
       "name": "its wait",
       "method": "agentworkspace/process.wait",
       "params": {
-        "id": "p5"
+        "id": "p6"
       },
       "result": {
         "status": 0
@@ -659,7 +721,7 @@
       "name": "its output: four bytes, at most max",
       "method": "agentworkspace/process.read",
       "params": {
-        "id": "p5",
+        "id": "p6",
         "fd": 1,
         "max": 4
       },
@@ -671,7 +733,7 @@
       "name": "its close",
       "method": "agentworkspace/process.close",
       "params": {
-        "id": "p5"
+        "id": "p6"
       },
       "result": {
         "status": 0

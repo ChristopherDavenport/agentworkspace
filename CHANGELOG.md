@@ -11,8 +11,10 @@ versions may break the API.
   `mcpworkspace/testdata/wire/mcpworkspace.json` hold request and reply
   exchanges for each wire, over a layout each file describes: the
   files, writes, exec (a keyed one cancelled among them, with
-  `interrupted`), sessions, processes (pipes, wait, signal, cancel,
-  close), a terminal, a connect, the servers (listed with `secrets`,
+  `interrupted` and the output it wrote before the cancel), sessions,
+  processes (pipes, wait, signal, a cancel that keeps the output so
+  far, close), a terminal (its standard error merged, its lines ending
+  `\r\n`), a connect, the servers (listed with `secrets`,
   started, not offered), and every error kind and a refusal of none;
   not yet remote's stderr route, a successful resize or a lease's
   lapse, for a server or client in another

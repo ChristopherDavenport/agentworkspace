@@ -550,15 +550,16 @@
       }
     },
     {
-      "name": "a keyed exec, read in the background: its reply is the output so far, interrupted",
+      "name": "a keyed exec, read in the background: its reply is the output it wrote before the cancel, interrupted",
       "token": "all",
       "method": "POST",
       "path": "/v1/exec",
       "type": "application/json",
       "body": {
         "args": [
-          "sleep",
-          "30"
+          "sh",
+          "-c",
+          "echo before; echo err >&2; touch ready; exec sleep 30"
         ],
         "key": "corpusexeckeyaaa1"
       },
@@ -568,11 +569,36 @@
         {
           "output": {
             "exitCode": -1,
-            "interrupted": true
+            "interrupted": true,
+            "stderr": "ZXJyCg==",
+            "stdout": "YmVmb3JlCg=="
           }
         }
       ],
       "background": true
+    },
+    {
+      "name": "an exec that waits until the keyed one has written its output",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sh",
+          "-c",
+          "while [ ! -e ready ]; do sleep 0.01; done"
+        ]
+      },
+      "status": 200,
+      "form": "ndjson",
+      "reply": [
+        {
+          "output": {
+            "exitCode": 0
+          }
+        }
+      ]
     },
     {
       "name": "cancel it by its key",
@@ -709,15 +735,16 @@
       }
     },
     {
-      "name": "start a sleeper",
+      "name": "start a sleeper that first writes a line",
       "token": "all",
       "method": "POST",
       "path": "/v1/sessions/${session}/processes",
       "type": "application/json",
       "body": {
         "args": [
-          "sleep",
-          "30"
+          "sh",
+          "-c",
+          "echo before; touch ready2; exec sleep 30"
         ],
         "key": "corpussleepaaaa01"
       },
@@ -787,6 +814,29 @@
       }
     },
     {
+      "name": "an exec that waits until the sleeper has written its line",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sh",
+          "-c",
+          "while [ ! -e ready2 ]; do sleep 0.01; done"
+        ]
+      },
+      "status": 200,
+      "form": "ndjson",
+      "reply": [
+        {
+          "output": {
+            "exitCode": 0
+          }
+        }
+      ]
+    },
+    {
       "name": "a cancel: ended as its context's end ends it",
       "token": "all",
       "method": "POST",
@@ -807,6 +857,15 @@
         "ended": "canceled",
         "status": -1
       }
+    },
+    {
+      "name": "what it wrote before the cancel is kept: its output, to its end",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/sessions/${session}/processes/corpussleepaaaa01/stdout",
+      "status": 200,
+      "form": "raw",
+      "reply": "before\n"
     },
     {
       "name": "its close",

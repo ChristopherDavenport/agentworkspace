@@ -133,7 +133,12 @@ keeps its rule; one about Local alone stays in the root's tests.
   and everything it started, with one ladder (SIGINT, SIGTERM,
   SIGKILL), and a backend states how far that reaches (`Reach`).
   What an Exec's command left running when it exited ends at the
-  workspace's `Close` at the latest, by the same ladder.
+  workspace's `Close` at the latest, by the same ladder, wherever the
+  backend can still tell the group once the command has exited; one
+  that cannot (Local without a process table: macOS, a `/proc` not its
+  own) must not signal it, leaves it running, and says so (RFC 0001
+  §8), and the tables skip the case for a backend whose reach is the
+  group alone.
 - `Start` is optional (`Starter`), so a workspace that only stores
   files is still a `Workspace`.
 - So is offering MCP servers (`ServerProvider`): a server it starts

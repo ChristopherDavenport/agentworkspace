@@ -52,9 +52,10 @@ type group struct {
 	// (endLeft). The group's ID is then trusted only while a process
 	// remembered as a member still holds it (held).
 	left   bool
-	misses int // reads of the table in a row that failed, for Local's watch
+	misses int // Local's looks in a row that found nothing left running, or could not read the table
 	sys    procOS
 	found  map[int]uint64 // descendants found so far, in the group or out of it, by pid, with their start time
+	missed map[int]int    // how many good reads of the table in a row missed each of found
 }
 
 // newGroup is the group of the process pid, just started.
@@ -169,31 +170,30 @@ func (g *group) toGroup(sig syscall.Signal) {
 }
 
 // look reports whether anything the left group's command left still
-// runs: a process remembered, by its start time, or a member of the
-// group while its ID is held. While it is held, a walk first remembers
-// what the group has now, so a member started since the reap is found
-// though the processes that were found then exit. ok is false when the
-// table could not be read; nothing is then said to run.
-func (g *group) look() (running, ok bool) {
+// runs, as ps, one read of the table that read reports ok, shows it: a
+// process remembered, by its start time, or a member of the group while
+// its ID is held. While it is held, a walk first remembers what the
+// group has now, so a member started since the reap is found though the
+// processes that were found then exit. Local's watch gives every group
+// it keeps the same read. Without a read nothing is said to run.
+func (g *group) look(ps map[int]procInfo, read bool) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.left {
-		return false, true
-	}
-	ps, ok := g.sys.procs()
-	if !ok {
-		return false, false
+	if !g.left || !read {
+		return false
 	}
 	if g.held(ps, true) {
-		g.descend(0, false)
+		g.descendIn(ps, 0, false)
 	}
-	return g.running(false)
+	return g.runningIn(ps, false)
 }
 
-// leftRunning is look's running.
+// leftRunning is look's answer on a read of the table of its own.
 func (g *group) leftRunning() bool {
-	running, _ := g.look()
-	return running
+	g.mu.Lock()
+	left := g.left
+	g.mu.Unlock()
+	return left && g.look(g.sys.procs())
 }
 
 // endLeft ends what the left group's command left running, by the
@@ -278,16 +278,21 @@ func (g *group) running(leader bool) (running, ok bool) {
 	if !ok {
 		return false, false
 	}
+	return g.runningIn(ps, leader), true
+}
+
+// runningIn is running on ps, a read of the table.
+func (g *group) runningIn(ps map[int]procInfo, leader bool) bool {
 	byGroup := g.held(ps, true)
 	for pid, p := range ps {
 		if pid == g.pgid && !leader {
 			continue
 		}
 		if start, ok := g.found[pid]; (byGroup && p.pgrp == g.pgid || ok && start == p.start) && !p.zombie {
-			return true, true
+			return true
 		}
 	}
-	return false, true
+	return false
 }
 
 // descend sends sig to every descendant of the leader that left its
@@ -312,6 +317,11 @@ func (g *group) descend(sig syscall.Signal, leader bool) (int, map[int]uint64) {
 	if !ok {
 		return 0, nil
 	}
+	return g.descendIn(ps, sig, leader)
+}
+
+// descendIn is descend on ps, a read of the table.
+func (g *group) descendIn(ps map[int]procInfo, sig syscall.Signal, leader bool) (int, map[int]uint64) {
 	in := map[int]bool{}
 	// The leader may have been reaped by now though leader says not, as
 	// Exec's is before its output is read: its ID is trusted only while
@@ -360,16 +370,20 @@ func (g *group) descend(sig syscall.Signal, leader bool) (int, map[int]uint64) {
 			g.sys.kill(target, sig)
 		}
 	}
-	// One found before and not read now (gone, or its entry not
-	// readable this once) is kept: forgetting it would lose it for
-	// good once it has left the group and its parent has exited. A
-	// later walk seeds it only while its start time matches.
+	// One found before and not read now (its entry not readable this
+	// once, or gone) is kept for one more read: forgetting it would lose
+	// it for good once it has left the group and its parent has exited.
+	// One that the next read misses too is taken for gone, so a leftover
+	// that keeps starting children does not grow found without bound. A
+	// later walk seeds one kept only while its start time matches.
+	missed := map[int]int{}
 	for pid, start := range g.found {
-		if _, read := ps[pid]; !read {
+		if _, read := ps[pid]; !read && g.missed[pid] == 0 {
 			found[pid] = start
+			missed[pid] = 1
 		}
 	}
-	g.found = found
+	g.found, g.missed = found, missed
 	return added, signalled
 }
 

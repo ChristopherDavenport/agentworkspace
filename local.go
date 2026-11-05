@@ -43,6 +43,7 @@ type Local struct {
 	conns  map[*localConn]struct{}    // connected and not yet closed
 	left   []*group                   // Execs' groups whose command exited by itself and left something running
 	watch  bool                       // watchLeft runs
+	sys    procOS                     // the process table watchLeft reads: the system's, but in a test
 }
 
 var (
@@ -206,39 +207,54 @@ func (l *Local) keepLeft(g *group) {
 // leftLook is how often watchLeft looks at what Execs left.
 const leftLook = 250 * time.Millisecond
 
-// watchLeft looks at each kept group every leftLook, so a member one
+// watchLeft looks at the kept groups every leftLook, so a member one
 // starts is remembered while the group's ID is still its own, and lets
-// go of a group with nothing left running, or whose table could not be
-// read twice in a row. It ends at Close, or once no group is kept.
+// go of a group that two looks in a row found nothing left running in,
+// or could not read the table for. It ends at Close, or as soon as no
+// group is kept; keepLeft starts it again. A Local never closed whose
+// Exec left something that never exits keeps it, and the Local, alive.
 func (l *Local) watchLeft() {
 	t := time.NewTicker(leftLook)
 	defer t.Stop()
 	for range t.C {
-		l.mu.Lock()
-		if l.closed || len(l.left) == 0 {
-			l.watch = false
-			l.mu.Unlock()
+		if !l.lookLeft() {
 			return
 		}
-		kept := slices.Clone(l.left)
-		l.mu.Unlock()
-		var gone []*group
-		for _, g := range kept {
-			running, ok := g.look()
-			switch {
-			case ok:
-				g.misses = 0
-			default:
-				g.misses++
-			}
-			if ok && !running || g.misses >= 2 {
-				gone = append(gone, g)
-			}
-		}
-		l.mu.Lock()
-		l.left = slices.DeleteFunc(l.left, func(g *group) bool { return slices.Contains(gone, g) })
-		l.mu.Unlock()
 	}
+}
+
+// lookLeft is one of watchLeft's looks: one read of the process table,
+// which every kept group is looked at on, since a read walks every
+// process on the host. A group is let go after two looks in a row, not
+// one, so a member whose entry a single read could not open (out of
+// file descriptors, say) does not drop its group. It reports whether
+// any group is still kept; watch is false once none is.
+func (l *Local) lookLeft() bool {
+	l.mu.Lock()
+	if l.closed || len(l.left) == 0 {
+		l.watch = false
+		l.mu.Unlock()
+		return false
+	}
+	kept := slices.Clone(l.left)
+	l.mu.Unlock()
+	ps, read := l.sys.procs()
+	var gone []*group
+	for _, g := range kept {
+		if g.look(ps, read) {
+			g.misses = 0
+		} else if g.misses++; g.misses >= 2 {
+			gone = append(gone, g)
+		}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.left = slices.DeleteFunc(l.left, func(g *group) bool { return slices.Contains(gone, g) })
+	if l.closed || len(l.left) == 0 {
+		l.watch = false
+		return false
+	}
+	return true
 }
 
 // FS reads through the root, opening without blocking.
@@ -300,7 +316,11 @@ func (l *Local) Remove(_ context.Context, name string) error {
 // seconds past the command's exit for output its children still hold
 // open, and when they hold it past that, returns the output so far and
 // the command's status beside ErrCutShort. What a command that exited by
-// itself left running is ended by the workspace's Close at the latest.
+// itself left running is ended by the workspace's Close at the latest
+// where Local reads a process table (Linux, while /proc is its own);
+// without one it outlives Close, as Close says. A Local that ran an Exec
+// is to be closed: until then it watches what the Exec left, while that
+// runs.
 func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	if c.Terminal != nil {
 		return nil, fmt.Errorf("agentworkspace: Exec gives standard output and standard error apart; a terminal is Start's: %w", errors.ErrUnsupported)

@@ -169,3 +169,22 @@ func TestALinkSwappedMidOperationStaysIn(t *testing.T) {
 		t.Error("a write through the swapped link landed outside")
 	}
 }
+
+// Where Local reads no process table (macOS, a /proc not its own), it
+// reaches the group alone and cannot end what an Exec left once the
+// command has exited (RFC 0001 §8's stated gap); the Exec table still
+// passes there, the leftovers case by saying so.
+func TestTheExecTableWithoutAProcessTable(t *testing.T) {
+	agentworkspace.WithoutProcessTable(t)
+	workspacetest.RunExec(t, workspacetest.ExecBackend{Name: "local without a process table", Open: func(t *testing.T, dir string, env []string) workspacetest.Execer {
+		l, err := agentworkspace.NewLocal(dir, env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { l.Close() })
+		if r := l.Reach(); r != agentworkspace.ReachGroup {
+			t.Fatalf("Reach = %q, want group", r)
+		}
+		return l
+	}})
+}

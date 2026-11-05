@@ -409,8 +409,13 @@ func execLeftoversEndAtClose(t *testing.T, b Backend) {
 // command that leaves beat.sh running in its group, its output its
 // own, then closes the workspace with closeWS: the beat is gone within
 // the ladder's graces. A backend may end it sooner, as mcpworkspace's
-// composed Exec does at its return.
+// composed Exec does at its return. One whose end reaches the group
+// alone (ReachGroup) and that leaves it running skips: such a backend
+// reads no process table, so it cannot tell the group's ID, once the
+// command has exited, from one another group has taken since, and RFC
+// 0001 §6 and §8 hold it to the rule only where it can.
 func leftoversEndAtClose(t *testing.T, dir string, ws Execer, closeWS func()) {
+	os.Remove(filepath.Join(dir, "stop"))
 	os.Remove(filepath.Join(dir, "beat"))
 	if err := os.WriteFile(filepath.Join(dir, "beat.sh"), []byte(beatScript), 0o644); err != nil {
 		t.Fatal(err)
@@ -423,9 +428,17 @@ func leftoversEndAtClose(t *testing.T, dir string, ws Execer, closeWS func()) {
 		t.Log("what the Exec left was ended at its return")
 	}
 	within(t, 15*time.Second, "closing the workspace", closeWS)
-	if beating(t, dir) {
-		t.Error("what the Exec left running outlived the workspace's close")
+	if !beating(t, dir) {
+		return
 	}
+	if reachOf(ws) == agentworkspace.ReachGroup {
+		os.WriteFile(filepath.Join(dir, "stop"), nil, 0o644)
+		if beating(t, dir) {
+			t.Error("beat.sh did not stop at its stop file")
+		}
+		t.Skip("what the Exec left outlives the close: this workspace's end of a process reaches its group alone, and it cannot tell the group once the command has exited (RFC 0001 §8)")
+	}
+	t.Error("what the Exec left running outlived the workspace's close")
 }
 
 // Exec runs to completion: status, streams, Dir, Env, Stdin, a
@@ -617,11 +630,12 @@ func execEndsWhatLeftItsGroup(t *testing.T, dir string, ws Execer) {
 	})
 }
 
-// beatScript beats into the file beat until it is killed, or for 30
-// seconds, ignoring SIGINT and SIGTERM.
+// beatScript beats into the file beat until it is killed, a file
+// named stop appears beside it, or for 30 seconds, ignoring SIGINT and
+// SIGTERM.
 const beatScript = `trap '' INT TERM HUP
 i=0
-while [ $i -lt 300 ]; do
+while [ $i -lt 300 ] && [ ! -e stop ]; do
 	i=$((i+1))
 	echo $i > beat.tmp && mv beat.tmp beat
 	sleep 0.1

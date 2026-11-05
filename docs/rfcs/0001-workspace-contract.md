@@ -342,7 +342,13 @@ it ended:
   carries the kind beside the output in one frame.
 - What an Exec's command left running when it exited MUST end at the
   workspace's close at the latest, by the ladder and as far as the
-  backend's reach goes ([section 8](#8-ending-a-process)). A backend
+  backend's reach goes ([section 8](#8-ending-a-process)), wherever the
+  backend can still tell the command's group once the command has
+  exited (a process table to check its ID against, or a group it ends
+  whole, such as a container's). A backend that cannot MUST NOT signal
+  the group's ID, as [section 8](#8-ending-a-process) says, and states
+  the gap; its reach is then *group*, and the conformance table skips
+  the case for it when the leftover outlives the close. A backend
   MAY end it sooner, and a caller MUST NOT rely on it running past the
   Exec's return. `Local` remembers the group, and the descendants it
   found, of each Exec whose command left something running, looks again
@@ -466,15 +472,17 @@ end it and everything it started:
 
 When the process exits by itself, what it started MUST go with it.
 What an Exec's command left running when it exited ends at the
-workspace's close at the latest ([section 6](#6-exec)), by the same
-ladder. A backend that remembers such a group past its leader's exit
+workspace's close at the latest, by the same ladder, where the backend
+can still tell the command's group ([section 6](#6-exec)). A backend that remembers such a group past its leader's exit
 MUST signal it by its ID only while a process it remembered as a
 member still holds that ID, since once they are gone another group may
 have taken it, and SHOULD look again while the group runs, so a member
 started since is remembered. A backend that cannot tell (no process
 table) MUST NOT signal the ID, and what an Exec left then outlives the
-close: this is a gap of such a backend, not a rule it meets. `Local`
-looks every 250 ms on Linux while `/proc` is its own, so a member whose
+close: this is a gap of such a backend, not a rule it meets, and
+[section 6](#6-exec) does not hold it to the rule. `Local` looks every
+250 ms on Linux while `/proc` is its own, one read of the table for
+every group it keeps, so a member whose
 finders all exit within one look of its start escapes the close; on
 macOS, or with a `/proc` not its own, it keeps nothing and ends nothing
 an Exec left. Pinning the group's ID by leaving its leader unreaped
@@ -1060,6 +1068,15 @@ corpus); draft 0.3 settles each, as its changes below say.
   result, not as a refusal ([section 2](#error-kinds)).
   `workspacetest`'s `Backend` and `ExecBackend` gain `CloseServed`, to
   close the workspace a wire's client is served by.
+- [Section 6](#6-exec): the rule that an Exec's leftovers end at the
+  close holds where the backend can still tell the command's group once
+  the command has exited; one that cannot (no process table, reach
+  *group*) signals nothing and states the gap, and `workspacetest`
+  skips the case for a backend whose reach is *group* when the leftover
+  outlives the close. `Local` reads the process table once per look
+  for every group it keeps, forgets a remembered process two reads in
+  a row miss, and lets a group go after two looks in a row find
+  nothing of it running.
 
 ## Changes since draft 0.2
 

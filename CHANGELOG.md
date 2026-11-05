@@ -52,7 +52,14 @@ versions may break the API.
   `ExecLeftoversEndAtClose` table and `RunExec`'s "leftovers end at
   close" case, cases for cut-short with a status other than zero and for
   a missing `Dir` (*not-exist*), and `CloseServed` on `Backend` and `ExecBackend`, to
-  close the workspace a wire's client is served by.
+  close the workspace a wire's client is served by. Local's looks read
+  the process table once for every kept group, forget a remembered
+  process two reads in a row miss, and let a group go after two looks
+  in a row find nothing of it running (or cannot read the table); the
+  watch stops once nothing is kept. Where the group cannot be told
+  after the command exits (reach *group*), RFC 0001 §6 does not hold a
+  backend to the rule, and the leftovers case skips for such a backend
+  when the leftover outlives the close.
 
 ## v0.0.11 - 2026-11-01
 

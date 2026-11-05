@@ -353,3 +353,141 @@ func TestALeftMemberStartedLaterEndsAtClose(t *testing.T) {
 		t.Error("a member started after the reap outlived Close")
 	}
 }
+
+// counted is f's table, counting its reads in reads.
+func counted(f *fakeOS, reads *int) procOS {
+	sys := f.sys()
+	table := sys.table
+	sys.table = func() (map[int]procInfo, bool) {
+		*reads++
+		return table()
+	}
+	return sys
+}
+
+// leftGroup is a group of f's whose leader, pgid, has been reaped by an
+// Exec while its member, pid, still runs.
+func leftGroup(t *testing.T, sys procOS, pgid int) *group {
+	t.Helper()
+	g := &group{pgid: pgid, start: 1, sys: sys}
+	g.reap(false)
+	if !g.left {
+		t.Fatalf("group %d is not left", pgid)
+	}
+	return g
+}
+
+// One look at what Execs left reads the process table once, however
+// many groups are kept: a read is a walk of every process on the host.
+func TestKeptGroupsShareOneReadOfTheTable(t *testing.T) {
+	f := &fakeOS{table: map[int]procInfo{
+		200: {ppid: 1, pgrp: 100, start: 5},
+		201: {ppid: 1, pgrp: 101, start: 5},
+		202: {ppid: 1, pgrp: 102, start: 5},
+	}}
+	var reads int
+	sys := counted(f, &reads)
+	l := &Local{sys: sys, watch: true}
+	for _, pgid := range []int{100, 101, 102} {
+		l.left = append(l.left, leftGroup(t, sys, pgid))
+	}
+	reads = 0
+	if !l.lookLeft() {
+		t.Fatal("the look stopped with groups running")
+	}
+	if reads != 1 {
+		t.Errorf("one look at three groups read the table %d times, want 1", reads)
+	}
+	if len(l.left) != 3 {
+		t.Errorf("kept %d groups, want 3", len(l.left))
+	}
+}
+
+// What a walk remembers lets go of a process absent from two good reads
+// of the table in a row, so a leftover that keeps starting children
+// does not grow it without bound; absent from one, it is kept.
+func TestFoundForgetsWhatTwoReadsMiss(t *testing.T) {
+	f := &fakeOS{table: map[int]procInfo{
+		100: {ppid: 1, pgrp: 100, start: 1},
+		200: {ppid: 100, pgrp: 100, start: 5},
+	}}
+	g := &group{pgid: 100, start: 1, sys: f.sys()}
+	g.descend(0, true)
+	if _, ok := g.found[200]; !ok {
+		t.Fatal("the member was not remembered")
+	}
+	delete(f.table, 200)
+	g.descend(0, true)
+	if _, ok := g.found[200]; !ok {
+		t.Error("a member one read missed was forgotten")
+	}
+	g.descend(0, true)
+	if _, ok := g.found[200]; ok {
+		t.Error("a member two reads in a row missed is still remembered")
+	}
+	// A leftover that churns children: each read sees a new one.
+	for pid := 300; pid < 400; pid++ {
+		f.table[pid] = procInfo{ppid: 100, pgrp: 100, start: uint64(pid)}
+		g.descend(0, true)
+		delete(f.table, pid)
+	}
+	g.descend(0, true)
+	g.descend(0, true)
+	if len(g.found) != 0 {
+		t.Errorf("found holds %d processes that are gone, want 0", len(g.found))
+	}
+}
+
+// A kept group is let go only when two looks in a row find nothing it
+// left running, or cannot read the table: a member whose entry one read
+// missed (a stat that failed for want of a file descriptor) does not
+// drop it. Once nothing is kept the watch stops, and a group kept later
+// starts it again.
+func TestAKeptGroupIsLetGoAfterTwoLooks(t *testing.T) {
+	f := &fakeOS{table: map[int]procInfo{
+		200: {ppid: 1, pgrp: 100, start: 5},
+	}}
+	sys := f.sys()
+	g := leftGroup(t, sys, 100)
+	l := &Local{sys: sys, watch: true, left: []*group{g}}
+	member := f.table[200]
+	delete(f.table, 200) // one read misses it
+	l.lookLeft()
+	if len(l.left) != 1 {
+		t.Fatal("a member one read missed dropped its group")
+	}
+	f.table[200] = member
+	l.lookLeft()
+	delete(f.table, 200) // gone
+	l.lookLeft()
+	if len(l.left) != 1 {
+		t.Fatal("one look that found nothing running dropped the group")
+	}
+	if l.lookLeft() || l.watch {
+		t.Error("the watch goes on with nothing kept")
+	}
+	if len(l.left) != 0 {
+		t.Errorf("kept %d groups after two looks found nothing, want 0", len(l.left))
+	}
+	// A group kept later starts the watch again.
+	f.table[201] = procInfo{ppid: 1, pgrp: 101, start: 5}
+	l.keepLeft(leftGroup(t, sys, 101))
+	l.mu.Lock()
+	watching := l.watch
+	l.closed = true
+	l.mu.Unlock()
+	if !watching {
+		t.Error("keeping a group did not start the watch again")
+	}
+	within(t, 2*time.Second, "the watch to stop at the close", func() {
+		for {
+			l.mu.Lock()
+			w := l.watch
+			l.mu.Unlock()
+			if !w {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+}

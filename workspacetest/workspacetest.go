@@ -456,6 +456,14 @@ func execTable(t *testing.T, dir string, ws Execer, env []string) {
 		_, err := ws.Exec(ctx, c)
 		return err
 	})
+	// A Dir that is there but is not a directory is invalid, before
+	// anything runs (RFC 0001 §5).
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"pwd"}, Dir: "file.txt"}); !errors.Is(err, fs.ErrInvalid) {
+		t.Errorf("a Dir that is a file: err = %v, want fs.ErrInvalid", err)
+	}
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := ws.Exec(cctx, agentworkspace.Command{Args: []string{"sleep", "5"}}); err == nil {

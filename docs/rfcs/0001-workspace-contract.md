@@ -248,7 +248,7 @@ A **command** is one process to run:
 | Member | Meaning |
 | --- | --- |
 | args | argv; MUST NOT be empty, and an empty one is refused before anything starts |
-| dir | a name of a directory, relative to the root; empty is the root. A dir that leaves the workspace, by name or through a link, is refused as *outside*; one that is not a directory is refused |
+| dir | a name of a directory, relative to the root; empty is the root. A dir that leaves the workspace, by name or through a link, is refused as *outside*; one that does not exist as *not-exist*; one that exists but is not a directory MUST be refused as *invalid*, before anything runs, on every workspace |
 | env | entries over the workspace's environment, name by name ([section 4](#4-environment)) |
 | stdin | the bytes of standard input for Exec; none when absent. Start refuses it: a started process's input is its pipe |
 | timeout | ends the process, and everything it started, after this long; zero is no limit but the owner's |
@@ -990,6 +990,10 @@ corpus); draft 0.3 settles each, as its changes below say.
   is refused with kind *not-exist* on every binding, naming the program
   as given (#46). `Local`'s refusal is `fs.ErrNotExist` and still
   `exec.ErrNotFound`; it crossed both wires as *other*.
+- [Section 5](#5-commands): a `dir` that exists but is not a directory
+  is refused with kind *invalid*, before anything runs, on every
+  workspace (#48). `Local`'s refusal had no kind and crossed both wires
+  as *other*.
 
 ## Changes since draft 0.2
 

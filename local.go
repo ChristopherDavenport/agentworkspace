@@ -420,7 +420,8 @@ func (l *Local) prepare(c Command) (dir string, env []string, prog string, err e
 			return "", nil, "", outside(c.Dir, err)
 		}
 		if !fi.IsDir() {
-			return "", nil, "", fmt.Errorf("%s is not a directory", c.Dir)
+			// The kind every wire carries (RFC 0001 §5).
+			return "", nil, "", fmt.Errorf("%s is not a directory: %w", c.Dir, fs.ErrInvalid)
 		}
 		dir = filepath.Join(l.dir, c.Dir)
 	}

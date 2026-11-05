@@ -96,7 +96,9 @@ type Command struct {
 	// wire, and nothing runs; Local's is exec.ErrNotFound too.
 	Args []string
 	// Dir is relative to Root; "" is Root. A Dir that leaves the
-	// workspace, by name or through a link, is ErrOutside.
+	// workspace, by name or through a link, is ErrOutside, and one that
+	// is there but is not a directory fs.ErrInvalid, on every backend
+	// and over every wire, and nothing runs.
 	Dir string
 	// Env is over Workspace.Env, name by name: an entry replaces the
 	// workspace's of the same name, and a later entry an earlier one,

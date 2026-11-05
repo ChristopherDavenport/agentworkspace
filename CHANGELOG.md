@@ -14,6 +14,11 @@ versions may break the API.
   mcpworkspace carried as *other*; it is still `exec.ErrNotFound`.
   RFC 0001 §5 states it (draft 0.4), and `workspacetest.Run` and
   `RunStarter` check it.
+- Changed: a command's `Dir` that exists but is not a directory is
+  `fs.ErrInvalid` on every backend and over every wire, before anything
+  runs (#48). `Local`'s refusal had no kind, so remote, the tunnel and
+  mcpworkspace carried it as *other*. RFC 0001 §5 states it, and
+  `workspacetest.Run` and `RunStarter` check it.
 
 ## v0.0.11 - 2026-11-01
 

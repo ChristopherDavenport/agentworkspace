@@ -452,6 +452,10 @@ func execTable(t *testing.T, dir string, ws Execer, env []string) {
 	if _, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"pwd"}, Dir: "../"}); !errors.Is(err, agentworkspace.ErrOutside) {
 		t.Errorf("a Dir out of the root: err = %v", err)
 	}
+	programNotFound(t, func(c agentworkspace.Command) error {
+		_, err := ws.Exec(ctx, c)
+		return err
+	})
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := ws.Exec(cctx, agentworkspace.Command{Args: []string{"sleep", "5"}}); err == nil {
@@ -459,6 +463,22 @@ func execTable(t *testing.T, dir string, ws Execer, env []string) {
 	}
 	execInterrupted(t, ws)
 	execEndsWhatLeftItsGroup(t, dir, ws)
+}
+
+// programNotFound checks that run, an Exec or a Start, refuses a
+// program that is not there, by a bare name on no PATH entry or by a
+// path, as fs.ErrNotExist, naming the program as given (RFC 0001 §5).
+func programNotFound(t *testing.T, run func(agentworkspace.Command) error) {
+	t.Helper()
+	for what, name := range map[string]string{
+		"a bare name on no PATH entry":  "agentworkspace-missing-program",
+		"a missing program by its path": "./agentworkspace-missing-program",
+	} {
+		err := run(agentworkspace.Command{Args: []string{name}})
+		if !errors.Is(err, fs.ErrNotExist) || !strings.Contains(fmt.Sprint(err), name) {
+			t.Errorf("%s: err = %v, want one that is fs.ErrNotExist and names %s", what, err, name)
+		}
+	}
 }
 
 // A timeout ends what the command started that left its group, as

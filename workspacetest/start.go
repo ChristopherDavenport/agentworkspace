@@ -306,6 +306,13 @@ func startRefuses(t *testing.T, l agentworkspace.Starter) {
 			t.Errorf("%s: %v, want %v", name, err, c.want)
 		}
 	}
+	programNotFound(t, func(c agentworkspace.Command) error {
+		p, err := l.Start(ctx, c)
+		if err == nil {
+			p.Close()
+		}
+		return err
+	})
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
 	if p, err := l.Start(cctx, agentworkspace.Command{Args: []string{"true"}}); !errors.Is(err, context.Canceled) {

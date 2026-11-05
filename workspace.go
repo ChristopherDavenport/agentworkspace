@@ -91,7 +91,9 @@ type Command struct {
 	// the file system, never on this process's: a relative PATH entry,
 	// the empty one included, is skipped, and with no PATH the name is
 	// not found. One with a slash is used as it is, relative to Dir.
-	// The process gets Args[0] as given.
+	// The process gets Args[0] as given. A program not found is an
+	// error that is fs.ErrNotExist, on every backend and over every
+	// wire, and nothing runs; Local's is exec.ErrNotFound too.
 	Args []string
 	// Dir is relative to Root; "" is Root. A Dir that leaves the
 	// workspace, by name or through a link, is ErrOutside.

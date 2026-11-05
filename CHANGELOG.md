@@ -5,6 +5,16 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Changed: a program not found, by Exec or by Start, is
+  `fs.ErrNotExist` on every backend and over every wire, naming the
+  program as given (#46). `Local`'s refusal of a bare name no `PATH`
+  entry has was an `*exec.Error` alone, which remote, the tunnel and
+  mcpworkspace carried as *other*; it is still `exec.ErrNotFound`.
+  RFC 0001 §5 states it (draft 0.4), and `workspacetest.Run` and
+  `RunStarter` check it.
+
 ## v0.0.11 - 2026-11-01
 
 - Added: the wire corpus (#42). `testdata/wire/remote.json` and

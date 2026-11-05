@@ -1,6 +1,6 @@
 # RFC 0001: Workspace Contract
 
-Status: draft 0.3
+Status: draft 0.4
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding; `Local` is the reference backend, and
@@ -275,13 +275,24 @@ command's.
   `exec.ErrDot` refuses the same).
 - With no `PATH`, a bare name is not found. A backend MUST NOT supply a
   default, since a container's default differs from the host's.
-- A name not found is an error, and nothing runs. The process gets
-  `args[0]` as given, whatever the lookup found.
+- The process gets `args[0]` as given, whatever the lookup found.
+
+A command whose program is not found, by Exec or by Start, MUST be
+refused with kind *not-exist* on every binding, before anything runs.
+The refusal names the program as given, and no path of the serving
+side's machine. That holds for a bare name no `PATH` entry has and for
+a name with a slash that names nothing. A binding over a wire carries
+the kind, and its client adds the program's name to the refusal
+([section 15](#15-security-considerations)). *not-exist* is also a
+`dir` that does not exist, so a caller that gave no dir can read it as
+the program's.
 
 `workspacetest` holds it: `Run` runs a bare name found only on the
-command's `PATH`, and `RunStarter`, over a workspace with no `PATH`,
-finds nothing for a bare name, an empty `PATH` or a relative entry, and
-runs a name with a slash relative to dir.
+command's `PATH`, and refuses a program not found, bare or by a path,
+as *not-exist* naming it, as `RunStarter` does for Start; and
+`RunStarter`, over a workspace with no `PATH`, finds nothing for a bare
+name, an empty `PATH` or a relative entry, and runs a name with a slash
+relative to dir.
 
 ## 6. Exec
 
@@ -972,6 +983,13 @@ Draft 0.2 listed four places where the code and its doc comments
 disagreed (the root, error kinds and messages over mcpworkspace, the
 signals), and two questions with no issue (reach over a wire, a wire
 corpus); draft 0.3 settles each, as its changes below say.
+
+## Changes since draft 0.3
+
+- [Section 5](#5-commands): a program not found, by Exec or by Start,
+  is refused with kind *not-exist* on every binding, naming the program
+  as given (#46). `Local`'s refusal is `fs.ErrNotExist` and still
+  `exec.ErrNotFound`; it crossed both wires as *other*.
 
 ## Changes since draft 0.2
 

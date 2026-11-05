@@ -460,7 +460,9 @@ func processEnv(ws, cmd []string) []string {
 // entry, the empty one included, is skipped, so a file written into
 // the workspace cannot stand in for a program (exec.ErrDot's hazard).
 // With no PATH a bare name is not found: there is no default, since a
-// container's would differ from this machine's.
+// container's would differ from this machine's. A name not found is
+// fs.ErrNotExist, the kind RFC 0001 §2 gives it, and still
+// exec.ErrNotFound, as os/exec says it.
 func lookPath(name string, env []string) (string, error) {
 	if strings.Contains(name, "/") {
 		return name, nil
@@ -481,8 +483,17 @@ func lookPath(name string, env []string) (string, error) {
 			}
 		}
 	}
-	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+	return "", &notFound{&exec.Error{Name: name, Err: exec.ErrNotFound}}
 }
+
+// notFound is a program lookPath did not find: os/exec's *exec.Error,
+// which says it as exec.ErrNotFound, and fs.ErrNotExist too, so the
+// kind crosses every wire.
+type notFound struct{ err *exec.Error }
+
+func (e *notFound) Error() string      { return e.err.Error() }
+func (e *notFound) Unwrap() error      { return e.err }
+func (*notFound) Is(target error) bool { return target == fs.ErrNotExist }
 
 // executable reports whether p is a file this process may execute.
 func executable(p string) bool {

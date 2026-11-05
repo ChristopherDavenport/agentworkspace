@@ -33,6 +33,17 @@ versions may break the API.
   mcpworkspace as kind `cutshort` (`wire.KindCutShort`). RFC 0001 §2
   and §6 state it; both wire corpora carry it; `workspacetest.Run` and
   `RunExec` check it.
+- Changed: what an Exec's command left running when it exited ends at
+  the workspace's Close at the latest, by the ladder and as far as
+  `Reach` goes (#45). `Local` remembers each such Exec's group and the
+  descendants it found, and its `Close` ends them; it signals the group
+  by its ID only while a process it remembered still holds that ID.
+  remote's served workspace ends them at its own close, which is the
+  program's; mcpworkspace's composed Exec already ended them at its
+  return. RFC 0001 §6 and §8 state it. Added: `workspacetest.Run`'s
+  `ExecLeftoversEndAtClose` table and `RunExec`'s "leftovers end at
+  close" case, and `CloseServed` on `Backend` and `ExecBackend`, to
+  close the workspace a wire's client is served by.
 
 ## v0.0.11 - 2026-11-01
 

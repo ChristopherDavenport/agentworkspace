@@ -34,13 +34,36 @@ func tunnelled(t *testing.T, ws agentworkspace.Workspace) agentworkspace.Workspa
 
 func TestConformance(t *testing.T) {
 	workspacetest.Run(t,
-		workspacetest.Backend{Name: "tunnel", Links: true, Wire: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
-			return tunnelled(t, local(t, dir, pathEnv()))
+		workspacetest.Backend{Name: "tunnel", Links: true, Wire: true, CloseServed: closeServed, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+			return tunnelledKept(t, local(t, dir, pathEnv()))
 		}},
-		workspacetest.Backend{Name: "tunnel, no links", Wire: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
-			return tunnelled(t, noLinks{local(t, dir, pathEnv())})
+		workspacetest.Backend{Name: "tunnel, no links", Wire: true, CloseServed: closeServed, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+			return tunnelledKept(t, noLinks{local(t, dir, pathEnv())})
 		}},
 	)
+}
+
+// servedWorkspaces is the workspace each client of the tables serves,
+// for closeServed: the hub's client's Close leaves it open, as the
+// workspace end's program does until it closes the workspace it served.
+var servedWorkspaces sync.Map // agentworkspace.Workspace -> agentworkspace.Workspace
+
+// tunnelledKept is tunnelled, its workspace kept for closeServed.
+func tunnelledKept(t *testing.T, ws agentworkspace.Workspace) agentworkspace.Workspace {
+	t.Helper()
+	c := tunnelled(t, ws)
+	servedWorkspaces.Store(c, ws)
+	t.Cleanup(func() { servedWorkspaces.Delete(c) })
+	return c
+}
+
+// closeServed closes the workspace the hub's client c serves.
+func closeServed(t *testing.T, c agentworkspace.Workspace) {
+	ws, ok := servedWorkspaces.Load(c)
+	if !ok {
+		t.Fatal("no served workspace kept for this client")
+	}
+	ws.(agentworkspace.Workspace).Close()
 }
 
 // The server tables run on an Offering over Local through a tunnel:

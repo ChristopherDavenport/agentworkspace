@@ -47,6 +47,11 @@ type Backend struct {
 	Open  func(t *testing.T, dir string) agentworkspace.Workspace
 	Links bool
 	Wire  bool
+	// CloseServed, when set, closes the workspace ws, one Open gave,
+	// runs its commands in: for the client side of a wire whose own
+	// Close leaves the served workspace open, as remote's and the
+	// tunnel's do, the served one. Nil is ws.Close.
+	CloseServed func(t *testing.T, ws agentworkspace.Workspace)
 }
 
 // Run runs every table a Workspace keeps (confinement, a FIFO, Env,
@@ -62,6 +67,7 @@ func Run(t *testing.T, backends ...Backend) {
 		{"NothingBlocksOnAFIFO", nothingBlocksOnAFIFO},
 		{"EnvIsACopy", envIsACopy},
 		{"Exec", execRuns},
+		{"ExecLeftoversEndAtClose", execLeftoversEndAtClose},
 		{"NamesThatAreNotValidPaths", namesThatAreNotValidPaths},
 		{"Concurrently", concurrently},
 		{"RefusalsNameNoServedPath", refusalsNameNoServedPath},
@@ -344,6 +350,10 @@ type ExecBackend struct {
 	Name string
 	Open func(t *testing.T, dir string, env []string) Execer
 	Wire bool
+	// CloseServed, when set, closes the workspace ws, one Open gave,
+	// runs its commands in; nil is ws's Close, when it has one, and
+	// otherwise the table that needs it is skipped.
+	CloseServed func(t *testing.T, ws Execer)
 }
 
 // RunExec runs the Exec table Run runs (status, streams, Dir, Env,
@@ -363,7 +373,58 @@ func RunExec(t *testing.T, backends ...ExecBackend) {
 					noServedPath(t, dir, execRefusals(t, dir, ws))
 				})
 			}
+			t.Run("leftovers end at close", func(t *testing.T) {
+				dir := t.TempDir()
+				ws := b.Open(t, dir, env)
+				closeWS := func() {
+					if c, ok := ws.(io.Closer); ok {
+						c.Close()
+					}
+				}
+				switch _, closer := ws.(io.Closer); {
+				case b.CloseServed != nil:
+					closeWS = func() { b.CloseServed(t, ws) }
+				case !closer:
+					t.Skip("no way to close the workspace")
+				}
+				leftoversEndAtClose(t, dir, ws, closeWS)
+			})
 		})
+	}
+}
+
+// What an Exec's command left running when it exited ends at the
+// workspace's close at the latest, by the ladder (RFC 0001 §6, §8).
+func execLeftoversEndAtClose(t *testing.T, b Backend) {
+	dir := t.TempDir()
+	ws := b.Open(t, dir)
+	closeWS := func() { ws.Close() }
+	if b.CloseServed != nil {
+		closeWS = func() { b.CloseServed(t, ws) }
+	}
+	leftoversEndAtClose(t, dir, ws, closeWS)
+}
+
+// leftoversEndAtClose runs, through an Exec in a workspace on dir, a
+// command that leaves beat.sh running in its group, its output its
+// own, then closes the workspace with closeWS: the beat is gone within
+// the ladder's graces. A backend may end it sooner, as mcpworkspace's
+// composed Exec does at its return.
+func leftoversEndAtClose(t *testing.T, dir string, ws Execer, closeWS func()) {
+	os.Remove(filepath.Join(dir, "beat"))
+	if err := os.WriteFile(filepath.Join(dir, "beat.sh"), []byte(beatScript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ws.Exec(context.Background(), agentworkspace.Command{Args: []string{"sh", "-c", "sh beat.sh </dev/null >/dev/null 2>&1 & echo started"}})
+	if err != nil || string(out.Stdout) != "started\n" {
+		t.Fatalf("Exec = %+v, %v", out, err)
+	}
+	if !beating(t, dir) {
+		t.Log("what the Exec left was ended at its return")
+	}
+	within(t, 15*time.Second, "closing the workspace", closeWS)
+	if beating(t, dir) {
+		t.Error("what the Exec left running outlived the workspace's close")
 	}
 }
 

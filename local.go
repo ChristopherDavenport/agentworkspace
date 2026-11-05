@@ -41,6 +41,7 @@ type Local struct {
 	closed bool
 	procs  map[*localProcess]struct{} // started and not yet closed
 	conns  map[*localConn]struct{}    // connected and not yet closed
+	left   []*group                   // Execs' groups whose command exited by itself and left something running
 }
 
 var (
@@ -141,7 +142,9 @@ func (l *Local) Descriptor() Descriptor {
 }
 
 // Close ends every process Start started that is not closed yet, as
-// Process.Close does, and releases the directory handle.
+// Process.Close does, and what every Exec's command left running when
+// it exited, by the same ladder and as far as Reach goes, and releases
+// the directory handle.
 func (l *Local) Close() error {
 	l.mu.Lock()
 	l.closed = true
@@ -153,6 +156,8 @@ func (l *Local) Close() error {
 	for c := range l.conns {
 		conns = append(conns, c)
 	}
+	left := l.left
+	l.left = nil
 	l.mu.Unlock()
 	for _, c := range conns {
 		c.Close()
@@ -161,8 +166,43 @@ func (l *Local) Close() error {
 	for _, p := range procs {
 		wg.Go(func() { p.Close() })
 	}
+	for _, g := range left {
+		wg.Go(g.endLeft)
+	}
 	wg.Wait()
 	return l.root.Close()
+}
+
+// keepLeft keeps g, an Exec's group whose command exited by itself, for
+// Close to end, while anything it left runs; a workspace already
+// closing ends it now. The groups kept before that have nothing left
+// running are let go.
+func (l *Local) keepLeft(g *group) {
+	if !g.leftRunning() {
+		return
+	}
+	l.mu.Lock()
+	closed, kept := l.closed, slices.Clone(l.left)
+	l.mu.Unlock()
+	if closed {
+		g.endLeft()
+		return
+	}
+	var gone []*group
+	for _, o := range kept {
+		if !o.leftRunning() {
+			gone = append(gone, o)
+		}
+	}
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		g.endLeft()
+		return
+	}
+	l.left = slices.DeleteFunc(l.left, func(o *group) bool { return slices.Contains(gone, o) })
+	l.left = append(l.left, g)
+	l.mu.Unlock()
 }
 
 // FS reads through the root, opening without blocking.
@@ -223,7 +263,8 @@ func (l *Local) Remove(_ context.Context, name string) error {
 // command exited leaves its status as it was. It waits at most two
 // seconds past the command's exit for output its children still hold
 // open, and when they hold it past that, returns the output so far and
-// the command's status beside ErrCutShort.
+// the command's status beside ErrCutShort. What a command that exited by
+// itself left running is ended by the workspace's Close at the latest.
 func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	if c.Terminal != nil {
 		return nil, fmt.Errorf("agentworkspace: Exec gives standard output and standard error apart; a terminal is Start's: %w", errors.ErrUnsupported)
@@ -329,8 +370,12 @@ func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	mu.Unlock()
 	close(reaped)
 	// Ended, what is left of the group goes; a command that exited by
-	// itself keeps what it left running.
+	// itself keeps what it left running until the workspace's Close
+	// (RFC 0001 §6).
 	g.reap(ending)
+	if !ending {
+		l.keepLeft(g)
+	}
 	cut := !closedWithin(copied, waitDelay)
 	if cut {
 		for _, cp := range copies {

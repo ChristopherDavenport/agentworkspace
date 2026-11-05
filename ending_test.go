@@ -263,3 +263,29 @@ func TestTheKillIsSentAgainToWhatSurvivesIt(t *testing.T) {
 		t.Errorf("signals = %q; want KILL -200 sent again after the first was lost", f.sent)
 	}
 }
+
+// What an Exec's command left is ended by its group's ID only while a
+// process remembered as a member still holds that ID: once those are
+// gone, a group that has taken the ID since is not signalled, nor are
+// its members read as what the command left.
+func TestALeftGroupsReusedIDIsNotSignalled(t *testing.T) {
+	f := &fakeOS{table: map[int]procInfo{
+		200: {ppid: 1, pgrp: 100, start: 5}, // what the command left; the leader, 100, is reaped
+	}}
+	g := &group{pgid: 100, start: 1, sys: f.sys()}
+	g.reap(false)
+	if !g.leftRunning() {
+		t.Fatal("what the command left does not read as running")
+	}
+	delete(f.table, 200)
+	f.table[100] = procInfo{ppid: 1, pgrp: 100, start: 9}    // a new leader with the old ID
+	f.table[300] = procInfo{ppid: 100, pgrp: 100, start: 10} // and its child
+	f.sent = nil
+	if g.leftRunning() {
+		t.Error("a group that took the ID reads as what the command left")
+	}
+	g.endLeft()
+	if len(f.sent) != 0 {
+		t.Errorf("signals = %q; want none to a group that took the ID", f.sent)
+	}
+}

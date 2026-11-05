@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +30,15 @@ func (e execer) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwor
 func (e execer) Reach() agentworkspace.Reach { return e.c.Reach }
 
 func TestExecConformance(t *testing.T) {
-	workspacetest.RunExec(t, workspacetest.ExecBackend{Name: "mcpworkspace", Wire: true, Open: func(t *testing.T, dir string, env []string) workspacetest.Execer {
+	// The Local each execer runs its commands in, for CloseServed.
+	var served sync.Map // execer -> *agentworkspace.Local
+	workspacetest.RunExec(t, workspacetest.ExecBackend{Name: "mcpworkspace", Wire: true, CloseServed: func(t *testing.T, ws workspacetest.Execer) {
+		l, ok := served.Load(ws)
+		if !ok {
+			t.Fatal("no served workspace kept for this execer")
+		}
+		l.(*agentworkspace.Local).Close()
+	}, Open: func(t *testing.T, dir string, env []string) workspacetest.Execer {
 		l, err := agentworkspace.NewLocal(dir, env)
 		if err != nil {
 			t.Fatal(err)
@@ -42,7 +51,9 @@ func TestExecConformance(t *testing.T) {
 			t.Fatal(err)
 		}
 		c.Reach, c.Bounds = reach, bounds
-		return execer{c}
+		e := &execer{c}
+		served.Store(e, l)
+		return e
 	}})
 }
 

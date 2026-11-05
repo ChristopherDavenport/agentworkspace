@@ -335,6 +335,16 @@ it ended:
   as [section 8](#8-ending-a-process) ends a started process's, so only
   one that left the group holds the output there. remote's reply
   carries the kind beside the output in one frame.
+- What an Exec's command left running when it exited MUST end at the
+  workspace's close at the latest, by the ladder and as far as the
+  backend's reach goes ([section 8](#8-ending-a-process)). A backend
+  MAY end it sooner, and a caller MUST NOT rely on it running past the
+  Exec's return. `Local` remembers the group, and the descendants it
+  found, of each Exec whose command left something running, and its
+  close ends them; mcpworkspace's composed Exec ends a leftover in the
+  command's group at its return, as its start's process ends; remote's
+  Exec belongs to no session, so what it leaves lives until the program
+  closes the served workspace, whose close ends it.
 - When the caller's context has ended before the command runs, Exec
   returns the context's error, runs nothing, and gives no result.
 - A command that cannot start (no args, a refused dir, a program not
@@ -446,6 +456,14 @@ end it and everything it started:
 - the workspace's **close**.
 
 When the process exits by itself, what it started MUST go with it.
+What an Exec's command left running when it exited ends at the
+workspace's close at the latest ([section 6](#6-exec)), by the same
+ladder. A backend that remembers such a group past its leader's exit
+SHOULD signal it by its ID only while a process it remembered as a
+member still holds that ID, since once they are gone another group may
+have taken it. `Local` does, where it reads a process table; where it
+reads none (macOS, a `/proc` not its own) it cannot tell, and signals
+the ID while it names a group.
 
 **The ladder.** Every way a process is ended (its close, the end of its
 context, its timeout, the workspace's close, and an Exec's context or
@@ -913,7 +931,7 @@ The reference suite is Go package `workspacetest`:
 
 | Table | Holds |
 | --- | --- |
-| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names, the descriptor's members for its kind and an absolute root, concurrent use, refusals that name no served path over a wire (`Backend.Wire`), connect where offered |
+| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group, the kinds of a program not found, a dir that is a file and output cut short, what it left running ended at the workspace's close), invalid names, the descriptor's members for its kind and an absolute root, concurrent use, refusals that name no served path over a wire (`Backend.Wire`), connect where offered |
 | `RunStarter` | a starter: the pipes, the directory and environment (argv resolution, the environment as given), the lifetimes (context, timeout, close, exit, the workspace's close, a descendant that left the group), the required signals and the refusal of others, a terminal, refusals, concurrency |
 | `RunExec` | the Exec table alone, over an `Execer`: a wire's client that carries Exec without a whole workspace (mcpworkspace's) |
 | `RunServerProvider` | a server provider: the list and its secrets mark, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
@@ -1015,6 +1033,13 @@ corpus); draft 0.3 settles each, as its changes below say.
   mcpworkspace's `cutshort`). Go's `ErrCutShort` is `exec.ErrWaitDelay`
   too. `Local` returned `exec.ErrWaitDelay` with no output, and that
   only for status 0; it crossed both wires as *other*.
+- [Section 6](#6-exec) and [section 8](#8-ending-a-process): what an
+  Exec's command left running when it exited ends at the workspace's
+  close at the latest, by the ladder and as far as the reach goes; a
+  backend may end it sooner (#45). `Local`'s close ended only Start's
+  processes, so an Exec's `cmd &` outlived the workspace.
+  `workspacetest`'s `Backend` and `ExecBackend` gain `CloseServed`, to
+  close the workspace a wire's client is served by.
 
 ## Changes since draft 0.2
 

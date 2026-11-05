@@ -132,6 +132,8 @@ keeps its rule; one about Local alone stays in the root's tests.
   context's end, `Command.Timeout` and the workspace's `Close` end it
   and everything it started, with one ladder (SIGINT, SIGTERM,
   SIGKILL), and a backend states how far that reaches (`Reach`).
+  What an Exec's command left running when it exited ends at the
+  workspace's `Close` at the latest, by the same ladder.
 - `Start` is optional (`Starter`), so a workspace that only stores
   files is still a `Workspace`.
 - So is offering MCP servers (`ServerProvider`): a server it starts

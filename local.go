@@ -222,7 +222,8 @@ func (l *Local) Remove(_ context.Context, name string) error {
 // ExitCode -1 and Interrupted or TimedOut; one that ends after the
 // command exited leaves its status as it was. It waits at most two
 // seconds past the command's exit for output its children still hold
-// open.
+// open, and when they hold it past that, returns the output so far and
+// the command's status beside ErrCutShort.
 func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	if c.Terminal != nil {
 		return nil, fmt.Errorf("agentworkspace: Exec gives standard output and standard error apart; a terminal is Start's: %w", errors.ErrUnsupported)
@@ -353,9 +354,10 @@ func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 		return nil, err
 	}
 	out.ExitCode = cmd.ProcessState.ExitCode()
-	if cut && out.ExitCode == 0 {
-		// As os/exec says it: the output was cut short.
-		return nil, exec.ErrWaitDelay
+	if cut {
+		// The output so far, its status, and the kind that says the
+		// rest was held by what the command left (RFC 0001 §6).
+		return out, fmt.Errorf("agentworkspace: exec %s: %w", c.Args[0], ErrCutShort)
 	}
 	return out, nil
 }

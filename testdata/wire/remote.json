@@ -297,6 +297,20 @@
       }
     },
     {
+      "name": "a refusal of kind cut_short, its served text naming /srv/hidden: the kind's words alone",
+      "token": "all",
+      "method": "GET",
+      "path": "/v1/fs/stat?path=kind/cut_short",
+      "status": 504,
+      "form": "json",
+      "reply": {
+        "error": {
+          "code": "cut_short",
+          "message": "the command exited, but something it left running held its output open"
+        }
+      }
+    },
+    {
       "name": "a refusal of no kind, its served text naming /srv/hidden: the one generic message",
       "token": "all",
       "method": "GET",
@@ -411,6 +425,34 @@
             "exitCode": 3,
             "stderr": "ZXJyCg==",
             "stdout": "b3V0Cg=="
+          }
+        }
+      ]
+    },
+    {
+      "name": "exec whose command left something holding its output: the output so far beside cut_short, in one frame",
+      "token": "all",
+      "method": "POST",
+      "path": "/v1/exec",
+      "type": "application/json",
+      "body": {
+        "args": [
+          "sh",
+          "-c",
+          "sleep 5 & echo hi"
+        ]
+      },
+      "status": 200,
+      "form": "ndjson",
+      "reply": [
+        {
+          "output": {
+            "exitCode": 0,
+            "stdout": "aGkK"
+          },
+          "error": {
+            "code": "cut_short",
+            "message": "the command exited, but something it left running held its output open"
           }
         }
       ]

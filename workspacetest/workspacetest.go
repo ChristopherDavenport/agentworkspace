@@ -456,6 +456,7 @@ func execTable(t *testing.T, dir string, ws Execer, env []string) {
 		_, err := ws.Exec(ctx, c)
 		return err
 	})
+	execCutShort(t, ws)
 	// A Dir that is there but is not a directory is invalid, before
 	// anything runs (RFC 0001 §5).
 	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0o644); err != nil {
@@ -471,6 +472,43 @@ func execTable(t *testing.T, dir string, ws Execer, env []string) {
 	}
 	execInterrupted(t, ws)
 	execEndsWhatLeftItsGroup(t, dir, ws)
+}
+
+// A command that exits while what it left running holds its output
+// open gives the output so far and its own exit status beside an error
+// of its own kind, which is exec.ErrWaitDelay too (RFC 0001 §6). A
+// backend may instead end what a command left as the command exits, as
+// mcpworkspace's composed Exec does a background job in its group: it
+// then returns at once, with no error. One that left the group (setsid)
+// is held over on every backend whose end reaches no orphan.
+func execCutShort(t *testing.T, ws Execer) {
+	ctx := context.Background()
+	check := func(t *testing.T, script string, mayEnd bool) {
+		var out *agentworkspace.Output
+		var err error
+		start := time.Now()
+		within(t, 15*time.Second, "the Exec", func() {
+			out, err = ws.Exec(ctx, agentworkspace.Command{Args: []string{"sh", "-c", script}})
+		})
+		ended := mayEnd && err == nil && time.Since(start) < grace
+		if !ended && (!errors.Is(err, agentworkspace.ErrCutShort) || !errors.Is(err, exec.ErrWaitDelay)) {
+			t.Errorf("err = %v after %v, want ErrCutShort and exec.ErrWaitDelay", err, time.Since(start))
+		}
+		if out == nil || string(out.Stdout) != "hi\n" || out.ExitCode != 0 || out.Interrupted || out.TimedOut {
+			t.Errorf("Output = %+v, want what it wrote, hi, and status 0", out)
+		}
+	}
+	t.Run("output held by what the command left", func(t *testing.T) {
+		check(t, "sleep 10 & echo hi", true)
+	})
+	t.Run("output held by what left the group", func(t *testing.T) {
+		if _, err := exec.LookPath("setsid"); err != nil {
+			t.Skip("no setsid here")
+		}
+		// The pause lets setsid leave the group before the shell exits,
+		// which would otherwise end it with the group.
+		check(t, "setsid sleep 10 & sleep 0.5; echo hi", false)
+	})
 }
 
 // programNotFound checks that run, an Exec or a Start, refuses a

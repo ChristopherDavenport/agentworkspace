@@ -19,6 +19,20 @@ versions may break the API.
   runs (#48). `Local`'s refusal had no kind, so remote, the tunnel and
   mcpworkspace carried it as *other*. RFC 0001 §5 states it, and
   `workspacetest.Run` and `RunStarter` check it.
+- Added: `ErrCutShort`, the kind *cut-short* (#49). An Exec whose
+  command exited while something it left running held its output open
+  past the two-second wait returns the output so far and the command's
+  status beside an error that is `ErrCutShort`, and still
+  `exec.ErrWaitDelay`, so a caller testing for that holds on every
+  backend now, remote's and mcpworkspace's clients included. Behaviour
+  change: `Local` and mcpworkspace's `Exec` returned
+  `exec.ErrWaitDelay` with no Output, and only for status 0; with
+  another status they returned the Output with no error. remote carries
+  it as code `cut_short`, beside the output in the exec reply's last
+  frame (an older client reads it as an error of no kind), and
+  mcpworkspace as kind `cutshort` (`wire.KindCutShort`). RFC 0001 §2
+  and §6 state it; both wire corpora carry it; `workspacetest.Run` and
+  `RunExec` check it.
 
 ## v0.0.11 - 2026-11-01
 

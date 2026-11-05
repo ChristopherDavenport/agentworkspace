@@ -33,6 +33,7 @@ var kinds = []struct {
 	{wire.KindProcessDone, os.ErrProcessDone},
 	{wire.KindClosed, fs.ErrClosed},
 	{wire.KindNoServer, agentworkspace.ErrNoServer},
+	{wire.KindCutShort, agentworkspace.ErrCutShort},
 	{wire.KindNoProcess, ErrNoProcess},
 }
 

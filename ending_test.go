@@ -3,6 +3,7 @@ package agentworkspace
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -119,15 +120,16 @@ func TestALocalHostIsNeverEmpty(t *testing.T) {
 
 // A command that exited before the context ended is not interrupted,
 // though a child it left holds its output open past its exit: its
-// status is what it exited with.
+// status is what it exited with, beside ErrCutShort, whatever that
+// status (RFC 0001 §6).
 func TestAnExitBeforeTheContextEndsKeepsItsStatus(t *testing.T) {
 	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	time.AfterFunc(500*time.Millisecond, cancel)
 	out, err := l.Exec(ctx, Command{Args: []string{"sh", "-c", "echo hi; sleep 5 & exit 3"}})
-	if err != nil || out == nil || out.ExitCode != 3 || out.Interrupted || string(out.Stdout) != "hi\n" {
-		t.Errorf("Exec = %+v, %v; want status 3, not interrupted", out, err)
+	if !errors.Is(err, ErrCutShort) || out == nil || out.ExitCode != 3 || out.Interrupted || string(out.Stdout) != "hi\n" {
+		t.Errorf("Exec = %+v, %v; want status 3 beside ErrCutShort, not interrupted", out, err)
 	}
 }
 

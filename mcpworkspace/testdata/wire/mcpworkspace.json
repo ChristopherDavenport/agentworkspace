@@ -310,6 +310,24 @@
       }
     },
     {
+      "name": "a file refused as cutshort, its served text naming /srv/hidden: the kind's words alone",
+      "method": "resources/read",
+      "params": {
+        "uri": "agentworkspace:///stat?path=k%2Fcutshort"
+      },
+      "result": {
+        "cacheScope": "private",
+        "contents": [
+          {
+            "mimeType": "application/json",
+            "text": "{\"error\":{\"kind\":\"cutshort\",\"message\":\"the command exited, but something it left running held its output open\"}}",
+            "uri": "agentworkspace:///stat?path=k%2Fcutshort"
+          }
+        ],
+        "ttlMs": 0
+      }
+    },
+    {
       "name": "a file refused as noprocess, its served text naming /srv/hidden: the kind's words alone",
       "method": "resources/read",
       "params": {

@@ -68,7 +68,9 @@
 // a line: {"data": base64} for Command.Stream's output as it arrives,
 // at most 32 KiB of it a frame, when the request asked for a stream,
 // then one {"output": {...}} or one {"error": {...}}, which is the
-// last. A refusal before the command runs is an HTTP error. An exec
+// last; an output its command's leftovers held past the wait for it
+// carries {"error": {"code": "cut_short"}} beside it, in the same frame,
+// and the client returns both. A refusal before the command runs is an HTTP error. An exec
 // with a key (chosen at random, as a start's) is the principal's to
 // cancel by it: the server sends the reply's header once the key is
 // taken, a cancel ends the command and what it started as a hang-up

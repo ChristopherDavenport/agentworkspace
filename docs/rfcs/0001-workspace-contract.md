@@ -173,6 +173,7 @@ side of a wire:
 | process-done | the process has exited | `os.ErrProcessDone` | `process_done` | `processdone` |
 | closed | the workspace or the handle is closed | `fs.ErrClosed` | `closed` | `closed` |
 | no-server | no server is offered by that name | `ErrNoServer` | `no_server` | `noserver` |
+| cut-short | an Exec's command exited, but something it left running held its output open past the wait for it | `ErrCutShort`, which is `exec.ErrWaitDelay` too | `cut_short` | `cutshort` |
 
 *outside* is matched before any other kind, since a link's refusal may
 also read as another. Every binding over a wire MUST carry every kind
@@ -322,6 +323,18 @@ it ended:
   keeps none, as when the command runs to its end. A caller that
   interrupts a command still learns what it printed, which a build or a
   test run has often said by then.
+- When the command exits but a process it left running still holds its
+  output open past the backend's wait for that output, Exec MUST
+  return the output collected so far, and the command's own exit
+  status, with an error of kind *cut-short*, whatever that status, and
+  every wire MUST carry that kind both ways. It is not *other*: the
+  command ran to its end, and a caller that started a background job
+  (`cmd &`) gets what came before it. The reference binding's wait is
+  two seconds past the command's exit; mcpworkspace's composed Exec
+  ends a background job in the command's group as the command exits,
+  as [section 8](#8-ending-a-process) ends a started process's, so only
+  one that left the group holds the output there. remote's reply
+  carries the kind beside the output in one frame.
 - When the caller's context has ended before the command runs, Exec
   returns the context's error, runs nothing, and gives no result.
 - A command that cannot start (no args, a refused dir, a program not
@@ -799,7 +812,7 @@ does not repeat. In summary:
 | root, descriptor, bounds, reach, environment | `GET /v1/info` | `read` or `servers`; environment only with `exec` |
 | files | `GET /v1/fs/{stat,lstat,readlink,readdir,file}?path=N` | `read` |
 | write, remove | `PUT`, `DELETE /v1/fs/file?path=N` | `write` |
-| exec | `POST /v1/exec {…, key}`, NDJSON frames back: `{"data"}` for the stream, then one `{"output"}` or `{"error"}`; `output.interrupted` for a cancelled one | `exec` |
+| exec | `POST /v1/exec {…, key}`, NDJSON frames back: `{"data"}` for the stream, then one `{"output"}` or `{"error"}`; `output.interrupted` for a cancelled one; `{"output", "error": {"code": "cut_short"}}` in one frame for output held past the wait | `exec` |
 | cancel an exec | `POST /v1/exec/{key}/cancel`, the principal's own key | `exec` |
 | list servers | `GET /v1/servers` | `servers` |
 | owner | a session, `POST /v1/sessions`, renewed on a lease; its lapse or close ends every process in it | `exec` or `servers` |
@@ -994,6 +1007,14 @@ corpus); draft 0.3 settles each, as its changes below say.
   is refused with kind *invalid*, before anything runs, on every
   workspace (#48). `Local`'s refusal had no kind and crossed both wires
   as *other*.
+- [Section 2](#error-kinds) and [section 6](#6-exec): the kind
+  *cut-short* (#49). An Exec whose command exited while something it
+  left running held its output open returns the output so far and its
+  status with an error of that kind, which both wires carry (remote's
+  `cut_short`, beside the output in the exec reply's last frame;
+  mcpworkspace's `cutshort`). Go's `ErrCutShort` is `exec.ErrWaitDelay`
+  too. `Local` returned `exec.ErrWaitDelay` with no output, and that
+  only for status 0; it crossed both wires as *other*.
 
 ## Changes since draft 0.2
 

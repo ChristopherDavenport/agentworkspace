@@ -49,6 +49,7 @@ const (
 	codeNoSession       = "no_session"
 	codeNoProcess       = "no_process"
 	codeNoServer        = "no_server"
+	codeCutShort        = "cut_short"
 	codeMediaType       = "media_type"
 	codeOther           = "other"
 )
@@ -75,6 +76,10 @@ var codes = []struct {
 	{codeNoSession, ErrNoSession, http.StatusNotFound},
 	{codeNoProcess, ErrNoProcess, http.StatusNotFound},
 	{codeNoServer, agentworkspace.ErrNoServer, http.StatusNotFound},
+	// An Exec's output held past the wait for it: the exec reply's
+	// frame carries it beside the Output, and the status is what it
+	// would be sent with alone.
+	{codeCutShort, agentworkspace.ErrCutShort, http.StatusGatewayTimeout},
 	// A body of another type than the route's: the client's mistake,
 	// as an invalid name is.
 	{codeMediaType, fs.ErrInvalid, http.StatusUnsupportedMediaType},

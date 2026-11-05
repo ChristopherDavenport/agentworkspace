@@ -616,12 +616,13 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 			return nil, fmt.Errorf("remote: exec %s: a frame of the reply: %w", cmd.Args[0], err)
 		}
 		switch {
-		case f.Error != nil:
-			return nil, fmt.Errorf("remote: exec %s: %w", cmd.Args[0], f.Error.err())
 		case f.Output != nil:
 			o := f.Output
 			out := &agentworkspace.Output{Stdout: o.Stdout, Stderr: o.Stderr, ExitCode: o.ExitCode, TimedOut: o.TimedOut, Interrupted: o.Interrupted}
 			switch {
+			case f.Error != nil:
+				// The output so far beside its kind: cut_short.
+				return out, fmt.Errorf("remote: exec %s: %w", cmd.Args[0], f.Error.err())
 			case !o.Interrupted:
 				return out, nil
 			case ctx.Err() != nil:
@@ -629,6 +630,8 @@ func (c *Client) Exec(ctx context.Context, cmd agentworkspace.Command) (*agentwo
 			}
 			// Not this client's cancel: the server's close ended it.
 			return out, fmt.Errorf("remote: exec %s: the server ended it: %w", cmd.Args[0], fs.ErrClosed)
+		case f.Error != nil:
+			return nil, fmt.Errorf("remote: exec %s: %w", cmd.Args[0], f.Error.err())
 		case len(f.Data) > 0 && cmd.Stream != nil:
 			if _, err := cmd.Stream.Write(f.Data); err != nil {
 				return nil, err

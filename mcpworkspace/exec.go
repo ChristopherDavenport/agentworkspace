@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,7 +40,11 @@ const outputDelay = lifetime.Grace
 // each keeps its own. A Stream whose write fails ends the command, and
 // Exec returns that error. The output is read for at most two seconds
 // past the command's exit, as Local reads it, while something the
-// command left holds it open.
+// command left holds it open; past that, Exec returns what came and the
+// command's status beside agentworkspace.ErrCutShort. A background job
+// in the command's group is ended as the command exits, as a started
+// process's are (RFC 0001 §8), so only one that left the group holds
+// the output.
 //
 // A process the server ended for another reason than this cancel (its
 // session's end, its own close) is an Output with Interrupted beside an
@@ -148,9 +151,10 @@ func Exec(ctx context.Context, c Conn, cmd agentworkspace.Command) (*agentworksp
 		return o, fmt.Errorf("exec %s: the server ended it: %w", cmd.Args[0], fs.ErrClosed)
 	case werr != nil:
 		return nil, werr
-	case cut && status == 0:
-		// As os/exec says it: the output was cut short.
-		return nil, exec.ErrWaitDelay
+	case cut:
+		// The output so far, its status, and the kind that says the
+		// rest was held by what the command left (RFC 0001 §6).
+		return o, fmt.Errorf("exec %s: %w", cmd.Args[0], agentworkspace.ErrCutShort)
 	}
 	return o, nil
 }

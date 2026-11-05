@@ -807,7 +807,10 @@ func (h *Handler) exec(w http.ResponseWriter, r *http.Request) {
 		cmd.Stream = fr
 	}
 	out, err := h.ws.Exec(ctx, cmd)
-	if err != nil && (out == nil || !out.Interrupted) {
+	// Output held past the wait for it is the output so far, and its
+	// kind beside it in the same frame.
+	cut := err != nil && out != nil && errors.Is(err, agentworkspace.ErrCutShort)
+	if err != nil && !cut && (out == nil || !out.Interrupted) {
 		e := errorOf(err)
 		fr.send(execFrame{Error: &e})
 		return
@@ -818,7 +821,12 @@ func (h *Handler) exec(w http.ResponseWriter, r *http.Request) {
 			out.ExitCode, n, h.maxOutput)}})
 		return
 	}
-	fr.send(execFrame{Output: &execOutput{Stdout: out.Stdout, Stderr: out.Stderr, ExitCode: out.ExitCode, TimedOut: out.TimedOut, Interrupted: out.Interrupted}})
+	last := execFrame{Output: &execOutput{Stdout: out.Stdout, Stderr: out.Stderr, ExitCode: out.ExitCode, TimedOut: out.TimedOut, Interrupted: out.Interrupted}}
+	if cut {
+		e := errorOf(err)
+		last.Error = &e
+	}
+	fr.send(last)
 }
 
 // cancelExec ends the Exec r's principal runs under the route's key as

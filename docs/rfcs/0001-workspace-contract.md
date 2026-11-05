@@ -1,6 +1,6 @@
 # RFC 0001: Workspace Contract
 
-Status: draft 0.3
+Status: draft 0.4
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding; `Local` is the reference backend, and
@@ -173,6 +173,7 @@ side of a wire:
 | process-done | the process has exited | `os.ErrProcessDone` | `process_done` | `processdone` |
 | closed | the workspace or the handle is closed | `fs.ErrClosed` | `closed` | `closed` |
 | no-server | no server is offered by that name | `ErrNoServer` | `no_server` | `noserver` |
+| cut-short | an Exec's command exited, but something it left running held its output open past the wait for it | `ErrCutShort`, which is `exec.ErrWaitDelay` too | `cut_short` | `cutshort` |
 
 *outside* is matched before any other kind, since a link's refusal may
 also read as another. Every binding over a wire MUST carry every kind
@@ -180,6 +181,11 @@ both ways, for every operation it carries, so a test for the kind holds
 on the client side as on the serving side; a wire MAY add kinds of its
 own (remote's `limit`, both wires' no-process), and a refusal of none
 of these is *other*.
+
+*cut-short* is the one kind that is not a refusal: it comes beside an
+Exec's result, which holds the output so far and the command's status
+([section 6](#6-exec)), never in place of one. It is in this table so
+that every wire carries it, and maps it back, as it does the others.
 
 A refusal's message is governed by [section 15](#15-security-considerations):
 it names no path of the serving side's machine.
@@ -248,7 +254,7 @@ A **command** is one process to run:
 | Member | Meaning |
 | --- | --- |
 | args | argv; MUST NOT be empty, and an empty one is refused before anything starts |
-| dir | a name of a directory, relative to the root; empty is the root. A dir that leaves the workspace, by name or through a link, is refused as *outside*; one that is not a directory is refused |
+| dir | a name of a directory, relative to the root; empty is the root. A dir that leaves the workspace, by name or through a link, is refused as *outside*; one that does not exist as *not-exist*, every workspace; one that exists but is not a directory MUST be refused as *invalid*, before anything runs, on every workspace |
 | env | entries over the workspace's environment, name by name ([section 4](#4-environment)) |
 | stdin | the bytes of standard input for Exec; none when absent. Start refuses it: a started process's input is its pipe |
 | timeout | ends the process, and everything it started, after this long; zero is no limit but the owner's |
@@ -275,13 +281,24 @@ command's.
   `exec.ErrDot` refuses the same).
 - With no `PATH`, a bare name is not found. A backend MUST NOT supply a
   default, since a container's default differs from the host's.
-- A name not found is an error, and nothing runs. The process gets
-  `args[0]` as given, whatever the lookup found.
+- The process gets `args[0]` as given, whatever the lookup found.
+
+A command whose program is not found, by Exec or by Start, MUST be
+refused with kind *not-exist* on every binding, before anything runs.
+The refusal names the program as given, and no path of the serving
+side's machine. That holds for a bare name no `PATH` entry has and for
+a name with a slash that names nothing. A binding over a wire carries
+the kind, and its client adds the program's name to the refusal
+([section 15](#15-security-considerations)). *not-exist* is also a
+`dir` that does not exist, so a caller that gave no dir can read it as
+the program's.
 
 `workspacetest` holds it: `Run` runs a bare name found only on the
-command's `PATH`, and `RunStarter`, over a workspace with no `PATH`,
-finds nothing for a bare name, an empty `PATH` or a relative entry, and
-runs a name with a slash relative to dir.
+command's `PATH`, and refuses a program not found, bare or by a path,
+as *not-exist* naming it, as `RunStarter` does for Start; and
+`RunStarter`, over a workspace with no `PATH`, finds nothing for a bare
+name, an empty `PATH` or a relative entry, and runs a name with a slash
+relative to dir.
 
 ## 6. Exec
 
@@ -311,6 +328,38 @@ it ended:
   keeps none, as when the command runs to its end. A caller that
   interrupts a command still learns what it printed, which a build or a
   test run has often said by then.
+- When the command exits but a process it left running still holds its
+  output open past the backend's wait for that output, Exec MUST
+  return the output collected so far, and the command's own exit
+  status, with an error of kind *cut-short*, whatever that status, and
+  every wire MUST carry that kind both ways. It is not *other*: the
+  command ran to its end, and a caller that started a background job
+  (`cmd &`) gets what came before it. The reference binding's wait is
+  two seconds past the command's exit; mcpworkspace's composed Exec
+  ends a background job in the command's group as the command exits,
+  as [section 8](#8-ending-a-process) ends a started process's, so only
+  one that left the group holds the output there. remote's reply
+  carries the kind beside the output in one frame.
+- What an Exec's command left running when it exited MUST end at the
+  workspace's close at the latest, by the ladder and as far as the
+  backend's reach goes ([section 8](#8-ending-a-process)), wherever the
+  backend can still tell the command's group once the command has
+  exited (a process table to check its ID against, or a group it ends
+  whole, such as a container's). A backend that cannot MUST NOT signal
+  the group's ID, as [section 8](#8-ending-a-process) says, and states
+  the gap; its reach is then *group*, and the conformance table skips
+  the case for it when the leftover outlives the close. A backend
+  MAY end it sooner, and a caller MUST NOT rely on it running past the
+  Exec's return. `Local` remembers the group, and the descendants it
+  found, of each Exec whose command left something running, looks again
+  at each while it runs, and its close ends them, waiting through the
+  ladder (at least a grace after `cmd &`, which ignores INT); where it
+  reads no process table it cannot, as [section 8](#8-ending-a-process)
+  says. An Exec still running at the close ends what it left as it
+  returns. mcpworkspace's composed Exec ends a leftover in the
+  command's group at its return, as its start's process ends; remote's
+  Exec belongs to no session, so what it leaves lives until the program
+  closes the served workspace, whose close ends it.
 - When the caller's context has ended before the command runs, Exec
   returns the context's error, runs nothing, and gives no result.
 - A command that cannot start (no args, a refused dir, a program not
@@ -422,6 +471,23 @@ end it and everything it started:
 - the workspace's **close**.
 
 When the process exits by itself, what it started MUST go with it.
+What an Exec's command left running when it exited ends at the
+workspace's close at the latest, by the same ladder, where the backend
+can still tell the command's group ([section 6](#6-exec)). A backend that remembers such a group past its leader's exit
+MUST signal it by its ID only while a process it remembered as a
+member still holds that ID, since once they are gone another group may
+have taken it, and SHOULD look again while the group runs, so a member
+started since is remembered. A backend that cannot tell (no process
+table) MUST NOT signal the ID, and what an Exec left then outlives the
+close: this is a gap of such a backend, not a rule it meets, and
+[section 6](#6-exec) does not hold it to the rule. `Local` looks every
+250 ms on Linux while `/proc` is its own, one read of the table for
+every group it keeps, so a member whose
+finders all exit within one look of its start escapes the close; on
+macOS, or with a `/proc` not its own, it keeps nothing and ends nothing
+an Exec left. Pinning the group's ID by leaving its leader unreaped
+until the close (a `waitid` with `WNOWAIT`) would close both gaps; it
+is not done.
 
 **The ladder.** Every way a process is ended (its close, the end of its
 context, its timeout, the workspace's close, and an Exec's context or
@@ -788,7 +854,7 @@ does not repeat. In summary:
 | root, descriptor, bounds, reach, environment | `GET /v1/info` | `read` or `servers`; environment only with `exec` |
 | files | `GET /v1/fs/{stat,lstat,readlink,readdir,file}?path=N` | `read` |
 | write, remove | `PUT`, `DELETE /v1/fs/file?path=N` | `write` |
-| exec | `POST /v1/exec {…, key}`, NDJSON frames back: `{"data"}` for the stream, then one `{"output"}` or `{"error"}`; `output.interrupted` for a cancelled one | `exec` |
+| exec | `POST /v1/exec {…, key}`, NDJSON frames back: `{"data"}` for the stream, then one `{"output"}` or `{"error"}`; `output.interrupted` for a cancelled one; `{"output", "error": {"code": "cut_short"}}` in one frame for output held past the wait | `exec` |
 | cancel an exec | `POST /v1/exec/{key}/cancel`, the principal's own key | `exec` |
 | list servers | `GET /v1/servers` | `servers` |
 | owner | a session, `POST /v1/sessions`, renewed on a lease; its lapse or close ends every process in it | `exec` or `servers` |
@@ -889,7 +955,7 @@ The reference suite is Go package `workspacetest`:
 
 | Table | Holds |
 | --- | --- |
-| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group), invalid names, the descriptor's members for its kind and an absolute root, concurrent use, refusals that name no served path over a wire (`Backend.Wire`), connect where offered |
+| `Run` | a workspace: every way out refused, what stays in works, nothing blocks on a FIFO, the environment a copy, Exec (argv resolution, the environment, a timeout, an interrupt, a descendant that left the group, the kinds of a program not found, a dir that is a file and output cut short, what it left running ended at the workspace's close), invalid names, the descriptor's members for its kind and an absolute root, concurrent use, refusals that name no served path over a wire (`Backend.Wire`), connect where offered |
 | `RunStarter` | a starter: the pipes, the directory and environment (argv resolution, the environment as given), the lifetimes (context, timeout, close, exit, the workspace's close, a descendant that left the group), the required signals and the refusal of others, a terminal, refusals, concurrency |
 | `RunExec` | the Exec table alone, over an `Execer`: a wire's client that carries Exec without a whole workspace (mcpworkspace's) |
 | `RunServerProvider` | a server provider: the list and its secrets mark, the pipes, the directory, *no-server*, the lifetimes, standard error, secrets kept out of the output |
@@ -972,6 +1038,45 @@ Draft 0.2 listed four places where the code and its doc comments
 disagreed (the root, error kinds and messages over mcpworkspace, the
 signals), and two questions with no issue (reach over a wire, a wire
 corpus); draft 0.3 settles each, as its changes below say.
+
+## Changes since draft 0.3
+
+- [Section 5](#5-commands): a program not found, by Exec or by Start,
+  is refused with kind *not-exist* on every binding, naming the program
+  as given (#46). `Local`'s refusal is `fs.ErrNotExist` and still
+  `exec.ErrNotFound`; it crossed both wires as *other*.
+- [Section 5](#5-commands): a `dir` that exists but is not a directory
+  is refused with kind *invalid*, before anything runs, on every
+  workspace (#48). `Local`'s refusal had no kind and crossed both wires
+  as *other*.
+- [Section 2](#error-kinds) and [section 6](#6-exec): the kind
+  *cut-short* (#49). An Exec whose command exited while something it
+  left running held its output open returns the output so far and its
+  status with an error of that kind, which both wires carry (remote's
+  `cut_short`, beside the output in the exec reply's last frame;
+  mcpworkspace's `cutshort`). Go's `ErrCutShort` is `exec.ErrWaitDelay`
+  too. `Local` returned `exec.ErrWaitDelay` with no output, and that
+  only for status 0; it crossed both wires as *other*.
+- [Section 6](#6-exec) and [section 8](#8-ending-a-process): what an
+  Exec's command left running when it exited ends at the workspace's
+  close at the latest, by the ladder and as far as the reach goes; a
+  backend may end it sooner (#45). `Local`'s close ended only Start's
+  processes, so an Exec's `cmd &` outlived the workspace. A group
+  remembered past its leader's exit is signalled by its ID only while a
+  remembered member holds it; a backend with no process table signals
+  nothing, and that is stated as its gap. *cut-short* comes beside a
+  result, not as a refusal ([section 2](#error-kinds)).
+  `workspacetest`'s `Backend` and `ExecBackend` gain `CloseServed`, to
+  close the workspace a wire's client is served by.
+- [Section 6](#6-exec): the rule that an Exec's leftovers end at the
+  close holds where the backend can still tell the command's group once
+  the command has exited; one that cannot (no process table, reach
+  *group*) signals nothing and states the gap, and `workspacetest`
+  skips the case for a backend whose reach is *group* when the leftover
+  outlives the close. `Local` reads the process table once per look
+  for every group it keeps, forgets a remembered process two reads in
+  a row miss, and lets a group go after two looks in a row find
+  nothing of it running.
 
 ## Changes since draft 0.2
 

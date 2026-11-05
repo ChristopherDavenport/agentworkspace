@@ -47,6 +47,11 @@ type Backend struct {
 	Open  func(t *testing.T, dir string) agentworkspace.Workspace
 	Links bool
 	Wire  bool
+	// CloseServed, when set, closes the workspace ws, one Open gave,
+	// runs its commands in: for the client side of a wire whose own
+	// Close leaves the served workspace open, as remote's and the
+	// tunnel's do, the served one. Nil is ws.Close.
+	CloseServed func(t *testing.T, ws agentworkspace.Workspace)
 }
 
 // Run runs every table a Workspace keeps (confinement, a FIFO, Env,
@@ -62,6 +67,7 @@ func Run(t *testing.T, backends ...Backend) {
 		{"NothingBlocksOnAFIFO", nothingBlocksOnAFIFO},
 		{"EnvIsACopy", envIsACopy},
 		{"Exec", execRuns},
+		{"ExecLeftoversEndAtClose", execLeftoversEndAtClose},
 		{"NamesThatAreNotValidPaths", namesThatAreNotValidPaths},
 		{"Concurrently", concurrently},
 		{"RefusalsNameNoServedPath", refusalsNameNoServedPath},
@@ -344,6 +350,10 @@ type ExecBackend struct {
 	Name string
 	Open func(t *testing.T, dir string, env []string) Execer
 	Wire bool
+	// CloseServed, when set, closes the workspace ws, one Open gave,
+	// runs its commands in; nil is ws's Close, when it has one, and
+	// otherwise the table that needs it is skipped.
+	CloseServed func(t *testing.T, ws Execer)
 }
 
 // RunExec runs the Exec table Run runs (status, streams, Dir, Env,
@@ -363,8 +373,72 @@ func RunExec(t *testing.T, backends ...ExecBackend) {
 					noServedPath(t, dir, execRefusals(t, dir, ws))
 				})
 			}
+			t.Run("leftovers end at close", func(t *testing.T) {
+				dir := t.TempDir()
+				ws := b.Open(t, dir, env)
+				closeWS := func() {
+					if c, ok := ws.(io.Closer); ok {
+						c.Close()
+					}
+				}
+				switch _, closer := ws.(io.Closer); {
+				case b.CloseServed != nil:
+					closeWS = func() { b.CloseServed(t, ws) }
+				case !closer:
+					t.Skip("no way to close the workspace")
+				}
+				leftoversEndAtClose(t, dir, ws, closeWS)
+			})
 		})
 	}
+}
+
+// What an Exec's command left running when it exited ends at the
+// workspace's close at the latest, by the ladder (RFC 0001 §6, §8).
+func execLeftoversEndAtClose(t *testing.T, b Backend) {
+	dir := t.TempDir()
+	ws := b.Open(t, dir)
+	closeWS := func() { ws.Close() }
+	if b.CloseServed != nil {
+		closeWS = func() { b.CloseServed(t, ws) }
+	}
+	leftoversEndAtClose(t, dir, ws, closeWS)
+}
+
+// leftoversEndAtClose runs, through an Exec in a workspace on dir, a
+// command that leaves beat.sh running in its group, its output its
+// own, then closes the workspace with closeWS: the beat is gone within
+// the ladder's graces. A backend may end it sooner, as mcpworkspace's
+// composed Exec does at its return. One whose end reaches the group
+// alone (ReachGroup) and that leaves it running skips: such a backend
+// reads no process table, so it cannot tell the group's ID, once the
+// command has exited, from one another group has taken since, and RFC
+// 0001 §6 and §8 hold it to the rule only where it can.
+func leftoversEndAtClose(t *testing.T, dir string, ws Execer, closeWS func()) {
+	os.Remove(filepath.Join(dir, "stop"))
+	os.Remove(filepath.Join(dir, "beat"))
+	if err := os.WriteFile(filepath.Join(dir, "beat.sh"), []byte(beatScript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ws.Exec(context.Background(), agentworkspace.Command{Args: []string{"sh", "-c", "sh beat.sh </dev/null >/dev/null 2>&1 & echo started"}})
+	if err != nil || string(out.Stdout) != "started\n" {
+		t.Fatalf("Exec = %+v, %v", out, err)
+	}
+	if !beating(t, dir) {
+		t.Log("what the Exec left was ended at its return")
+	}
+	within(t, 15*time.Second, "closing the workspace", closeWS)
+	if !beating(t, dir) {
+		return
+	}
+	if reachOf(ws) == agentworkspace.ReachGroup {
+		os.WriteFile(filepath.Join(dir, "stop"), nil, 0o644)
+		if beating(t, dir) {
+			t.Error("beat.sh did not stop at its stop file")
+		}
+		t.Skip("what the Exec left outlives the close: this workspace's end of a process reaches its group alone, and it cannot tell the group once the command has exited (RFC 0001 §8)")
+	}
+	t.Error("what the Exec left running outlived the workspace's close")
 }
 
 // Exec runs to completion: status, streams, Dir, Env, Stdin, a
@@ -452,6 +526,22 @@ func execTable(t *testing.T, dir string, ws Execer, env []string) {
 	if _, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"pwd"}, Dir: "../"}); !errors.Is(err, agentworkspace.ErrOutside) {
 		t.Errorf("a Dir out of the root: err = %v", err)
 	}
+	programNotFound(t, func(c agentworkspace.Command) error {
+		_, err := ws.Exec(ctx, c)
+		return err
+	})
+	execCutShort(t, ws)
+	// A Dir that is there but is not a directory is invalid, before
+	// anything runs (RFC 0001 §5).
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"pwd"}, Dir: "file.txt"}); !errors.Is(err, fs.ErrInvalid) {
+		t.Errorf("a Dir that is a file: err = %v, want fs.ErrInvalid", err)
+	}
+	if _, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"pwd"}, Dir: "missing"}); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a Dir that is not there: err = %v, want fs.ErrNotExist", err)
+	}
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := ws.Exec(cctx, agentworkspace.Command{Args: []string{"sleep", "5"}}); err == nil {
@@ -459,6 +549,66 @@ func execTable(t *testing.T, dir string, ws Execer, env []string) {
 	}
 	execInterrupted(t, ws)
 	execEndsWhatLeftItsGroup(t, dir, ws)
+}
+
+// A command that exits while what it left running holds its output
+// open gives the output so far and its own exit status beside an error
+// of its own kind, which is exec.ErrWaitDelay too (RFC 0001 §6). A
+// backend may instead end what a command left as the command exits, as
+// mcpworkspace's composed Exec does a background job in its group: it
+// then returns at once, with no error. One that left the group (setsid)
+// is held over on every backend whose end reaches no orphan.
+func execCutShort(t *testing.T, ws Execer) {
+	ctx := context.Background()
+	check := func(t *testing.T, script string, status int, mayEnd bool) {
+		var out *agentworkspace.Output
+		var err error
+		start := time.Now()
+		within(t, 15*time.Second, "the Exec", func() {
+			out, err = ws.Exec(ctx, agentworkspace.Command{Args: []string{"sh", "-c", script}})
+		})
+		ended := mayEnd && err == nil && time.Since(start) < grace
+		if !ended && (!errors.Is(err, agentworkspace.ErrCutShort) || !errors.Is(err, exec.ErrWaitDelay)) {
+			t.Errorf("err = %v after %v, want ErrCutShort and exec.ErrWaitDelay", err, time.Since(start))
+		}
+		if out == nil || string(out.Stdout) != "hi\n" || out.ExitCode != status || out.Interrupted || out.TimedOut {
+			t.Errorf("Output = %+v, want what it wrote, hi, and status %d", out, status)
+		}
+	}
+	t.Run("output held by what the command left", func(t *testing.T) {
+		check(t, "sleep 10 & echo hi", 0, true)
+	})
+	t.Run("output held by what left the group", func(t *testing.T) {
+		if _, err := exec.LookPath("setsid"); err != nil {
+			t.Skip("no setsid here")
+		}
+		// The pause lets setsid leave the group before the shell exits,
+		// which would otherwise end it with the group.
+		check(t, "setsid sleep 10 & sleep 0.5; echo hi", 0, false)
+	})
+	// Whatever its status: cut-short comes beside the result.
+	t.Run("output held, a status other than zero", func(t *testing.T) {
+		if _, err := exec.LookPath("setsid"); err != nil {
+			t.Skip("no setsid here")
+		}
+		check(t, "setsid sleep 10 & sleep 0.5; echo hi; exit 3", 3, false)
+	})
+}
+
+// programNotFound checks that run, an Exec or a Start, refuses a
+// program that is not there, by a bare name on no PATH entry or by a
+// path, as fs.ErrNotExist, naming the program as given (RFC 0001 §5).
+func programNotFound(t *testing.T, run func(agentworkspace.Command) error) {
+	t.Helper()
+	for what, name := range map[string]string{
+		"a bare name on no PATH entry":  "agentworkspace-missing-program",
+		"a missing program by its path": "./agentworkspace-missing-program",
+	} {
+		err := run(agentworkspace.Command{Args: []string{name}})
+		if !errors.Is(err, fs.ErrNotExist) || !strings.Contains(fmt.Sprint(err), name) {
+			t.Errorf("%s: err = %v, want one that is fs.ErrNotExist and names %s", what, err, name)
+		}
+	}
 }
 
 // A timeout ends what the command started that left its group, as
@@ -480,11 +630,12 @@ func execEndsWhatLeftItsGroup(t *testing.T, dir string, ws Execer) {
 	})
 }
 
-// beatScript beats into the file beat until it is killed, or for 30
-// seconds, ignoring SIGINT and SIGTERM.
+// beatScript beats into the file beat until it is killed, a file
+// named stop appears beside it, or for 30 seconds, ignoring SIGINT and
+// SIGTERM.
 const beatScript = `trap '' INT TERM HUP
 i=0
-while [ $i -lt 300 ]; do
+while [ $i -lt 300 ] && [ ! -e stop ]; do
 	i=$((i+1))
 	echo $i > beat.tmp && mv beat.tmp beat
 	sleep 0.1

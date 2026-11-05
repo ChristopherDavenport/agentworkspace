@@ -215,7 +215,9 @@ type execRequest struct {
 
 // execFrame is one line of Exec's NDJSON reply: Command.Stream's
 // output as it arrives, then one Output or one Error, which is the
-// last.
+// last. An Output whose command left something holding its output past
+// the wait for it carries the cut_short Error beside it, in the same
+// frame.
 type execFrame struct {
 	Data   []byte      `json:"data,omitempty"`
 	Output *execOutput `json:"output,omitempty"`

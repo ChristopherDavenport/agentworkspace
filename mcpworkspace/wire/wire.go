@@ -388,6 +388,7 @@ const (
 	KindProcessDone = "processdone" // os.ErrProcessDone
 	KindClosed      = "closed"      // fs.ErrClosed
 	KindNoServer    = "noserver"    // agentworkspace.ErrNoServer
+	KindCutShort    = "cutshort"    // agentworkspace.ErrCutShort
 	KindNoProcess   = "noprocess"   // an id the session did not start, or closed
 	KindOther       = "other"       // none of these
 )
@@ -396,7 +397,7 @@ const (
 // matched (KindOutside first, since a link's refusal may also read as
 // another), as a new slice each call.
 func Kinds() []string {
-	return []string{KindOutside, KindNotExist, KindExist, KindPermission, KindInvalid, KindUnsupported, KindProcessDone, KindClosed, KindNoServer, KindNoProcess}
+	return []string{KindOutside, KindNotExist, KindExist, KindPermission, KindInvalid, KindUnsupported, KindProcessDone, KindClosed, KindNoServer, KindCutShort, KindNoProcess}
 }
 
 // CodeRefused is the JSON-RPC error code of a process or server

@@ -5,6 +5,62 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Changed: a program not found, by Exec or by Start, is
+  `fs.ErrNotExist` on every backend and over every wire, naming the
+  program as given (#46). `Local`'s refusal of a bare name no `PATH`
+  entry has was an `*exec.Error` alone, which remote, the tunnel and
+  mcpworkspace carried as *other*; it is still `exec.ErrNotFound`.
+  RFC 0001 §5 states it (draft 0.4), and `workspacetest.Run` and
+  `RunStarter` check it.
+- Changed: a command's `Dir` that exists but is not a directory is
+  `fs.ErrInvalid` on every backend and over every wire, before anything
+  runs (#48). `Local`'s refusal had no kind, so remote, the tunnel and
+  mcpworkspace carried it as *other*. RFC 0001 §5 states it, and
+  `workspacetest.Run` and `RunStarter` check it.
+- Added: `ErrCutShort`, the kind *cut-short* (#49). An Exec whose
+  command exited while something it left running held its output open
+  past the two-second wait returns the output so far and the command's
+  status beside an error that is `ErrCutShort`, and still
+  `exec.ErrWaitDelay`, so a caller testing for that holds on every
+  backend now, remote's and mcpworkspace's clients included. Behaviour
+  change: `Local` and mcpworkspace's `Exec` returned
+  `exec.ErrWaitDelay` with no Output, and only for status 0; with
+  another status they returned the Output with no error. remote carries
+  it as code `cut_short`, beside the output in the exec reply's last
+  frame (an older client reads it as an error of no kind and loses the
+  output), and
+  mcpworkspace as kind `cutshort` (`wire.KindCutShort`). RFC 0001 §2
+  and §6 state it; both wire corpora carry it; `workspacetest.Run` and
+  `RunExec` check it.
+- Changed: what an Exec's command left running when it exited ends at
+  the workspace's Close at the latest, by the ladder and as far as
+  `Reach` goes (#45). `Local` remembers each such Exec's group and the
+  descendants it found, looks again at each every 250 ms so a member
+  started since is remembered, and its `Close` ends them, waiting
+  through the ladder: at least two seconds after a `cmd &`, which ignores
+  SIGINT. It signals the group by its ID only while a process it
+  remembered still holds that ID, and only where it reads a process
+  table (Linux, while /proc is its own); on macOS what an Exec leaves
+  still outlives Close. A member whose finders all exit within 250 ms of
+  its start escapes, and an Exec still running at Close ends what it left
+  as it returns, which may be after Close.
+  remote's served workspace ends them at its own close, which is the
+  program's; mcpworkspace's composed Exec already ended them at its
+  return. RFC 0001 §6 and §8 state it. Added: `workspacetest.Run`'s
+  `ExecLeftoversEndAtClose` table and `RunExec`'s "leftovers end at
+  close" case, cases for cut-short with a status other than zero and for
+  a missing `Dir` (*not-exist*), and `CloseServed` on `Backend` and `ExecBackend`, to
+  close the workspace a wire's client is served by. Local's looks read
+  the process table once for every kept group, forget a remembered
+  process two reads in a row miss, and let a group go after two looks
+  in a row find nothing of it running (or cannot read the table); the
+  watch stops once nothing is kept. Where the group cannot be told
+  after the command exits (reach *group*), RFC 0001 §6 does not hold a
+  backend to the rule, and the leftovers case skips for such a backend
+  when the leftover outlives the close.
+
 ## v0.0.11 - 2026-11-01
 
 - Added: the wire corpus (#42). `testdata/wire/remote.json` and

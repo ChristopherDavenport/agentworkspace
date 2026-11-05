@@ -21,6 +21,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"time"
 )
 
@@ -28,6 +29,24 @@ import (
 // names another directory outright, climbs out with "..", or goes out
 // through a symbolic link.
 var ErrOutside = errors.New("path is outside the workspace")
+
+// ErrCutShort is the error beside an Exec's Output when the command
+// exited but something it left running still held its output open, so
+// the wait for that output ended first: the Output holds what came
+// before then, and the command's own exit status. It is
+// exec.ErrWaitDelay too, as os/exec says the same of its own Cmd, and
+// it crosses every wire as its own kind (RFC 0001 §2, cut-short).
+var ErrCutShort error = cutShort{}
+
+// cutShort is ErrCutShort's type: comparable, so errors.Is finds it,
+// and exec.ErrWaitDelay by its Is.
+type cutShort struct{}
+
+func (cutShort) Error() string {
+	return "the command exited, but something it left running held its output open"
+}
+
+func (cutShort) Is(target error) bool { return target == exec.ErrWaitDelay }
 
 // Kinds a Descriptor names, as agentsession's env entry records them.
 const (
@@ -75,7 +94,10 @@ type Workspace interface {
 	// ends the command and everything it started, and returns the
 	// output collected so far, with ExitCode -1 and Interrupted, beside
 	// ctx.Err(); a ctx that has ended before the command starts runs
-	// nothing and gives no Output.
+	// nothing and gives no Output. When the command exits but something
+	// it left running holds its output open past the wait for it, Exec
+	// returns the output so far and the command's status beside an
+	// error that is ErrCutShort.
 	Exec(ctx context.Context, cmd Command) (*Output, error)
 	// Descriptor is what the session records about where the tools ran.
 	Descriptor() Descriptor
@@ -91,10 +113,14 @@ type Command struct {
 	// the file system, never on this process's: a relative PATH entry,
 	// the empty one included, is skipped, and with no PATH the name is
 	// not found. One with a slash is used as it is, relative to Dir.
-	// The process gets Args[0] as given.
+	// The process gets Args[0] as given. A program not found is an
+	// error that is fs.ErrNotExist, on every backend and over every
+	// wire, and nothing runs; Local's is exec.ErrNotFound too.
 	Args []string
 	// Dir is relative to Root; "" is Root. A Dir that leaves the
-	// workspace, by name or through a link, is ErrOutside.
+	// workspace, by name or through a link, is ErrOutside, and one that
+	// is there but is not a directory fs.ErrInvalid, on every backend
+	// and over every wire, and nothing runs.
 	Dir string
 	// Env is over Workspace.Env, name by name: an entry replaces the
 	// workspace's of the same name, and a later entry an earlier one,

@@ -3,6 +3,7 @@ package agentworkspace
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -119,15 +120,16 @@ func TestALocalHostIsNeverEmpty(t *testing.T) {
 
 // A command that exited before the context ended is not interrupted,
 // though a child it left holds its output open past its exit: its
-// status is what it exited with.
+// status is what it exited with, beside ErrCutShort, whatever that
+// status (RFC 0001 §6).
 func TestAnExitBeforeTheContextEndsKeepsItsStatus(t *testing.T) {
 	l, _ := local(t, []string{"PATH=" + os.Getenv("PATH")})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	time.AfterFunc(500*time.Millisecond, cancel)
 	out, err := l.Exec(ctx, Command{Args: []string{"sh", "-c", "echo hi; sleep 5 & exit 3"}})
-	if err != nil || out == nil || out.ExitCode != 3 || out.Interrupted || string(out.Stdout) != "hi\n" {
-		t.Errorf("Exec = %+v, %v; want status 3, not interrupted", out, err)
+	if !errors.Is(err, ErrCutShort) || out == nil || out.ExitCode != 3 || out.Interrupted || string(out.Stdout) != "hi\n" {
+		t.Errorf("Exec = %+v, %v; want status 3 beside ErrCutShort, not interrupted", out, err)
 	}
 }
 
@@ -260,4 +262,232 @@ func TestTheKillIsSentAgainToWhatSurvivesIt(t *testing.T) {
 	if n := strings.Count(strings.Join(f.sent, ","), "KILL -200"); n != 2 {
 		t.Errorf("signals = %q; want KILL -200 sent again after the first was lost", f.sent)
 	}
+}
+
+// What an Exec's command left is ended by its group's ID only while a
+// process remembered as a member still holds that ID: once those are
+// gone, a group that has taken the ID since is not signalled, nor are
+// its members read as what the command left.
+func TestALeftGroupsReusedIDIsNotSignalled(t *testing.T) {
+	f := &fakeOS{table: map[int]procInfo{
+		200: {ppid: 1, pgrp: 100, start: 5}, // what the command left; the leader, 100, is reaped
+	}}
+	g := &group{pgid: 100, start: 1, sys: f.sys()}
+	g.reap(false)
+	if !g.leftRunning() {
+		t.Fatal("what the command left does not read as running")
+	}
+	delete(f.table, 200)
+	f.table[100] = procInfo{ppid: 1, pgrp: 100, start: 9}    // a new leader with the old ID
+	f.table[300] = procInfo{ppid: 100, pgrp: 100, start: 10} // and its child
+	f.sent = nil
+	if g.leftRunning() {
+		t.Error("a group that took the ID reads as what the command left")
+	}
+	g.endLeft()
+	if len(f.sent) != 0 {
+		t.Errorf("signals = %q; want none to a group that took the ID", f.sent)
+	}
+}
+
+// Without a process table the group's ID cannot be told from one
+// another group has taken since, so what an Exec's command left is not
+// kept, and nothing is signalled for it: it stays as a backend whose
+// reach is the group left it before (RFC 0001 §8).
+func TestALeftGroupIsNotKeptWithoutATable(t *testing.T) {
+	var sent []string
+	g := &group{pgid: 100, start: 1, sys: procOS{
+		table: func() (map[int]procInfo, bool) { return nil, false },
+		start: func(int) (uint64, bool) { return 0, false },
+		send: func(pid int, sig syscall.Signal) error {
+			if sig != 0 {
+				sent = append(sent, fmt.Sprintf("%v %d", sig, pid))
+			}
+			return nil
+		},
+	}}
+	g.reap(false)
+	if g.leftRunning() {
+		t.Error("a left group reads as running without a table")
+	}
+	g.endLeft()
+	if len(sent) != 0 {
+		t.Errorf("signals = %q; want none without a table", sent)
+	}
+}
+
+// A member of the group an Exec's command left that is started after
+// the walk at the reap, and whose finders then exit, is still ended at
+// Close: what is kept is looked at again while it runs, so the member
+// is remembered while the group's ID is still its own.
+func TestALeftMemberStartedLaterEndsAtClose(t *testing.T) {
+	if _, ok := processes(); !ok {
+		t.Skip("no process table of this process's own")
+	}
+	l, dir := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	if err := os.WriteFile(filepath.Join(dir, "beat.sh"), []byte("trap '' INT TERM HUP\ni=0\nwhile [ $i -lt 300 ]; do i=$((i+1)); echo $i > beat.tmp && mv beat.tmp beat; sleep 0.1; done\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The subshell starts beat.sh a second in, and exits half a second
+	// after; the sleep that ran first exits before either.
+	out, err := l.Exec(context.Background(), Command{Args: []string{"sh", "-c", "(sleep 1; sh beat.sh & sleep 1.5) </dev/null >/dev/null 2>&1 & echo started"}})
+	if err != nil || string(out.Stdout) != "started\n" {
+		t.Fatalf("Exec = %+v, %v", out, err)
+	}
+	time.Sleep(3 * time.Second) // the subshell and its sleeps have exited
+	beating := func() bool {
+		first, _ := os.ReadFile(filepath.Join(dir, "beat"))
+		for range 10 {
+			time.Sleep(100 * time.Millisecond)
+			if b, _ := os.ReadFile(filepath.Join(dir, "beat")); len(b) > 0 && !bytes.Equal(b, first) {
+				return true
+			}
+		}
+		return false
+	}
+	if !beating() {
+		t.Fatal("beat.sh never beat")
+	}
+	l.Close()
+	if beating() {
+		t.Error("a member started after the reap outlived Close")
+	}
+}
+
+// counted is f's table, counting its reads in reads.
+func counted(f *fakeOS, reads *int) procOS {
+	sys := f.sys()
+	table := sys.table
+	sys.table = func() (map[int]procInfo, bool) {
+		*reads++
+		return table()
+	}
+	return sys
+}
+
+// leftGroup is a group of f's whose leader, pgid, has been reaped by an
+// Exec while its member, pid, still runs.
+func leftGroup(t *testing.T, sys procOS, pgid int) *group {
+	t.Helper()
+	g := &group{pgid: pgid, start: 1, sys: sys}
+	g.reap(false)
+	if !g.left {
+		t.Fatalf("group %d is not left", pgid)
+	}
+	return g
+}
+
+// One look at what Execs left reads the process table once, however
+// many groups are kept: a read is a walk of every process on the host.
+func TestKeptGroupsShareOneReadOfTheTable(t *testing.T) {
+	f := &fakeOS{table: map[int]procInfo{
+		200: {ppid: 1, pgrp: 100, start: 5},
+		201: {ppid: 1, pgrp: 101, start: 5},
+		202: {ppid: 1, pgrp: 102, start: 5},
+	}}
+	var reads int
+	sys := counted(f, &reads)
+	l := &Local{sys: sys, watch: true}
+	for _, pgid := range []int{100, 101, 102} {
+		l.left = append(l.left, leftGroup(t, sys, pgid))
+	}
+	reads = 0
+	if !l.lookLeft() {
+		t.Fatal("the look stopped with groups running")
+	}
+	if reads != 1 {
+		t.Errorf("one look at three groups read the table %d times, want 1", reads)
+	}
+	if len(l.left) != 3 {
+		t.Errorf("kept %d groups, want 3", len(l.left))
+	}
+}
+
+// What a walk remembers lets go of a process absent from two good reads
+// of the table in a row, so a leftover that keeps starting children
+// does not grow it without bound; absent from one, it is kept.
+func TestFoundForgetsWhatTwoReadsMiss(t *testing.T) {
+	f := &fakeOS{table: map[int]procInfo{
+		100: {ppid: 1, pgrp: 100, start: 1},
+		200: {ppid: 100, pgrp: 100, start: 5},
+	}}
+	g := &group{pgid: 100, start: 1, sys: f.sys()}
+	g.descend(0, true)
+	if _, ok := g.found[200]; !ok {
+		t.Fatal("the member was not remembered")
+	}
+	delete(f.table, 200)
+	g.descend(0, true)
+	if _, ok := g.found[200]; !ok {
+		t.Error("a member one read missed was forgotten")
+	}
+	g.descend(0, true)
+	if _, ok := g.found[200]; ok {
+		t.Error("a member two reads in a row missed is still remembered")
+	}
+	// A leftover that churns children: each read sees a new one.
+	for pid := 300; pid < 400; pid++ {
+		f.table[pid] = procInfo{ppid: 100, pgrp: 100, start: uint64(pid)}
+		g.descend(0, true)
+		delete(f.table, pid)
+	}
+	g.descend(0, true)
+	g.descend(0, true)
+	if len(g.found) != 0 {
+		t.Errorf("found holds %d processes that are gone, want 0", len(g.found))
+	}
+}
+
+// A kept group is let go only when two looks in a row find nothing it
+// left running, or cannot read the table: a member whose entry one read
+// missed (a stat that failed for want of a file descriptor) does not
+// drop it. Once nothing is kept the watch stops, and a group kept later
+// starts it again.
+func TestAKeptGroupIsLetGoAfterTwoLooks(t *testing.T) {
+	f := &fakeOS{table: map[int]procInfo{
+		200: {ppid: 1, pgrp: 100, start: 5},
+	}}
+	sys := f.sys()
+	g := leftGroup(t, sys, 100)
+	l := &Local{sys: sys, watch: true, left: []*group{g}}
+	member := f.table[200]
+	delete(f.table, 200) // one read misses it
+	l.lookLeft()
+	if len(l.left) != 1 {
+		t.Fatal("a member one read missed dropped its group")
+	}
+	f.table[200] = member
+	l.lookLeft()
+	delete(f.table, 200) // gone
+	l.lookLeft()
+	if len(l.left) != 1 {
+		t.Fatal("one look that found nothing running dropped the group")
+	}
+	if l.lookLeft() || l.watch {
+		t.Error("the watch goes on with nothing kept")
+	}
+	if len(l.left) != 0 {
+		t.Errorf("kept %d groups after two looks found nothing, want 0", len(l.left))
+	}
+	// A group kept later starts the watch again.
+	f.table[201] = procInfo{ppid: 1, pgrp: 101, start: 5}
+	l.keepLeft(leftGroup(t, sys, 101))
+	l.mu.Lock()
+	watching := l.watch
+	l.closed = true
+	l.mu.Unlock()
+	if !watching {
+		t.Error("keeping a group did not start the watch again")
+	}
+	within(t, 2*time.Second, "the watch to stop at the close", func() {
+		for {
+			l.mu.Lock()
+			w := l.watch
+			l.mu.Unlock()
+			if !w {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
 }

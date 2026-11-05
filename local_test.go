@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -166,5 +167,16 @@ func TestFilesStayInsideAndDoNotBlock(t *testing.T) {
 	}
 	if d := l.Descriptor(); d.Kind != KindLocal || d.Root != dir || d.Ref != "" {
 		t.Errorf("Descriptor = %+v", d)
+	}
+}
+
+// A program not found is fs.ErrNotExist, the kind every wire carries,
+// and still exec.ErrNotFound, as os/exec says it, for a caller on this
+// side that tests for that.
+func TestProgramNotFoundIsBothKinds(t *testing.T) {
+	l, _ := local(t, []string{"PATH=/nonexistent"})
+	_, err := l.Exec(context.Background(), Command{Args: []string{"agentworkspace-missing-program"}})
+	if !errors.Is(err, fs.ErrNotExist) || !errors.Is(err, exec.ErrNotFound) {
+		t.Errorf("err = %v, want fs.ErrNotExist and exec.ErrNotFound", err)
 	}
 }

@@ -41,6 +41,9 @@ type Local struct {
 	closed bool
 	procs  map[*localProcess]struct{} // started and not yet closed
 	conns  map[*localConn]struct{}    // connected and not yet closed
+	left   []*group                   // Execs' groups whose command exited by itself and left something running
+	watch  bool                       // watchLeft runs
+	sys    procOS                     // the process table watchLeft reads: the system's, but in a test
 }
 
 var (
@@ -141,7 +144,16 @@ func (l *Local) Descriptor() Descriptor {
 }
 
 // Close ends every process Start started that is not closed yet, as
-// Process.Close does, and releases the directory handle.
+// Process.Close does, and what every Exec's command left running when
+// it exited, by the same ladder and as far as Reach goes, and releases
+// the directory handle. It returns once they have ended, so it waits
+// through the ladder for a leftover that ignores a step: a background
+// job of a shell (`cmd &`) ignores SIGINT, so Close takes at least a
+// grace (two seconds) after one. What Exec left is ended only where
+// Local reads a process table (Linux, while /proc is its own): without
+// one it cannot tell the group's ID from one another group has taken
+// since, and leaves it running. An Exec still running when Close is
+// called ends what it left as it returns, which may be after Close.
 func (l *Local) Close() error {
 	l.mu.Lock()
 	l.closed = true
@@ -153,6 +165,8 @@ func (l *Local) Close() error {
 	for c := range l.conns {
 		conns = append(conns, c)
 	}
+	left := l.left
+	l.left = nil
 	l.mu.Unlock()
 	for _, c := range conns {
 		c.Close()
@@ -161,8 +175,86 @@ func (l *Local) Close() error {
 	for _, p := range procs {
 		wg.Go(func() { p.Close() })
 	}
+	for _, g := range left {
+		wg.Go(g.endLeft)
+	}
 	wg.Wait()
 	return l.root.Close()
+}
+
+// keepLeft keeps g, an Exec's group whose command exited by itself, for
+// Close to end, while anything it left runs, and has watchLeft look at
+// it; a workspace already closing ends it now, before the Exec returns,
+// which may be after Close has.
+func (l *Local) keepLeft(g *group) {
+	if !g.leftRunning() {
+		return
+	}
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		g.endLeft()
+		return
+	}
+	l.left = append(l.left, g)
+	if !l.watch {
+		l.watch = true
+		go l.watchLeft()
+	}
+	l.mu.Unlock()
+}
+
+// leftLook is how often watchLeft looks at what Execs left.
+const leftLook = 250 * time.Millisecond
+
+// watchLeft looks at the kept groups every leftLook, so a member one
+// starts is remembered while the group's ID is still its own, and lets
+// go of a group that two looks in a row found nothing left running in,
+// or could not read the table for. It ends at Close, or as soon as no
+// group is kept; keepLeft starts it again. A Local never closed whose
+// Exec left something that never exits keeps it, and the Local, alive.
+func (l *Local) watchLeft() {
+	t := time.NewTicker(leftLook)
+	defer t.Stop()
+	for range t.C {
+		if !l.lookLeft() {
+			return
+		}
+	}
+}
+
+// lookLeft is one of watchLeft's looks: one read of the process table,
+// which every kept group is looked at on, since a read walks every
+// process on the host. A group is let go after two looks in a row, not
+// one, so a member whose entry a single read could not open (out of
+// file descriptors, say) does not drop its group. It reports whether
+// any group is still kept; watch is false once none is.
+func (l *Local) lookLeft() bool {
+	l.mu.Lock()
+	if l.closed || len(l.left) == 0 {
+		l.watch = false
+		l.mu.Unlock()
+		return false
+	}
+	kept := slices.Clone(l.left)
+	l.mu.Unlock()
+	ps, read := l.sys.procs()
+	var gone []*group
+	for _, g := range kept {
+		if g.look(ps, read) {
+			g.misses = 0
+		} else if g.misses++; g.misses >= 2 {
+			gone = append(gone, g)
+		}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.left = slices.DeleteFunc(l.left, func(g *group) bool { return slices.Contains(gone, g) })
+	if l.closed || len(l.left) == 0 {
+		l.watch = false
+		return false
+	}
+	return true
 }
 
 // FS reads through the root, opening without blocking.
@@ -222,7 +314,13 @@ func (l *Local) Remove(_ context.Context, name string) error {
 // ExitCode -1 and Interrupted or TimedOut; one that ends after the
 // command exited leaves its status as it was. It waits at most two
 // seconds past the command's exit for output its children still hold
-// open.
+// open, and when they hold it past that, returns the output so far and
+// the command's status beside ErrCutShort. What a command that exited by
+// itself left running is ended by the workspace's Close at the latest
+// where Local reads a process table (Linux, while /proc is its own);
+// without one it outlives Close, as Close says. A Local that ran an Exec
+// is to be closed: until then it watches what the Exec left, while that
+// runs.
 func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	if c.Terminal != nil {
 		return nil, fmt.Errorf("agentworkspace: Exec gives standard output and standard error apart; a terminal is Start's: %w", errors.ErrUnsupported)
@@ -328,8 +426,12 @@ func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 	mu.Unlock()
 	close(reaped)
 	// Ended, what is left of the group goes; a command that exited by
-	// itself keeps what it left running.
+	// itself keeps what it left running until the workspace's Close
+	// (RFC 0001 §6).
 	g.reap(ending)
+	if !ending {
+		l.keepLeft(g)
+	}
 	cut := !closedWithin(copied, waitDelay)
 	if cut {
 		for _, cp := range copies {
@@ -353,9 +455,10 @@ func (l *Local) Exec(ctx context.Context, c Command) (*Output, error) {
 		return nil, err
 	}
 	out.ExitCode = cmd.ProcessState.ExitCode()
-	if cut && out.ExitCode == 0 {
-		// As os/exec says it: the output was cut short.
-		return nil, exec.ErrWaitDelay
+	if cut {
+		// The output so far, its status, and the kind that says the
+		// rest was held by what the command left (RFC 0001 §6).
+		return out, fmt.Errorf("agentworkspace: exec %s: %w", c.Args[0], ErrCutShort)
 	}
 	return out, nil
 }
@@ -420,7 +523,8 @@ func (l *Local) prepare(c Command) (dir string, env []string, prog string, err e
 			return "", nil, "", outside(c.Dir, err)
 		}
 		if !fi.IsDir() {
-			return "", nil, "", fmt.Errorf("%s is not a directory", c.Dir)
+			// The kind every wire carries (RFC 0001 §5).
+			return "", nil, "", fmt.Errorf("%s is not a directory: %w", c.Dir, fs.ErrInvalid)
 		}
 		dir = filepath.Join(l.dir, c.Dir)
 	}
@@ -460,7 +564,9 @@ func processEnv(ws, cmd []string) []string {
 // entry, the empty one included, is skipped, so a file written into
 // the workspace cannot stand in for a program (exec.ErrDot's hazard).
 // With no PATH a bare name is not found: there is no default, since a
-// container's would differ from this machine's.
+// container's would differ from this machine's. A name not found is
+// fs.ErrNotExist, the kind RFC 0001 §2 gives it, and still
+// exec.ErrNotFound, as os/exec says it.
 func lookPath(name string, env []string) (string, error) {
 	if strings.Contains(name, "/") {
 		return name, nil
@@ -481,8 +587,17 @@ func lookPath(name string, env []string) (string, error) {
 			}
 		}
 	}
-	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+	return "", &notFound{&exec.Error{Name: name, Err: exec.ErrNotFound}}
 }
+
+// notFound is a program lookPath did not find: os/exec's *exec.Error,
+// which says it as exec.ErrNotFound, and fs.ErrNotExist too, so the
+// kind crosses every wire.
+type notFound struct{ err *exec.Error }
+
+func (e *notFound) Error() string      { return e.err.Error() }
+func (e *notFound) Unwrap() error      { return e.err }
+func (*notFound) Is(target error) bool { return target == fs.ErrNotExist }
 
 // executable reports whether p is a file this process may execute.
 func executable(p string) bool {

@@ -40,12 +40,22 @@ var ladder = [...]syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKIL
 type group struct {
 	pgid  int
 	start uint64 // the leader's start time; 0 when unknown
-	// mu is held while a signal is sent and while reaped is set, so no
-	// signal goes to the group's ID once its leader is reaped.
+	// mu is held while a signal is sent and while reaped is set, so
+	// signal sends nothing to the group's ID once its leader is reaped.
+	// Only endLeft signals a reaped group, and only while held says its
+	// ID is still its own.
 	mu     sync.Mutex
 	reaped bool
+	// left says the leader exited by itself and was reaped while
+	// something of its group still ran, and a process table could be
+	// read: an Exec's leftovers, which the workspace's Close ends
+	// (endLeft). The group's ID is then trusted only while a process
+	// remembered as a member still holds it (held).
+	left   bool
+	misses int // Local's looks in a row that found nothing left running, or could not read the table
 	sys    procOS
 	found  map[int]uint64 // descendants found so far, in the group or out of it, by pid, with their start time
+	missed map[int]int    // how many good reads of the table in a row missed each of found
 }
 
 // newGroup is the group of the process pid, just started.
@@ -112,14 +122,103 @@ func (g *group) signal(sig syscall.Signal) error {
 // reap records that the leader has been waited for, killing what is
 // left of the group, and the descendants that left it, first when kill
 // is set. Here, as the leader is reaped, the group's ID cannot yet name
-// another group; later it could.
+// another group; later it could. So when kill is not set and something
+// of the group still runs, a walk remembers it now, with its start
+// time, and the group is marked left, for endLeft. Without a process
+// table nothing could later tell the group's ID from one another group
+// has taken, so the group is not marked, and what it left is not ended.
 func (g *group) reap(kill bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if kill {
 		g.kill(false)
+	} else if _, ok := g.sys.procs(); ok && g.sys.kill(-g.pgid, 0) == nil {
+		g.descend(0, false)
+		g.left = true
 	}
 	g.reaped = true
+}
+
+// held reports whether the group's ID is still this group's, as ps
+// shows it: the group was not left, or a process remembered as one of
+// its members, by its start time, still holds the ID. One that does
+// not may have been given to another group since. Without a table (ok
+// false) a left group is not held: nothing can tell.
+func (g *group) held(ps map[int]procInfo, ok bool) bool {
+	if !g.left {
+		return true
+	}
+	if !ok {
+		return false
+	}
+	for pid, start := range g.found {
+		if p, read := ps[pid]; read && p.start == start && p.pgrp == g.pgid {
+			return true
+		}
+	}
+	return false
+}
+
+// toGroup sends sig to the group's ID while it is held.
+func (g *group) toGroup(sig syscall.Signal) {
+	if g.left {
+		if ps, ok := g.sys.procs(); !g.held(ps, ok) {
+			return
+		}
+	}
+	g.sys.kill(-g.pgid, sig)
+}
+
+// look reports whether anything the left group's command left still
+// runs, as ps, one read of the table that read reports ok, shows it: a
+// process remembered, by its start time, or a member of the group while
+// its ID is held. While it is held, a walk first remembers what the
+// group has now, so a member started since the reap is found though the
+// processes that were found then exit. Local's watch gives every group
+// it keeps the same read. Without a read nothing is said to run.
+func (g *group) look(ps map[int]procInfo, read bool) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.left || !read {
+		return false
+	}
+	if g.held(ps, true) {
+		g.descendIn(ps, 0, false)
+	}
+	return g.runningIn(ps, false)
+}
+
+// leftRunning is look's answer on a read of the table of its own.
+func (g *group) leftRunning() bool {
+	g.mu.Lock()
+	left := g.left
+	g.mu.Unlock()
+	return left && g.look(g.sys.procs())
+}
+
+// endLeft ends what the left group's command left running, by the
+// ladder, the same one every end of a process climbs, as far as Reach
+// goes; it stops once nothing of it runs. Local's Close calls it.
+func (g *group) endLeft() {
+	for i, sig := range ladder {
+		if !g.leftRunning() {
+			return
+		}
+		g.mu.Lock()
+		if sig == syscall.SIGKILL {
+			g.kill(false)
+		} else {
+			g.descend(sig, false)
+			g.toGroup(sig)
+		}
+		g.mu.Unlock()
+		if i == len(ladder)-1 {
+			return
+		}
+		for deadline := time.Now().Add(grace); time.Now().Before(deadline) && g.leftRunning(); {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 }
 
 // kill kills the group and every descendant out of it, stopping them
@@ -134,7 +233,7 @@ func (g *group) reap(kill bool) {
 // no longer matches is continued: it is not a descendant, and the
 // kill's walk, which reads start times again, passes it by.
 func (g *group) kill(leader bool) {
-	g.sys.kill(-g.pgid, syscall.SIGSTOP)
+	g.toGroup(syscall.SIGSTOP)
 	stopped := map[int]uint64{}
 	for range 8 {
 		added, sent := g.descend(syscall.SIGSTOP, leader)
@@ -153,7 +252,7 @@ func (g *group) kill(leader bool) {
 		}
 	}
 	g.descend(syscall.SIGKILL, leader)
-	g.sys.kill(-g.pgid, syscall.SIGKILL)
+	g.toGroup(syscall.SIGKILL)
 	// A kill is sent, not done: what it reached dies when it next runs,
 	// and one inside a system call (a rename, say) finishes that first,
 	// so the end could return while the workspace is still being
@@ -167,7 +266,7 @@ func (g *group) kill(leader bool) {
 		}
 		time.Sleep(10 * time.Millisecond)
 		g.descend(syscall.SIGKILL, leader)
-		g.sys.kill(-g.pgid, syscall.SIGKILL)
+		g.toGroup(syscall.SIGKILL)
 	}
 }
 
@@ -179,15 +278,21 @@ func (g *group) running(leader bool) (running, ok bool) {
 	if !ok {
 		return false, false
 	}
+	return g.runningIn(ps, leader), true
+}
+
+// runningIn is running on ps, a read of the table.
+func (g *group) runningIn(ps map[int]procInfo, leader bool) bool {
+	byGroup := g.held(ps, true)
 	for pid, p := range ps {
 		if pid == g.pgid && !leader {
 			continue
 		}
-		if start, ok := g.found[pid]; (p.pgrp == g.pgid || ok && start == p.start) && !p.zombie {
-			return true, true
+		if start, ok := g.found[pid]; (byGroup && p.pgrp == g.pgid || ok && start == p.start) && !p.zombie {
+			return true
 		}
 	}
-	return false, true
+	return false
 }
 
 // descend sends sig to every descendant of the leader that left its
@@ -212,6 +317,11 @@ func (g *group) descend(sig syscall.Signal, leader bool) (int, map[int]uint64) {
 	if !ok {
 		return 0, nil
 	}
+	return g.descendIn(ps, sig, leader)
+}
+
+// descendIn is descend on ps, a read of the table.
+func (g *group) descendIn(ps map[int]procInfo, sig syscall.Signal, leader bool) (int, map[int]uint64) {
 	in := map[int]bool{}
 	// The leader may have been reaped by now though leader says not, as
 	// Exec's is before its output is read: its ID is trusted only while
@@ -219,8 +329,9 @@ func (g *group) descend(sig syscall.Signal, leader bool) (int, map[int]uint64) {
 	if p, ok := ps[g.pgid]; leader && ok && (g.start == 0 || p.start == g.start) {
 		in[g.pgid] = true
 	}
+	byGroup := g.held(ps, true)
 	for pid, p := range ps {
-		if start, ok := g.found[pid]; p.pgrp == g.pgid || ok && start == p.start {
+		if start, ok := g.found[pid]; byGroup && p.pgrp == g.pgid || ok && start == p.start {
 			in[pid] = true
 		}
 	}
@@ -259,16 +370,20 @@ func (g *group) descend(sig syscall.Signal, leader bool) (int, map[int]uint64) {
 			g.sys.kill(target, sig)
 		}
 	}
-	// One found before and not read now (gone, or its entry not
-	// readable this once) is kept: forgetting it would lose it for
-	// good once it has left the group and its parent has exited. A
-	// later walk seeds it only while its start time matches.
+	// One found before and not read now (its entry not readable this
+	// once, or gone) is kept for one more read: forgetting it would lose
+	// it for good once it has left the group and its parent has exited.
+	// One that the next read misses too is taken for gone, so a leftover
+	// that keeps starting children does not grow found without bound. A
+	// later walk seeds one kept only while its start time matches.
+	missed := map[int]int{}
 	for pid, start := range g.found {
-		if _, read := ps[pid]; !read {
+		if _, read := ps[pid]; !read && g.missed[pid] == 0 {
 			found[pid] = start
+			missed[pid] = 1
 		}
 	}
-	g.found = found
+	g.found, g.missed = found, missed
 	return added, signalled
 }
 

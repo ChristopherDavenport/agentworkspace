@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentworkspace"
@@ -19,13 +20,36 @@ import (
 
 func TestConformance(t *testing.T) {
 	workspacetest.Run(t,
-		workspacetest.Backend{Name: "remote", Links: true, Wire: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
-			return served(t, local(t, dir, pathEnv()))
+		workspacetest.Backend{Name: "remote", Links: true, Wire: true, CloseServed: closeServed, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+			return servedKept(t, local(t, dir, pathEnv()))
 		}},
-		workspacetest.Backend{Name: "remote, no links", Wire: true, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
-			return served(t, noLinks{local(t, dir, pathEnv())})
+		workspacetest.Backend{Name: "remote, no links", Wire: true, CloseServed: closeServed, Open: func(t *testing.T, dir string) agentworkspace.Workspace {
+			return servedKept(t, noLinks{local(t, dir, pathEnv())})
 		}},
 	)
+}
+
+// servedWorkspaces is the workspace each client of the tables serves,
+// for closeServed: a client's Close leaves it open, as a program's
+// does until it closes the workspace it served.
+var servedWorkspaces sync.Map // remote.Workspace -> agentworkspace.Workspace
+
+// servedKept is served, its workspace kept for closeServed.
+func servedKept(t *testing.T, ws agentworkspace.Workspace) remote.Workspace {
+	t.Helper()
+	c := served(t, ws)
+	servedWorkspaces.Store(c, ws)
+	t.Cleanup(func() { servedWorkspaces.Delete(c) })
+	return c
+}
+
+// closeServed closes the workspace the client c serves.
+func closeServed(t *testing.T, c agentworkspace.Workspace) {
+	ws, ok := servedWorkspaces.Load(c)
+	if !ok {
+		t.Fatal("no served workspace kept for this client")
+	}
+	ws.(agentworkspace.Workspace).Close()
 }
 
 func TestStarterConformance(t *testing.T) {

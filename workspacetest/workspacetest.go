@@ -526,6 +526,9 @@ func execTable(t *testing.T, dir string, ws Execer, env []string) {
 	if _, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"pwd"}, Dir: "file.txt"}); !errors.Is(err, fs.ErrInvalid) {
 		t.Errorf("a Dir that is a file: err = %v, want fs.ErrInvalid", err)
 	}
+	if _, err := ws.Exec(ctx, agentworkspace.Command{Args: []string{"pwd"}, Dir: "missing"}); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a Dir that is not there: err = %v, want fs.ErrNotExist", err)
+	}
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := ws.Exec(cctx, agentworkspace.Command{Args: []string{"sleep", "5"}}); err == nil {
@@ -544,7 +547,7 @@ func execTable(t *testing.T, dir string, ws Execer, env []string) {
 // is held over on every backend whose end reaches no orphan.
 func execCutShort(t *testing.T, ws Execer) {
 	ctx := context.Background()
-	check := func(t *testing.T, script string, mayEnd bool) {
+	check := func(t *testing.T, script string, status int, mayEnd bool) {
 		var out *agentworkspace.Output
 		var err error
 		start := time.Now()
@@ -555,12 +558,12 @@ func execCutShort(t *testing.T, ws Execer) {
 		if !ended && (!errors.Is(err, agentworkspace.ErrCutShort) || !errors.Is(err, exec.ErrWaitDelay)) {
 			t.Errorf("err = %v after %v, want ErrCutShort and exec.ErrWaitDelay", err, time.Since(start))
 		}
-		if out == nil || string(out.Stdout) != "hi\n" || out.ExitCode != 0 || out.Interrupted || out.TimedOut {
-			t.Errorf("Output = %+v, want what it wrote, hi, and status 0", out)
+		if out == nil || string(out.Stdout) != "hi\n" || out.ExitCode != status || out.Interrupted || out.TimedOut {
+			t.Errorf("Output = %+v, want what it wrote, hi, and status %d", out, status)
 		}
 	}
 	t.Run("output held by what the command left", func(t *testing.T) {
-		check(t, "sleep 10 & echo hi", true)
+		check(t, "sleep 10 & echo hi", 0, true)
 	})
 	t.Run("output held by what left the group", func(t *testing.T) {
 		if _, err := exec.LookPath("setsid"); err != nil {
@@ -568,7 +571,14 @@ func execCutShort(t *testing.T, ws Execer) {
 		}
 		// The pause lets setsid leave the group before the shell exits,
 		// which would otherwise end it with the group.
-		check(t, "setsid sleep 10 & sleep 0.5; echo hi", false)
+		check(t, "setsid sleep 10 & sleep 0.5; echo hi", 0, false)
+	})
+	// Whatever its status: cut-short comes beside the result.
+	t.Run("output held, a status other than zero", func(t *testing.T) {
+		if _, err := exec.LookPath("setsid"); err != nil {
+			t.Skip("no setsid here")
+		}
+		check(t, "setsid sleep 10 & sleep 0.5; echo hi; exit 3", 3, false)
 	})
 }
 

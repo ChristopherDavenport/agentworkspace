@@ -42,6 +42,7 @@ type Local struct {
 	procs  map[*localProcess]struct{} // started and not yet closed
 	conns  map[*localConn]struct{}    // connected and not yet closed
 	left   []*group                   // Execs' groups whose command exited by itself and left something running
+	watch  bool                       // watchLeft runs
 }
 
 var (
@@ -144,7 +145,14 @@ func (l *Local) Descriptor() Descriptor {
 // Close ends every process Start started that is not closed yet, as
 // Process.Close does, and what every Exec's command left running when
 // it exited, by the same ladder and as far as Reach goes, and releases
-// the directory handle.
+// the directory handle. It returns once they have ended, so it waits
+// through the ladder for a leftover that ignores a step: a background
+// job of a shell (`cmd &`) ignores SIGINT, so Close takes at least a
+// grace (two seconds) after one. What Exec left is ended only where
+// Local reads a process table (Linux, while /proc is its own): without
+// one it cannot tell the group's ID from one another group has taken
+// since, and leaves it running. An Exec still running when Close is
+// called ends what it left as it returns, which may be after Close.
 func (l *Local) Close() error {
 	l.mu.Lock()
 	l.closed = true
@@ -174,25 +182,12 @@ func (l *Local) Close() error {
 }
 
 // keepLeft keeps g, an Exec's group whose command exited by itself, for
-// Close to end, while anything it left runs; a workspace already
-// closing ends it now. The groups kept before that have nothing left
-// running are let go.
+// Close to end, while anything it left runs, and has watchLeft look at
+// it; a workspace already closing ends it now, before the Exec returns,
+// which may be after Close has.
 func (l *Local) keepLeft(g *group) {
 	if !g.leftRunning() {
 		return
-	}
-	l.mu.Lock()
-	closed, kept := l.closed, slices.Clone(l.left)
-	l.mu.Unlock()
-	if closed {
-		g.endLeft()
-		return
-	}
-	var gone []*group
-	for _, o := range kept {
-		if !o.leftRunning() {
-			gone = append(gone, o)
-		}
 	}
 	l.mu.Lock()
 	if l.closed {
@@ -200,9 +195,50 @@ func (l *Local) keepLeft(g *group) {
 		g.endLeft()
 		return
 	}
-	l.left = slices.DeleteFunc(l.left, func(o *group) bool { return slices.Contains(gone, o) })
 	l.left = append(l.left, g)
+	if !l.watch {
+		l.watch = true
+		go l.watchLeft()
+	}
 	l.mu.Unlock()
+}
+
+// leftLook is how often watchLeft looks at what Execs left.
+const leftLook = 250 * time.Millisecond
+
+// watchLeft looks at each kept group every leftLook, so a member one
+// starts is remembered while the group's ID is still its own, and lets
+// go of a group with nothing left running, or whose table could not be
+// read twice in a row. It ends at Close, or once no group is kept.
+func (l *Local) watchLeft() {
+	t := time.NewTicker(leftLook)
+	defer t.Stop()
+	for range t.C {
+		l.mu.Lock()
+		if l.closed || len(l.left) == 0 {
+			l.watch = false
+			l.mu.Unlock()
+			return
+		}
+		kept := slices.Clone(l.left)
+		l.mu.Unlock()
+		var gone []*group
+		for _, g := range kept {
+			running, ok := g.look()
+			switch {
+			case ok:
+				g.misses = 0
+			default:
+				g.misses++
+			}
+			if ok && !running || g.misses >= 2 {
+				gone = append(gone, g)
+			}
+		}
+		l.mu.Lock()
+		l.left = slices.DeleteFunc(l.left, func(g *group) bool { return slices.Contains(gone, g) })
+		l.mu.Unlock()
+	}
 }
 
 // FS reads through the root, opening without blocking.

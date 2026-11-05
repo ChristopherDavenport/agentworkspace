@@ -296,6 +296,7 @@ func startRefuses(t *testing.T, l agentworkspace.Starter) {
 		"a Dir out":      {agentworkspace.Command{Args: []string{"true"}, Dir: ".."}, agentworkspace.ErrOutside},
 		"a Dir via link": {agentworkspace.Command{Args: []string{"true"}, Dir: "linkdir"}, agentworkspace.ErrOutside},
 		"a Dir a file":   {agentworkspace.Command{Args: []string{"true"}, Dir: "inside.txt"}, fs.ErrInvalid},
+		"a Dir missing":  {agentworkspace.Command{Args: []string{"true"}, Dir: "missing"}, fs.ErrNotExist},
 		"Stdin bytes":    {agentworkspace.Command{Args: []string{"cat"}, Stdin: []byte("x")}, nil},
 	} {
 		p, err := l.Start(ctx, c.cmd)

@@ -29,20 +29,29 @@ versions may break the API.
   `exec.ErrWaitDelay` with no Output, and only for status 0; with
   another status they returned the Output with no error. remote carries
   it as code `cut_short`, beside the output in the exec reply's last
-  frame (an older client reads it as an error of no kind), and
+  frame (an older client reads it as an error of no kind and loses the
+  output), and
   mcpworkspace as kind `cutshort` (`wire.KindCutShort`). RFC 0001 §2
   and §6 state it; both wire corpora carry it; `workspacetest.Run` and
   `RunExec` check it.
 - Changed: what an Exec's command left running when it exited ends at
   the workspace's Close at the latest, by the ladder and as far as
   `Reach` goes (#45). `Local` remembers each such Exec's group and the
-  descendants it found, and its `Close` ends them; it signals the group
-  by its ID only while a process it remembered still holds that ID.
+  descendants it found, looks again at each every 250 ms so a member
+  started since is remembered, and its `Close` ends them, waiting
+  through the ladder: at least two seconds after a `cmd &`, which ignores
+  SIGINT. It signals the group by its ID only while a process it
+  remembered still holds that ID, and only where it reads a process
+  table (Linux, while /proc is its own); on macOS what an Exec leaves
+  still outlives Close. A member whose finders all exit within 250 ms of
+  its start escapes, and an Exec still running at Close ends what it left
+  as it returns, which may be after Close.
   remote's served workspace ends them at its own close, which is the
   program's; mcpworkspace's composed Exec already ended them at its
   return. RFC 0001 §6 and §8 state it. Added: `workspacetest.Run`'s
   `ExecLeftoversEndAtClose` table and `RunExec`'s "leftovers end at
-  close" case, and `CloseServed` on `Backend` and `ExecBackend`, to
+  close" case, cases for cut-short with a status other than zero and for
+  a missing `Dir` (*not-exist*), and `CloseServed` on `Backend` and `ExecBackend`, to
   close the workspace a wire's client is served by.
 
 ## v0.0.11 - 2026-11-01

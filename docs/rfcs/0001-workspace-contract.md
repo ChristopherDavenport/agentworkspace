@@ -182,6 +182,11 @@ on the client side as on the serving side; a wire MAY add kinds of its
 own (remote's `limit`, both wires' no-process), and a refusal of none
 of these is *other*.
 
+*cut-short* is the one kind that is not a refusal: it comes beside an
+Exec's result, which holds the output so far and the command's status
+([section 6](#6-exec)), never in place of one. It is in this table so
+that every wire carries it, and maps it back, as it does the others.
+
 A refusal's message is governed by [section 15](#15-security-considerations):
 it names no path of the serving side's machine.
 
@@ -249,7 +254,7 @@ A **command** is one process to run:
 | Member | Meaning |
 | --- | --- |
 | args | argv; MUST NOT be empty, and an empty one is refused before anything starts |
-| dir | a name of a directory, relative to the root; empty is the root. A dir that leaves the workspace, by name or through a link, is refused as *outside*; one that does not exist as *not-exist*; one that exists but is not a directory MUST be refused as *invalid*, before anything runs, on every workspace |
+| dir | a name of a directory, relative to the root; empty is the root. A dir that leaves the workspace, by name or through a link, is refused as *outside*; one that does not exist as *not-exist*, every workspace; one that exists but is not a directory MUST be refused as *invalid*, before anything runs, on every workspace |
 | env | entries over the workspace's environment, name by name ([section 4](#4-environment)) |
 | stdin | the bytes of standard input for Exec; none when absent. Start refuses it: a started process's input is its pipe |
 | timeout | ends the process, and everything it started, after this long; zero is no limit but the owner's |
@@ -340,8 +345,12 @@ it ended:
   backend's reach goes ([section 8](#8-ending-a-process)). A backend
   MAY end it sooner, and a caller MUST NOT rely on it running past the
   Exec's return. `Local` remembers the group, and the descendants it
-  found, of each Exec whose command left something running, and its
-  close ends them; mcpworkspace's composed Exec ends a leftover in the
+  found, of each Exec whose command left something running, looks again
+  at each while it runs, and its close ends them, waiting through the
+  ladder (at least a grace after `cmd &`, which ignores INT); where it
+  reads no process table it cannot, as [section 8](#8-ending-a-process)
+  says. An Exec still running at the close ends what it left as it
+  returns. mcpworkspace's composed Exec ends a leftover in the
   command's group at its return, as its start's process ends; remote's
   Exec belongs to no session, so what it leaves lives until the program
   closes the served workspace, whose close ends it.
@@ -459,11 +468,18 @@ When the process exits by itself, what it started MUST go with it.
 What an Exec's command left running when it exited ends at the
 workspace's close at the latest ([section 6](#6-exec)), by the same
 ladder. A backend that remembers such a group past its leader's exit
-SHOULD signal it by its ID only while a process it remembered as a
+MUST signal it by its ID only while a process it remembered as a
 member still holds that ID, since once they are gone another group may
-have taken it. `Local` does, where it reads a process table; where it
-reads none (macOS, a `/proc` not its own) it cannot tell, and signals
-the ID while it names a group.
+have taken it, and SHOULD look again while the group runs, so a member
+started since is remembered. A backend that cannot tell (no process
+table) MUST NOT signal the ID, and what an Exec left then outlives the
+close: this is a gap of such a backend, not a rule it meets. `Local`
+looks every 250 ms on Linux while `/proc` is its own, so a member whose
+finders all exit within one look of its start escapes the close; on
+macOS, or with a `/proc` not its own, it keeps nothing and ends nothing
+an Exec left. Pinning the group's ID by leaving its leader unreaped
+until the close (a `waitid` with `WNOWAIT`) would close both gaps; it
+is not done.
 
 **The ladder.** Every way a process is ended (its close, the end of its
 context, its timeout, the workspace's close, and an Exec's context or
@@ -1037,7 +1053,11 @@ corpus); draft 0.3 settles each, as its changes below say.
   Exec's command left running when it exited ends at the workspace's
   close at the latest, by the ladder and as far as the reach goes; a
   backend may end it sooner (#45). `Local`'s close ended only Start's
-  processes, so an Exec's `cmd &` outlived the workspace.
+  processes, so an Exec's `cmd &` outlived the workspace. A group
+  remembered past its leader's exit is signalled by its ID only while a
+  remembered member holds it; a backend with no process table signals
+  nothing, and that is stated as its gap. *cut-short* comes beside a
+  result, not as a refusal ([section 2](#error-kinds)).
   `workspacetest`'s `Backend` and `ExecBackend` gain `CloseServed`, to
   close the workspace a wire's client is served by.
 

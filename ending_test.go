@@ -289,3 +289,67 @@ func TestALeftGroupsReusedIDIsNotSignalled(t *testing.T) {
 		t.Errorf("signals = %q; want none to a group that took the ID", f.sent)
 	}
 }
+
+// Without a process table the group's ID cannot be told from one
+// another group has taken since, so what an Exec's command left is not
+// kept, and nothing is signalled for it: it stays as a backend whose
+// reach is the group left it before (RFC 0001 §8).
+func TestALeftGroupIsNotKeptWithoutATable(t *testing.T) {
+	var sent []string
+	g := &group{pgid: 100, start: 1, sys: procOS{
+		table: func() (map[int]procInfo, bool) { return nil, false },
+		start: func(int) (uint64, bool) { return 0, false },
+		send: func(pid int, sig syscall.Signal) error {
+			if sig != 0 {
+				sent = append(sent, fmt.Sprintf("%v %d", sig, pid))
+			}
+			return nil
+		},
+	}}
+	g.reap(false)
+	if g.leftRunning() {
+		t.Error("a left group reads as running without a table")
+	}
+	g.endLeft()
+	if len(sent) != 0 {
+		t.Errorf("signals = %q; want none without a table", sent)
+	}
+}
+
+// A member of the group an Exec's command left that is started after
+// the walk at the reap, and whose finders then exit, is still ended at
+// Close: what is kept is looked at again while it runs, so the member
+// is remembered while the group's ID is still its own.
+func TestALeftMemberStartedLaterEndsAtClose(t *testing.T) {
+	if _, ok := processes(); !ok {
+		t.Skip("no process table of this process's own")
+	}
+	l, dir := local(t, []string{"PATH=" + os.Getenv("PATH")})
+	if err := os.WriteFile(filepath.Join(dir, "beat.sh"), []byte("trap '' INT TERM HUP\ni=0\nwhile [ $i -lt 300 ]; do i=$((i+1)); echo $i > beat.tmp && mv beat.tmp beat; sleep 0.1; done\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The subshell starts beat.sh a second in, and exits half a second
+	// after; the sleep that ran first exits before either.
+	out, err := l.Exec(context.Background(), Command{Args: []string{"sh", "-c", "(sleep 1; sh beat.sh & sleep 1.5) </dev/null >/dev/null 2>&1 & echo started"}})
+	if err != nil || string(out.Stdout) != "started\n" {
+		t.Fatalf("Exec = %+v, %v", out, err)
+	}
+	time.Sleep(3 * time.Second) // the subshell and its sleeps have exited
+	beating := func() bool {
+		first, _ := os.ReadFile(filepath.Join(dir, "beat"))
+		for range 10 {
+			time.Sleep(100 * time.Millisecond)
+			if b, _ := os.ReadFile(filepath.Join(dir, "beat")); len(b) > 0 && !bytes.Equal(b, first) {
+				return true
+			}
+		}
+		return false
+	}
+	if !beating() {
+		t.Fatal("beat.sh never beat")
+	}
+	l.Close()
+	if beating() {
+		t.Error("a member started after the reap outlived Close")
+	}
+}

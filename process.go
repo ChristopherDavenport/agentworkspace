@@ -40,17 +40,21 @@ var ladder = [...]syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKIL
 type group struct {
 	pgid  int
 	start uint64 // the leader's start time; 0 when unknown
-	// mu is held while a signal is sent and while reaped is set, so no
-	// signal goes to the group's ID once its leader is reaped.
+	// mu is held while a signal is sent and while reaped is set, so
+	// signal sends nothing to the group's ID once its leader is reaped.
+	// Only endLeft signals a reaped group, and only while held says its
+	// ID is still its own.
 	mu     sync.Mutex
 	reaped bool
 	// left says the leader exited by itself and was reaped while
-	// something of its group still ran: an Exec's leftovers, which the
-	// workspace's Close ends (endLeft). The group's ID is then trusted
-	// only while a process remembered as a member still holds it (held).
-	left  bool
-	sys   procOS
-	found map[int]uint64 // descendants found so far, in the group or out of it, by pid, with their start time
+	// something of its group still ran, and a process table could be
+	// read: an Exec's leftovers, which the workspace's Close ends
+	// (endLeft). The group's ID is then trusted only while a process
+	// remembered as a member still holds it (held).
+	left   bool
+	misses int // reads of the table in a row that failed, for Local's watch
+	sys    procOS
+	found  map[int]uint64 // descendants found so far, in the group or out of it, by pid, with their start time
 }
 
 // newGroup is the group of the process pid, just started.
@@ -119,14 +123,15 @@ func (g *group) signal(sig syscall.Signal) error {
 // is set. Here, as the leader is reaped, the group's ID cannot yet name
 // another group; later it could. So when kill is not set and something
 // of the group still runs, a walk remembers it now, with its start
-// time, and the group is marked left, for endLeft.
+// time, and the group is marked left, for endLeft. Without a process
+// table nothing could later tell the group's ID from one another group
+// has taken, so the group is not marked, and what it left is not ended.
 func (g *group) reap(kill bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	switch {
-	case kill:
+	if kill {
 		g.kill(false)
-	case g.sys.kill(-g.pgid, 0) == nil:
+	} else if _, ok := g.sys.procs(); ok && g.sys.kill(-g.pgid, 0) == nil {
 		g.descend(0, false)
 		g.left = true
 	}
@@ -136,11 +141,14 @@ func (g *group) reap(kill bool) {
 // held reports whether the group's ID is still this group's, as ps
 // shows it: the group was not left, or a process remembered as one of
 // its members, by its start time, still holds the ID. One that does
-// not may have been given to another group since. Without a table it
-// is taken to be held: a group's reach is the group's ID alone there.
+// not may have been given to another group since. Without a table (ok
+// false) a left group is not held: nothing can tell.
 func (g *group) held(ps map[int]procInfo, ok bool) bool {
-	if !g.left || !ok {
+	if !g.left {
 		return true
+	}
+	if !ok {
+		return false
 	}
 	for pid, start := range g.found {
 		if p, read := ps[pid]; read && p.start == start && p.pgrp == g.pgid {
@@ -160,20 +168,31 @@ func (g *group) toGroup(sig syscall.Signal) {
 	g.sys.kill(-g.pgid, sig)
 }
 
-// leftRunning reports whether anything the left group's command left
-// still runs: a process remembered, by its start time, or a member of
-// the group while its ID is held; without a table, whether the group's
-// ID names a group at all.
-func (g *group) leftRunning() bool {
+// look reports whether anything the left group's command left still
+// runs: a process remembered, by its start time, or a member of the
+// group while its ID is held. While it is held, a walk first remembers
+// what the group has now, so a member started since the reap is found
+// though the processes that were found then exit. ok is false when the
+// table could not be read; nothing is then said to run.
+func (g *group) look() (running, ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !g.left {
-		return false
+		return false, true
 	}
-	if _, ok := g.sys.procs(); !ok {
-		return g.sys.kill(-g.pgid, 0) == nil
+	ps, ok := g.sys.procs()
+	if !ok {
+		return false, false
 	}
-	running, _ := g.running(false)
+	if g.held(ps, true) {
+		g.descend(0, false)
+	}
+	return g.running(false)
+}
+
+// leftRunning is look's running.
+func (g *group) leftRunning() bool {
+	running, _ := g.look()
 	return running
 }
 
